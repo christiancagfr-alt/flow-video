@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.minimal",
+  "name": "极简无底",
+  "category": "基础",
+  "tags": [
+    "极简",
+    "无底框"
+  ],
+  "description": "无底框、柔和阴影，适合背景较干净的视频.",
+  "style": {
+    "size": 50,
+    "color": "#FFFFFF",
+    "position": "底部居中",
+    "weight": 700,
+    "strokeColor": "#000000",
+    "strokeWidth": 0,
+    "background": false,
+    "backgroundColor": "#000000",
+    "backgroundOpacity": 0,
+    "shadow": true,
+    "shadowBlur": 14,
+    "shadowY": 4,
+    "radius": 0,
+    "paddingX": 10,
+    "paddingY": 8,
+    "animation": "无",
+    "maxWidth": 86,
+    "lineHeight": 1.28,
+    "letterSpacing": 0
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.karaoke-yellow",
+  "name": "卡拉OK黄色高亮",
+  "category": "卡拉OK",
+  "tags": [
+    "卡拉OK",
+    "黄色",
+    "逐词"
+  ],
+  "description": "保持白色正文，当前词切换为亮黄色并轻微放大.",
+  "style": {
+    "size": 60,
+    "color": "#FFFFFF",
+    "position": "底部居中",
+    "weight": 900,
+    "strokeColor": "#000000",
+    "strokeWidth": 6,
+    "background": false,
+    "backgroundColor": "#000000",
+    "backgroundOpacity": 0,
+    "shadow": true,
+    "shadowBlur": 12,
+    "shadowY": 4,
+    "radius": 16,
+    "paddingX": 18,
+    "paddingY": 10,
+    "animation": "无",
+    "maxWidth": 90,
+    "lineHeight": 1.16,
+    "letterSpacing": 0,
+    "karaokeEnabled": true,
+    "karaokeMode": "逐词高亮",
+    "karaokeActiveColor": "#FFEB3B",
+    "karaokeReadColor": "#FFFFFF",
+    "karaokeUnreadColor": "#FFFFFF",
+    "karaokeActiveScale": 114,
+    "karaokeTiming": "auto"
+  }
+}

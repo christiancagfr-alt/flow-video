@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.soft-glass",
+  "name": "柔和半透明",
+  "category": "基础",
+  "tags": [
+    "半透明",
+    "柔和"
+  ],
+  "description": "半透明深色底，画面干净、视觉柔和.",
+  "style": {
+    "size": 50,
+    "color": "#FFFFFF",
+    "position": "底部居中",
+    "weight": 700,
+    "strokeColor": "#000000",
+    "strokeWidth": 0,
+    "background": true,
+    "backgroundColor": "#111111",
+    "backgroundOpacity": 42,
+    "shadow": true,
+    "shadowBlur": 8,
+    "shadowY": 3,
+    "radius": 20,
+    "paddingX": 22,
+    "paddingY": 12,
+    "animation": "淡入",
+    "maxWidth": 86,
+    "lineHeight": 1.28,
+    "letterSpacing": 0
+  }
+}

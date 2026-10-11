@@ -1,0 +1,2 @@
+# Tested release runtime, including pinned transitive dependencies.
+-r requirements-release.lock

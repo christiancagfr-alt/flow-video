@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.yellow-emphasis",
+  "name": "醒目黄字",
+  "category": "短视频",
+  "tags": [
+    "黄色",
+    "强调"
+  ],
+  "description": "高对比黄色重点风格，适合强调信息.",
+  "style": {
+    "size": 58,
+    "color": "#FFD54A",
+    "position": "底部居中",
+    "weight": 900,
+    "strokeColor": "#151515",
+    "strokeWidth": 5,
+    "background": false,
+    "backgroundColor": "#000000",
+    "backgroundOpacity": 0,
+    "shadow": true,
+    "shadowBlur": 10,
+    "shadowY": 4,
+    "radius": 16,
+    "paddingX": 18,
+    "paddingY": 10,
+    "animation": "轻微放大",
+    "maxWidth": 88,
+    "lineHeight": 1.18,
+    "letterSpacing": 0
+  }
+}

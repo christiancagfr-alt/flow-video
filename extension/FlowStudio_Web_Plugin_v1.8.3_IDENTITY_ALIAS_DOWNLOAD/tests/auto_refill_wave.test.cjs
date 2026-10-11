@@ -1,0 +1,16 @@
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),vm=require('node:vm');
+const source=fs.readFileSync(path.join(__dirname,'../content.js'),'utf8');
+assert.doesNotMatch(source,/请在 Studio 发起新的批次指令/,'completed wave must not require manual new-batch instruction');
+assert.match(source,/const newIdentity = incomingWork;/,'task-wave identity must drive job adoption');
+assert.match(source,/FS_FORCE_SYNC[\s\S]*setTimeout\(\(\)=>pullJob\(\),120\)/,'finished wave should immediately request next Studio work');
+assert.match(source,/state\.generationCommand=executionKey/,'generation gate must use task-wave execution key, not command_id alone');
+const a=source.indexOf('  function jobBaseIdentity('),b=source.indexOf('  function getExpectedNames(');
+const code=source.slice(a,b).replace(/function readStartedWaves[\s\S]*/,'');
+const ctx=vm.createContext({basename:p=>String(p||'').split(/[\\/]/).pop()});
+vm.runInContext(code,ctx);
+const j1={channel_key:'CH1',image_set_id:'set',command_id:'cmd',generation_count:1,tasks:[{segment_id:1,task_id:'01-01',image_path:'/a/1.jpg'},{segment_id:2,task_id:'01-02',image_path:'/a/2.jpg'}]};
+const j1Reordered={...j1,tasks:[j1.tasks[1],j1.tasks[0]]};
+const j2={...j1,tasks:[...j1.tasks,{segment_id:3,task_id:'01-03',image_path:'/a/3.jpg'}]};
+assert.equal(vm.runInContext('jobExecutionKey',ctx)(j1),vm.runInContext('jobExecutionKey',ctx)(j1Reordered),'reordering the same task wave must not create a new execution');
+assert.notEqual(vm.runInContext('jobExecutionKey',ctx)(j1),vm.runInContext('jobExecutionKey',ctx)(j2),'same command with refilled tasks must become a new execution wave');
+console.log('PASS: same command can accept a new refilled task wave without duplicating the unchanged wave');

@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.karaoke-strong",
+  "name": "卡拉OK强强调描边",
+  "category": "卡拉OK",
+  "tags": [
+    "卡拉OK",
+    "强强调",
+    "描边"
+  ],
+  "description": "粗黑描边 + 当前词高亮放大，适合背景复杂和强节奏视频.",
+  "style": {
+    "size": 64,
+    "color": "#F7F7F7",
+    "position": "底部居中",
+    "weight": 900,
+    "strokeColor": "#050505",
+    "strokeWidth": 7,
+    "background": false,
+    "backgroundColor": "#000000",
+    "backgroundOpacity": 0,
+    "shadow": true,
+    "shadowBlur": 14,
+    "shadowY": 5,
+    "radius": 16,
+    "paddingX": 18,
+    "paddingY": 10,
+    "animation": "轻微放大",
+    "maxWidth": 92,
+    "lineHeight": 1.14,
+    "letterSpacing": 0,
+    "karaokeEnabled": true,
+    "karaokeMode": "逐词高亮",
+    "karaokeActiveColor": "#FFE04B",
+    "karaokeReadColor": "#FFFFFF",
+    "karaokeUnreadColor": "#BEBEBE",
+    "karaokeActiveScale": 118,
+    "karaokeTiming": "auto"
+  }
+}

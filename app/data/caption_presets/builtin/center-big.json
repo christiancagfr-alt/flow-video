@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.center-big",
+  "name": "大字居中",
+  "category": "短视频",
+  "tags": [
+    "居中",
+    "重点"
+  ],
+  "description": "超大居中字幕，适合一句话重点强调.",
+  "style": {
+    "size": 72,
+    "color": "#FFFFFF",
+    "position": "居中",
+    "weight": 900,
+    "strokeColor": "#000000",
+    "strokeWidth": 6,
+    "background": false,
+    "backgroundColor": "#000000",
+    "backgroundOpacity": 0,
+    "shadow": true,
+    "shadowBlur": 12,
+    "shadowY": 5,
+    "radius": 16,
+    "paddingX": 18,
+    "paddingY": 10,
+    "animation": "弹入",
+    "maxWidth": 90,
+    "lineHeight": 1.12,
+    "letterSpacing": 0
+  }
+}

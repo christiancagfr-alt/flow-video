@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.top-clean",
+  "name": "顶部简洁",
+  "category": "基础",
+  "tags": [
+    "顶部",
+    "简洁"
+  ],
+  "description": "顶部小字幕，不遮挡人物下半部和主体.",
+  "style": {
+    "size": 46,
+    "color": "#FFFFFF",
+    "position": "顶部居中",
+    "weight": 800,
+    "strokeColor": "#000000",
+    "strokeWidth": 2,
+    "background": true,
+    "backgroundColor": "#000000",
+    "backgroundOpacity": 38,
+    "shadow": true,
+    "shadowBlur": 7,
+    "shadowY": 2,
+    "radius": 14,
+    "paddingX": 18,
+    "paddingY": 9,
+    "animation": "淡入",
+    "maxWidth": 84,
+    "lineHeight": 1.2,
+    "letterSpacing": 0
+  }
+}

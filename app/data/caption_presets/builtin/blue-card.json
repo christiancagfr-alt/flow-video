@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.blue-card",
+  "name": "清爽蓝底",
+  "category": "基础",
+  "tags": [
+    "蓝底",
+    "信息"
+  ],
+  "description": "蓝色圆角底 + 上滑入场，现代信息风格.",
+  "style": {
+    "size": 50,
+    "color": "#FFFFFF",
+    "position": "底部居中",
+    "weight": 800,
+    "strokeColor": "#000000",
+    "strokeWidth": 0,
+    "background": true,
+    "backgroundColor": "#245B9E",
+    "backgroundOpacity": 82,
+    "shadow": false,
+    "shadowBlur": 0,
+    "shadowY": 0,
+    "radius": 16,
+    "paddingX": 22,
+    "paddingY": 11,
+    "animation": "上滑",
+    "maxWidth": 86,
+    "lineHeight": 1.22,
+    "letterSpacing": 0
+  }
+}

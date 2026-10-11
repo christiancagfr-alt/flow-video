@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.church-gold",
+  "name": "教堂金色",
+  "category": "宗教",
+  "tags": [
+    "教堂",
+    "祷告",
+    "金色"
+  ],
+  "description": "暖金色 + 深色描边，适合教堂和祷告类画面.",
+  "style": {
+    "size": 54,
+    "color": "#F5D77A",
+    "position": "底部居中",
+    "weight": 800,
+    "strokeColor": "#3A2A12",
+    "strokeWidth": 3,
+    "background": false,
+    "backgroundColor": "#000000",
+    "backgroundOpacity": 0,
+    "shadow": true,
+    "shadowBlur": 12,
+    "shadowY": 4,
+    "radius": 16,
+    "paddingX": 18,
+    "paddingY": 10,
+    "animation": "淡入",
+    "maxWidth": 88,
+    "lineHeight": 1.22,
+    "letterSpacing": 0
+  }
+}

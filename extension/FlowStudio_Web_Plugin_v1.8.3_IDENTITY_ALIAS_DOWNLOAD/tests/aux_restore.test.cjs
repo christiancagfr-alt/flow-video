@@ -1,0 +1,17 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const root=path.join(__dirname,'..'),page=fs.readFileSync(path.join(root,'page-engine.js'),'utf8');
+const context=vm.createContext({Set,JSON,Object,Array,Error,hasTarget:(v,ids)=>JSON.stringify(v).split(/[^a-z0-9_-]+/i).some(x=>ids.has(x))});
+vm.runInContext(page.slice(page.indexOf('  function assertAuxRequest('),page.indexOf('  function installFlowVideoStatusBridge(')),context);
+const check=vm.runInContext('assertAuxRequest',context),ticket=()=>({requireAux:true,requiredStartIds:['start-asset'],requiredEndIds:['end-asset']});
+check(JSON.stringify({requests:[{startImage:{mediaId:'start-asset'},endImage:{mediaId:'end-asset'}}]}),ticket());
+for(const body of ['not-json',JSON.stringify({startImage:{mediaId:'start-asset'}}),JSON.stringify({startImage:{mediaId:'wrong'},endImage:{mediaId:'end-asset'}}),JSON.stringify({requests:[{startImage:'start-asset',endImage:'end-asset'},{startImage:'start-asset'}]})])assert.throws(()=>check(body,ticket()),/AUX_FRAMES_MISSING/);
+check('unrelated ordinary video',{requireAux:false});
+const source=fs.readFileSync(path.join(root,'aux-downloads.js'),'utf8');
+const c=vm.createContext({URL});vm.runInContext(source.slice(source.indexOf('function auxDownloadMatches'),source.indexOf('chrome.downloads.onDeterminingFilename')),c);
+const matches=vm.runInContext('auxDownloadMatches',c),job={media_id:'media-1234'};
+assert.equal(matches({mime:'image/png',url:'https://flow-content.google/image/media-1234'},job),true);
+assert.equal(matches({mime:'video/mp4',url:'https://flow-content.google/image/media-1234'},job),false);
+assert.equal(matches({mime:'image/png',url:'https://evil.example/media-1234'},job),false);
+assert.equal(matches({mime:'image/png',url:'https://flow-content.google/image/something-else'},job),false);
+assert.match(page,/assertAuxRequest\(body,pending\)/);assert.match(page,/assertAuxRequest\(args\[0\],pending\)/);
+console.log('PASS auxiliary requests require both exact frames; unrelated downloads cannot become auxiliary endpoints');

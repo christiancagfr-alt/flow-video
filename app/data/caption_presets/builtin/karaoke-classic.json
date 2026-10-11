@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.karaoke-classic",
+  "name": "卡拉OK经典逐词高亮",
+  "category": "卡拉OK",
+  "tags": [
+    "卡拉OK",
+    "逐词",
+    "高亮"
+  ],
+  "description": "当前词黄色高亮；已读白色、未读浅灰。优先使用词级时间戳，没有时按该字幕段词数自动估算.",
+  "style": {
+    "size": 58,
+    "color": "#FFFFFF",
+    "position": "底部居中",
+    "weight": 900,
+    "strokeColor": "#111111",
+    "strokeWidth": 5,
+    "background": false,
+    "backgroundColor": "#000000",
+    "backgroundOpacity": 0,
+    "shadow": true,
+    "shadowBlur": 10,
+    "shadowY": 4,
+    "radius": 16,
+    "paddingX": 18,
+    "paddingY": 10,
+    "animation": "淡入",
+    "maxWidth": 90,
+    "lineHeight": 1.18,
+    "letterSpacing": 0,
+    "karaokeEnabled": true,
+    "karaokeMode": "逐词高亮",
+    "karaokeActiveColor": "#FFD54A",
+    "karaokeReadColor": "#FFFFFF",
+    "karaokeUnreadColor": "#C9C9C9",
+    "karaokeActiveScale": 110,
+    "karaokeTiming": "auto"
+  }
+}

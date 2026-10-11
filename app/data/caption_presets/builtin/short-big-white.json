@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.short-big-white",
+  "name": "短视频大白字",
+  "category": "短视频",
+  "tags": [
+    "Reels",
+    "Shorts",
+    "大字"
+  ],
+  "description": "大字 + 弹入，适合短视频强节奏口播.",
+  "style": {
+    "size": 62,
+    "color": "#FFFFFF",
+    "position": "底部居中",
+    "weight": 900,
+    "strokeColor": "#000000",
+    "strokeWidth": 6,
+    "background": false,
+    "backgroundColor": "#000000",
+    "backgroundOpacity": 0,
+    "shadow": true,
+    "shadowBlur": 12,
+    "shadowY": 4,
+    "radius": 16,
+    "paddingX": 18,
+    "paddingY": 10,
+    "animation": "弹入",
+    "maxWidth": 90,
+    "lineHeight": 1.16,
+    "letterSpacing": 0
+  }
+}

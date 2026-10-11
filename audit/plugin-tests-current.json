@@ -1,0 +1,162 @@
+[
+  {
+    "file": "auto_refill_wave.test.cjs",
+    "ok": true,
+    "detail": "PASS: same command can accept a new refilled task wave without duplicating the unchanged wave\n"
+  },
+  {
+    "file": "aux_restore.test.cjs",
+    "ok": true,
+    "detail": "PASS auxiliary requests require both exact frames; unrelated downloads cannot become auxiliary endpoints\n"
+  },
+  {
+    "file": "background_regression.test.cjs",
+    "ok": true,
+    "detail": "PASS hidden/unfocused one-read asset readiness; mode drift diagnostic; real upload errors block; single retry path; uncertain timeout no duplicate; real engine mutex serialization\n"
+  },
+  {
+    "file": "background_upload_busy.test.cjs",
+    "ok": true,
+    "detail": "PASS: unrelated page busy does not block first upload; true per-image retry ledger still caps attempts at 3\n"
+  },
+  {
+    "file": "batch_identity.test.cjs",
+    "ok": true,
+    "detail": "[FlowStudio download] {\n  time: '2026-10-11T05:36:46.299Z',\n  stage: 'DOWNLOAD_TARGET_RESERVED',\n  group: 'https://flow.google.com/project/p',\n  task_type: 'VIDEO',\n  channel_key: 'CH',\n  video_id: undefined,\n  shot_id: undefined,\n  download_folder: undefined,\n  download_name: '01-01-S000101',\n  targetFolder: 'FlowStudio_Channels/CH',\n  targetFilename: '01-01-S000101',\n  relativeFilename: 'FlowStudio_Channels/CH/01-01-S000101.mp4',\n  task_id: '01-01',\n  task_name: undefined,\n  filename: 'FlowStudio_Channels/CH/01-01-S000101.mp4',\n  command_id: 'batch',\n  round: 1\n}\n[FlowStudio download] {\n  time: '2026-10-11T05:36:46.303Z',\n  stage: 'DOWNLOAD_TARGET_RESERVED',\n  group: 'https://flow.google.com/project/p',\n  task_type: 'VIDEO',\n  channel_key: 'CH',\n  video_id: undefined,\n  shot_id: undefined,\n  download_folder: undefined,\n  download_name: '01-01-S000202',\n  targetFolder: 'FlowStudio_Channels/CH',\n  targetFilename: '01-01-S000202',\n  relativeFilename: 'FlowStudio_Channels/CH/01-01-S000202.mp4',\n  task_id: '01-01',\n  task_name: undefined,\n  filename: 'FlowStudio_Channels/CH/01-01-S000202.mp4',\n  command_id: 'batch',\n  round: 1\n}\nPASS: duplicate display numbers across hosts stay distinct; same-segment/legacy reservations remain idempotent\n"
+  },
+  {
+    "file": "batch_preflight_mutex.test.cjs",
+    "ok": true,
+    "detail": "PASS concurrent wake cannot duplicate upload preflight or wave start\n"
+  },
+  {
+    "file": "bg3_composer_readiness.test.cjs",
+    "ok": true,
+    "detail": "PASS current Composer, multiple aliases, old/hidden/zero-size image exclusion, nearest preview, background execution, dynamic button wait\n"
+  },
+  {
+    "file": "bg3_retry_bounds.test.cjs",
+    "ok": true,
+    "detail": "PASS pre-click transient failures wait through slow readiness (37 attempts maximum); ambiguous/post-click failures never repeat submission\n"
+  },
+  {
+    "file": "bridge_reconnect.test.cjs",
+    "ok": true,
+    "detail": "PASS: failed HTTP retains receipts; reconnect prioritizes exact failure; redundant snapshots coalesced\n"
+  },
+  {
+    "file": "channel_focus.test.cjs",
+    "ok": true,
+    "detail": "PASS: owner profile only, exact channel URL, real window focus, no duplicate activation\n"
+  },
+  {
+    "file": "cross_wave_interval.test.cjs",
+    "ok": true,
+    "detail": "PASS: task spacing survives completed-wave release and auto-refill; Studio intervalRandom is honored\n"
+  },
+  {
+    "file": "download_recovery.test.cjs",
+    "ok": true,
+    "detail": "PASS: old completions requeued once; storage failure remains retryable\n"
+  },
+  {
+    "file": "duration_choice.test.cjs",
+    "ok": true,
+    "detail": "PASS duration choice: explicit force accepts 8 seconds; unresolved long dialogue blocks; valid durations preserved\n"
+  },
+  {
+    "file": "frame_timing.test.cjs",
+    "ok": true,
+    "detail": "PASS: first-frame identity required; per-task timing and FRAME/MATERIAL mode forwarded; nested failures recognized; history excluded\nPASS: real configure and verifySettings apply all three durations\n"
+  },
+  {
+    "file": "generation_failure.test.cjs",
+    "ok": true,
+    "detail": "[FlowStudio download] {\n  time: '2026-10-11T05:36:47.661Z',\n  stage: 'DOWNLOAD_TARGET_RESERVED',\n  group: 'https://flow.google.com/project/a',\n  task_type: 'VIDEO',\n  channel_key: 'CH',\n  video_id: undefined,\n  shot_id: undefined,\n  download_folder: undefined,\n  download_name: undefined,\n  targetFolder: 'FlowStudio_Channels/CH',\n  targetFilename: 'task-1791697007661',\n  relativeFilename: 'FlowStudio_Channels/CH/task-1791697007661.mp4',\n  task_id: undefined,\n  task_name: undefined,\n  filename: 'FlowStudio_Channels/CH/task-1791697007661.mp4',\n  command_id: 'cmd',\n  round: 1\n}\nPASS: real generation failures report once with exact command and segment; catalog failure recognized\n"
+  },
+  {
+    "file": "identity_conflict.test.cjs",
+    "ok": true,
+    "detail": "[FlowStudio download] {\n  time: '2026-10-11T05:36:47.785Z',\n  stage: 'DOWNLOAD_TARGET_RESERVED',\n  group: 'https://flow.google.com/x',\n  task_type: 'VIDEO',\n  channel_key: 'CH',\n  video_id: undefined,\n  shot_id: undefined,\n  download_folder: undefined,\n  download_name: undefined,\n  targetFolder: 'FlowStudio_Channels/CH',\n  targetFilename: 'task-1791697007785',\n  relativeFilename: 'FlowStudio_Channels/CH/task-1791697007785.mp4',\n  task_id: undefined,\n  task_name: undefined,\n  filename: 'FlowStudio_Channels/CH/task-1791697007785.mp4',\n  command_id: 'c',\n  round: 1\n}\n[FlowStudio download] {\n  time: '2026-10-11T05:36:47.789Z',\n  stage: 'DOWNLOAD_TARGET_RESERVED',\n  group: 'https://flow.google.com/y',\n  task_type: 'VIDEO',\n  channel_key: 'CH',\n  video_id: undefined,\n  shot_id: undefined,\n  download_folder: undefined,\n  download_name: undefined,\n  targetFolder: 'FlowStudio_Channels/CH',\n  targetFilename: 'task-1791697007789',\n  relativeFilename: 'FlowStudio_Channels/CH/task-1791697007789.mp4',\n  task_id: undefined,\n  task_name: undefined,\n  filename: 'FlowStudio_Channels/CH/task-1791697007789.mp4',\n  command_id: 'd',\n  round: 1\n}\nPASS: cross-channel duplicate result rejected; image dimensions/timestamps cannot identify first frame; request-ID guessing removed\n"
+  },
+  {
+    "file": "panel_scroll.test.cjs",
+    "ok": true,
+    "detail": "PASS: actual panel render preserves scroll across five DOM replacements\n"
+  },
+  {
+    "file": "performance_lifecycle.test.cjs",
+    "ok": true,
+    "detail": "PASS restored fixed polling with no idle/visibility gate; bounded thumbnail cleanup retained\n"
+  },
+  {
+    "file": "ready_gate_recovery.test.cjs",
+    "ok": true,
+    "detail": "PASS: stale processing UI cannot block READY; manual revalidation stays available\n"
+  },
+  {
+    "file": "upload_batches.test.cjs",
+    "ok": true,
+    "detail": "PASS: 45 images upload as 20/20/5 without immediate duplicates; stale unverified batch becomes retryable\n"
+  },
+  {
+    "file": "upload_retry_cap.test.cjs",
+    "ok": true,
+    "detail": "PASS: one missing image is automatically attempted at most 3 times, then a final explicit failure is emitted\n"
+  },
+  {
+    "file": "v0947_scheduler_truth.test.cjs",
+    "ok": true,
+    "detail": "PASS: v0.9.47 scheduler-truth heartbeat present\n"
+  },
+  {
+    "file": "v0964_refresh_stall_failure_name_persistence.test.cjs",
+    "ok": true,
+    "detail": "PASS refresh-stall readiness fallback and persistent failed-image-name history\n"
+  },
+  {
+    "file": "v176_reference_download_material_sync.test.cjs",
+    "ok": true,
+    "detail": "✔ reference-style status response publishes immediate VIDEO ready keyed by media name (7.1511ms)\n✔ MATERIAL is inherited independently from explicit auxiliary endpoints (3.2513ms)\n✔ Chrome download creation no longer waits for prior downloading item to complete (0.364ms)\nℹ tests 3\nℹ suites 0\nℹ pass 3\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 20.6292\n"
+  },
+  {
+    "file": "v177_preupload_dedup.test.cjs",
+    "ok": true,
+    "detail": "PASS v1.7.7: duplicate existing images are reused before upload and do not block task mapping\n"
+  },
+  {
+    "file": "v178_response_media_bind.test.cjs",
+    "ok": true,
+    "detail": "✔ generation response media.name binds the currently clicked task immediately (4.4063ms)\n✔ reference-style framed status response parses SUCCESSFUL and direct video URL (2.6486ms)\n✔ post-click missing response is uncertain and never automatic safe retry (0.393ms)\n✔ existing CDP Generate submission path remains intact (1.5527ms)\nℹ tests 4\nℹ suites 0\nℹ pass 4\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 18.7324\n"
+  },
+  {
+    "file": "v179_waiting_video_keepalive.test.cjs",
+    "ok": true,
+    "detail": "✔ v179 starts conditional keepalive from accepted generation media id (1.2365ms)\n✔ v179 releases keepalive on terminal Flow status response (0.3294ms)\n✔ v179 preserves existing CDP Generate submission path (0.4551ms)\nℹ tests 3\nℹ suites 0\nℹ pass 3\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 12.6261\n"
+  },
+  {
+    "file": "v180_reference_batch_download.test.cjs",
+    "ok": true,
+    "detail": "✔ reference-style result parsing remains available without document-start antifreeze (1.4331ms)\n✔ reference XHR video scan is gated until a confirmed waiting media id exists (0.4504ms)\n✔ known-working CDP submit path is preserved (0.2893ms)\nℹ tests 3\nℹ suites 0\nℹ pass 3\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 12.4117\n"
+  },
+  {
+    "file": "v181_post_submit_result_bridge.test.cjs",
+    "ok": true,
+    "detail": "✔ v181 isolates download-side global behavior from submission stage (1.2666ms)\n✔ v181 preserves generation-response mediaId binding and status-response download bridge (0.2879ms)\n✔ v181 does not replace the CDP Generate submission path (0.2267ms)\nℹ tests 3\nℹ suites 0\nℹ pass 3\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 11.1935\n"
+  },
+  {
+    "file": "v182_auto_download_no_hover.test.cjs",
+    "ok": true,
+    "detail": "✔ v182 keeps existing CDP submission unchanged (1.1822ms)\n✔ v182 SUCCESSFUL result is keyed back to the bound generation identity (0.2283ms)\n✔ v182 replays Flow own status request only while VIDEO is waiting (0.2112ms)\n✔ v182 waiting-only keepalive includes favicon heartbeat after submit (0.1906ms)\nℹ tests 4\nℹ suites 0\nℹ pass 4\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 9.9616\n"
+  },
+  {
+    "file": "v183_identity_alias_download.test.cjs",
+    "ok": true,
+    "detail": "✔ v183 page engine emits identity aliases for successful VIDEO results (1.1152ms)\n✔ v183 download matching accepts any trusted identity alias (0.2009ms)\n✔ v183 result cache indexes observations by every alias (0.1466ms)\nℹ tests 3\nℹ suites 0\nℹ pass 3\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 9.5032\n"
+  },
+  {
+    "file": "wave_release.test.cjs",
+    "ok": true,
+    "detail": "PASS: completed/duplicate submission waves clear locally and request the next task without re-adopting the retired job\n"
+  }
+]

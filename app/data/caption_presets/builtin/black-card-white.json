@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "builtin.black-card-white",
+  "name": "黑底白字",
+  "category": "基础",
+  "tags": [
+    "高可读",
+    "底框"
+  ],
+  "description": "复杂背景下仍保持高可读性.",
+  "style": {
+    "size": 52,
+    "color": "#FFFFFF",
+    "position": "底部居中",
+    "weight": 800,
+    "strokeColor": "#000000",
+    "strokeWidth": 0,
+    "background": true,
+    "backgroundColor": "#000000",
+    "backgroundOpacity": 68,
+    "shadow": false,
+    "shadowBlur": 0,
+    "shadowY": 0,
+    "radius": 18,
+    "paddingX": 22,
+    "paddingY": 12,
+    "animation": "淡入",
+    "maxWidth": 88,
+    "lineHeight": 1.24,
+    "letterSpacing": 0
+  }
+}
