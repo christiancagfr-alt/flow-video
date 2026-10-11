@@ -36,7 +36,7 @@ def main():
     from PIL import Image
     Image.open(ROOT/'assets/flowstudio.png').resize((256,256)).save(icon)
     control=package/'DEBIAN/control';control.parent.mkdir()
-    control.write_text(f'Package: flowstudio\nVersion: {VERSION}\nArchitecture: amd64\nMaintainer: Flow Studio\nSection: video\nPriority: optional\nDepends: libc6 (>= 2.35), libgl1, libegl1, libxkbcommon0, libxkbcommon-x11-0, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-render-util0, libxcb-xinerama0, libxcb-randr0, libxcb-shape0, libxcb-sync1, libxcb-xfixes0, libxcb-shm0, libxcb-xkb1, libdbus-1-3, libfontconfig1, libfreetype6, libnss3, xdg-utils\nRecommends: gnome-keyring\nDescription: Flow Studio local video production desktop\n')
+    control.write_text(f'Package: flowstudio\nVersion: {VERSION}\nArchitecture: amd64\nMaintainer: Flow Studio\nSection: video\nPriority: optional\nDepends: libc6 (>= 2.35), libgl1, libegl1, libxkbcommon0, libxkbcommon-x11-0, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-render-util0, libxcb-xinerama0, libxcb-randr0, libxcb-shape0, libxcb-sync1, libxcb-xfixes0, libxcb-shm0, libxcb-xkb1, libdbus-1-3, libfontconfig1, libfreetype6, libnss3, libpulse0, libasound2 | libasound2t64, xdg-utils\nRecommends: gnome-keyring, fonts-noto-cjk\nDescription: Flow Studio local video production desktop\n')
     for p in app.rglob('__pycache__'):shutil.rmtree(p)
     for p in app.rglob('*'):
         if p.is_file() and p.suffix in ('.db','.sqlite3','.log'):raise RuntimeError('Unexpected user data: '+str(p))
@@ -46,6 +46,8 @@ def main():
     extracted=build/'installed-test';run('dpkg-deb','-x',str(deb),str(extracted))
     installed=extracted/'opt/flowstudio';env['PYTHONPATH']=str(installed)
     run(str(installed/'python/bin/python3'),str(installed/'scripts/smoke_desktop.py'),cwd=installed,env=env)
+    env['QT_QPA_PLATFORM']='xcb'
+    run('xvfb-run','-a',str(installed/'python/bin/python3'),str(installed/'scripts/smoke_desktop.py'),cwd=installed,env=env)
     with deb.open('rb') as stream:digest=hashlib.file_digest(stream,'sha256').hexdigest()
     deb.with_suffix('.deb.sha256').write_text(digest+'  '+deb.name+'\n')
 if __name__=='__main__':main()
