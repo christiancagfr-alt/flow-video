@@ -19,7 +19,9 @@ def main():
     if args.arch=='x86_64':
         openssl=subprocess.check_output(['brew','--prefix','openssl@3'],text=True).strip()
         os.environ['OPENSSL_DIR']=openssl
-    run(str(python),'-m','pip','install','--only-binary=:all:','--no-binary=cryptography','--index-url','https://pypi.org/simple','-r',str(ROOT/'requirements-macos.lock'))
+        os.environ['OPENSSL_STATIC']='1'
+    source_options=['--no-binary=cryptography'] if args.arch=='x86_64' else []
+    run(str(python),'-m','pip','install','--only-binary=:all:',*source_options,'--index-url','https://pypi.org/simple','-r',str(ROOT/'requirements-macos.lock'))
     run(str(python),'-m','pip','check')
     # Copy only version-controlled source, never local credentials or generated data.
     for name in subprocess.check_output(['git','ls-files','-z'],cwd=ROOT).decode().split('\0'):

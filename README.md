@@ -37,3 +37,15 @@ python -m unittest discover -s tests
 扩展 `tests/*.cjs` 可逐个用 Node.js 执行。`scripts/build_windows_portable.py` 从 Python/PyPI 官方站点下载并校验哈希，构建目录为 `build/FlowStudio-Windows`。发布时必须使用源码白名单，不得把含测试数据的整个工作目录压缩上传。
 
 详见 [安全审核报告](SECURITY_AUDIT.md)。发行版 `RUNTIME_MANIFEST.json` 列出 Python 和所有运行 wheel 的 SHA-256；Python 自带许可证及依赖包的 dist-info 许可证随运行环境保留。第三方组件各自遵循其原许可证，仓库并未替它们重新授权。
+
+## macOS Apple Silicon / Intel
+
+GitHub Actions 的 **Build macOS Apple Silicon and Intel** 工作流分别在 `macos-15`（arm64）和 `macos-15-intel`（x86_64）运行。两种构建都通过依赖检查、单元测试、原生媒体框架导入、界面启动与重新解压后的启动验证后，自动附加到 v0.13.5.106 发布页。
+
+下载名称含 `macOS-arm64` 的包用于 Apple M 系列；`macOS-x86_64` 用于 Intel。要求 macOS 13 或更新版本。解压后把 **Flow Studio.app** 放到应用程序目录，双击启动，无需安装 Python，不打开终端。软件未进行 Apple Developer ID 签名和公证；首次启动可能需要在“系统设置 → 隐私与安全性”允许打开。不要全局关闭系统安全检查。
+
+Mac 包内含 Python 3.13.16（Astral python-build-standalone 20261009，固定 SHA-256）、Qt 和 PyObjC。运行依赖单独固定在 `requirements-macos.lock`；Intel 缺少 cryptography 50.0.2 的预编译 wheel，因此在 GitHub Mac 运行器上编译同一版本。内置环境不依赖本机 Homebrew。运行版本与包列表保存在应用内部 `Contents/Resources/RUNTIME_MANIFEST.json`。
+
+Mac 应用数据与日志位于 `~/Library/Application Support/FlowStudio/data`，更新应用不会覆盖它们。源码直接运行仍保留原目录布局。旧 Windows DPAPI 凭据不能直接迁移到 Mac，需重新授权 Google。Mac OAuth 文件采用用户读写权限限制，未声称有 Windows DPAPI 加密。达芬奇自动控制可能需要系统的辅助功能与自动化授权，真实 Flow/达芬奇业务流程仍须在用户环境验证。
+
+扩展在应用内部 `Contents/Resources/extension`，可通过 Finder“显示包内容”找到并加载。构建使用的第三方 Actions 固定到提交 SHA，构建阶段仅有只读权限，发布阶段才有上传附件权限。工作流只接受手动启动，不运行不可信 PR 的发布脚本。
