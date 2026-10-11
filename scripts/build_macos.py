@@ -16,7 +16,10 @@ def main():
     assert hashlib.sha256(archive.read_bytes()).hexdigest()==HASHES[args.arch], 'Python checksum mismatch'
     with tarfile.open(archive) as tar: tar.extractall(resources,filter='data')
     python=resources/'python/bin/python3'
-    run(str(python),'-m','pip','install','--only-binary=:all:','--index-url','https://pypi.org/simple','-r',str(ROOT/'requirements-macos.lock'))
+    if args.arch=='x86_64':
+        openssl=subprocess.check_output(['brew','--prefix','openssl@3'],text=True).strip()
+        os.environ['OPENSSL_DIR']=openssl
+    run(str(python),'-m','pip','install','--only-binary=:all:','--no-binary=cryptography','--index-url','https://pypi.org/simple','-r',str(ROOT/'requirements-macos.lock'))
     run(str(python),'-m','pip','check')
     # Copy only version-controlled source, never local credentials or generated data.
     for name in subprocess.check_output(['git','ls-files','-z'],cwd=ROOT).decode().split('\0'):
@@ -37,6 +40,9 @@ def main():
             'NSAppleEventsUsageDescription':'Flow Studio uses automation to control DaVinci Resolve.'},f)
     # Tests use isolated state outside the immutable application bundle.
     env=dict(os.environ,QT_QPA_PLATFORM='offscreen',FLOWSTUDIO_DATA_DIR=str(build/'test-data'),PYTHONPATH=str(resources))
+    test_deps=build/'test-dependencies'
+    run(str(python),'-m','pip','install','--only-binary=:all:','--no-deps','--target',str(test_deps),'lupa==2.8')
+    env['PYTHONPATH']=str(resources)+os.pathsep+str(test_deps)
     run(str(python),'-m','unittest','discover','-s',str(resources/'tests'),cwd=resources,env=env)
     run(str(python),str(resources/'scripts/smoke_macos.py'),cwd=resources,env=env)
     for p in resources.rglob('__pycache__'): shutil.rmtree(p)
