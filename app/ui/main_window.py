@@ -896,7 +896,7 @@ class MainWindow(QMainWindow):
         """Cheap change token for navigation refresh decisions; no business queries are executed."""
         app_root = Path(__file__).resolve().parents[2]
         studio = Path(DB_PATH)
-        intake = app_root / "data" / "pre_gpt_pipeline.sqlite3"
+        intake = studio.parent / "pre_gpt_pipeline.sqlite3"
         paths = (
             studio, Path(str(studio) + "-wal"),
             intake, Path(str(intake) + "-wal"),

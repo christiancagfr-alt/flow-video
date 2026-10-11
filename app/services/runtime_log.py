@@ -2,7 +2,8 @@ from __future__ import annotations
 from pathlib import Path
 import json, logging, logging.handlers, threading, time
 
-_ROOT = Path(__file__).resolve().parents[2] / 'data' / 'logs'
+from app.services.app_paths import data_dir
+_ROOT = data_dir() / 'logs'
 _PATH = _ROOT / 'flowstudio-runtime.log'
 _lock = threading.Lock()
 _logger = None

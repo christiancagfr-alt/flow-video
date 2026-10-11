@@ -29,8 +29,9 @@ VERSION = "0.13.5-integrated"
 HOST = "127.0.0.1"
 PORT = 17843
 BASE_DIR = Path(__file__).resolve().parents[2]
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
+from app.services.app_paths import data_dir
+DATA_DIR = data_dir()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_FILE = DATA_DIR / "pre_gpt_pipeline.sqlite3"
 SETTINGS_FILE = DATA_DIR / "pre_gpt_pipeline_settings_legacy.json"
 TOKEN_FILE = DATA_DIR / "google_token.json"

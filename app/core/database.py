@@ -9,7 +9,8 @@ import time
 # previously working releases.  Do not migrate it at startup and do not switch
 # paths while the process is running.
 APP_ROOT = Path(__file__).resolve().parents[2]
-DB_PATH = APP_ROOT / "data" / "studio.db"
+from app.services.app_paths import data_dir
+DB_PATH = data_dir() / "studio.db"
 
 class ClosingConnection(sqlite3.Connection):
     """Commit/rollback normally, then promptly release SQLite caches and handles."""

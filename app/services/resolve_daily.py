@@ -143,7 +143,8 @@ class DailyWake:
 
     def progress(self, stage, detail):
         self.stage, self.detail = stage, detail
-        log_dir = BASE / 'data/logs'
+        from app.services.app_paths import data_dir
+        log_dir = data_dir() / 'logs'
         log_dir.mkdir(parents=True, exist_ok=True)
         with (log_dir / 'davinci-workflow.log').open('a', encoding='utf-8') as f:
             f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} request={self.request_id} stage={stage} detail={detail}\n')

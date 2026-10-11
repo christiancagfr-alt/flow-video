@@ -8,7 +8,8 @@ def configure():
     global _stream
     if _stream is not None:
         return
-    folder = Path(__file__).resolve().parents[2] / 'data' / 'logs'
+    from app.services.app_paths import data_dir
+    folder = data_dir() / 'logs'
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / 'runtime.log'
     try:

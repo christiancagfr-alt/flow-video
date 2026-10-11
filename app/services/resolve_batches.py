@@ -42,7 +42,8 @@ def _log(batch_id, detail):
     folder.mkdir(parents=True,exist_ok=True)
     with (folder/'import.log').open('a',encoding='utf-8') as f:
         f.write(time.strftime('%Y-%m-%d %H:%M:%S')+' '+detail+'\n')
-    app_log=daily.BASE/'data/logs/davinci-workflow.log'
+    from app.services.app_paths import data_dir
+    app_log=data_dir()/'logs/davinci-workflow.log'
     app_log.parent.mkdir(parents=True,exist_ok=True)
     with app_log.open('a',encoding='utf-8') as f:
         f.write(time.strftime('%Y-%m-%d %H:%M:%S')+' batch_id='+batch_id+' action=IMPORT_BATCH '+detail+'\n')
