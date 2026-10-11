@@ -5,6 +5,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import sys
 import re
 import socket
 from pathlib import Path
@@ -28,6 +29,10 @@ def save_api_key_to_keychain(api_key: str):
     key = (api_key or "").strip()
     if not key:
         raise ValueError("API Key 不能为空")
+    if sys.platform.startswith('linux'):
+        from keyring.backends.SecretService import Keyring
+        Keyring().set_password(KEYCHAIN_SERVICE,KEYCHAIN_ACCOUNT,key)
+        return
     if os.name == 'nt':
         from keyring.backends.Windows import WinVaultKeyring
         WinVaultKeyring().set_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, key)
@@ -43,6 +48,9 @@ def get_api_key():
     if env:
         return env
     try:
+        if sys.platform.startswith('linux'):
+            from keyring.backends.SecretService import Keyring
+            return Keyring().get_password(KEYCHAIN_SERVICE,KEYCHAIN_ACCOUNT) or ''
         if os.name == 'nt':
             from keyring.backends.Windows import WinVaultKeyring
             return WinVaultKeyring().get_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) or ''
@@ -56,6 +64,11 @@ def get_api_key():
         return ""
 
 def delete_api_key():
+    if sys.platform.startswith('linux'):
+        from keyring.backends.SecretService import Keyring
+        backend=Keyring()
+        if backend.get_password(KEYCHAIN_SERVICE,KEYCHAIN_ACCOUNT) is not None:backend.delete_password(KEYCHAIN_SERVICE,KEYCHAIN_ACCOUNT)
+        return
     if os.name == 'nt':
         from keyring.backends.Windows import WinVaultKeyring
         vault = WinVaultKeyring()

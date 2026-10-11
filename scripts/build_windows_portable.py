@@ -41,11 +41,11 @@ def wheel_record(line):
 
 def source_files():
     files=[]
-    for folder,suffixes in [('app',{'.py'}),('scripts',{'.py','.ps1'}),('davinci_autoedit_v0_5_0',{'.lua'}),(PLUGIN,{'.js','.css','.json','.cjs'}),('tests',{'.py','.js'})]:
+    for folder,suffixes in [('app',{'.py'}),('scripts',{'.py','.ps1','.iss'}),('assets',{'.svg','.png','.ico','.icns'}),('davinci_autoedit_v0_5_0',{'.lua'}),(PLUGIN,{'.js','.css','.json','.cjs'}),('tests',{'.py','.js'})]:
         for p in (ROOT/folder).rglob('*'):
             if p.is_file() and p.suffix in suffixes and '__pycache__' not in p.parts and not any(x.startswith('TEST_RESULTS') for x in p.parts):files.append(p)
     files.extend((ROOT/'app/data/caption_presets/builtin').glob('*.json'))
-    for name in ['main.py','Flow Studio.vbs','requirements-release.lock','requirements-windows.txt','README.md','SECURITY_AUDIT.md','.env.example','.gitignore']:
+    for name in ['main.py','Flow Studio.vbs','requirements-release.lock','requirements-windows.txt','requirements-macos.lock','requirements-linux.lock','README.md','RELEASE_NOTES.md','SECURITY_AUDIT.md','.env.example','.gitignore']:
         p=ROOT/name
         if p.exists():files.append(p)
     return sorted(set(files))

@@ -7,7 +7,8 @@ from pathlib import Path
 import re
 
 from PySide6.QtCore import Qt, QDate, QSettings, QSize, QTimer, QUrl
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QIcon
+from app.version import VERSION
 from app.ui.image_preview import set_image
 from app.ui.confirmation import confirm_clear
 from PySide6.QtWidgets import (
@@ -493,7 +494,8 @@ class MainWindow(QMainWindow):
         self.current_host_id = None
         self.host_table = None
         self.host_meta = None
-        self.setWindowTitle("Flow Studio V0.13.5.106")
+        self.setWindowTitle("Flow Studio " + VERSION)
+        self.setWindowIcon(QIcon(str(Path(__file__).resolve().parents[2]/"assets/flowstudio.png")))
         self.local_bridge = get_bridge()
         try:
             self.local_bridge.start()
@@ -575,7 +577,10 @@ class MainWindow(QMainWindow):
         side.setContentsMargins(14,14,14,14)
         side.setSpacing(5)
 
-        brand = QLabel("▶  Flow Studio", objectName="brand")
+        brand = QLabel("Flow Studio", objectName="brand")
+        logo = QLabel()
+        logo.setPixmap(QPixmap(str(Path(__file__).resolve().parents[2]/"assets/flowstudio.png")).scaled(40,40,Qt.KeepAspectRatio,Qt.SmoothTransformation))
+        side.addWidget(logo)
         side.addWidget(brand)
         sub = QLabel("AI 口播视频批量制作工作台", objectName="brandSub")
         side.addWidget(sub)
@@ -650,6 +655,9 @@ class MainWindow(QMainWindow):
             self.theme_buttons[key] = b
             theme_row.addWidget(b)
         side.addLayout(theme_row)
+        version_button=QPushButton("v"+VERSION+" · 检查更新")
+        version_button.clicked.connect(self.open_updates)
+        side.addWidget(version_button)
 
         root.addWidget(sidebar)
 
@@ -1003,7 +1011,18 @@ class MainWindow(QMainWindow):
         self._navigate("prompt", self.prompt_center, self.prompt_center.reload_filters, "reload_filters")
 
 
+    def open_updates(self):
+        from app.ui.update_dialog import UpdateDialog
+        dialog=getattr(self,'_update_dialog',None)
+        if dialog is None:
+            dialog=UpdateDialog(self);self._update_dialog=dialog
+        dialog.show();dialog.raise_();dialog.activateWindow()
+
     def closeEvent(self, event):
+        update_dialog=getattr(self,'_update_dialog',None)
+        if update_dialog is not None and update_dialog.worker is not None:
+            update_dialog.worker.requestInterruption()
+            self.statusBar().showMessage('正在停止更新下载，请稍后再关闭。',3000);event.ignore();return
         dialog=getattr(self,'_reflow_rules_dialog',None)
         if dialog is not None and dialog.worker is not None:
             self.statusBar().showMessage('自动断行正在保存，请完成后关闭。',3000);event.ignore();return
@@ -1023,6 +1042,15 @@ class MainWindow(QMainWindow):
                 self.local_bridge.stop()
         except Exception:
             pass
+        pending=getattr(self,'_pending_update',None)
+        if pending:
+            try:
+                from app.services.updater import launch_after_exit
+                launch_after_exit(*pending)
+                self._pending_update=None
+            except Exception as exc:
+                self._pending_update=None
+                QMessageBox.warning(self,'无法启动安装',str(exc));event.ignore();return
         super().closeEvent(event)
 
     def show_qc_page(self):

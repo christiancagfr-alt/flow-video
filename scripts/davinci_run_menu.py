@@ -11,6 +11,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--script-name', required=True)
     args = ap.parse_args()
+    if sys.platform.startswith('linux'):
+        print(json.dumps({'ok':False,'error':'Linux 请在达芬奇 工作区 → 脚本 菜单手动运行对应脚本。'},ensure_ascii=False));return 1
     target = args.script_name.rsplit('.', 1)[0]
     # JXA recursively searches the Workspace/工作区 -> Scripts/脚本 menu tree.
     js = r'''

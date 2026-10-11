@@ -1,4 +1,15 @@
-# Flow Studio 0.13.5.106
+# Flow Studio 0.13.5.107
+
+最新版提供统一图标、界面版本号和“检查更新”。在 Releases 下载 Windows Setup.exe、Mac（arm64 / x86_64）DMG 或 Linux amd64 DEB。安装包内置 Python。Linux 适配 Ubuntu 22.04/24.04 和 Debian 系 x64，需有桌面环境及系统软件安装器；达芬奇窗口自动点击暂需手动操作。
+
+更新：点击侧栏底部版本按钮 → 检查更新 → 下载安装包 → 校验通过后“退出并安装”。Windows 打开安装向导，Mac 打开 DMG 后拖入 Applications 替换，Linux 打开系统安装器。所有安装行为均由用户确认，不自动强制结束任务。
+
+安装版数据目录：Windows `%LOCALAPPDATA%/FlowStudio/data`，Mac `~/Library/Application Support/FlowStudio/data`，Linux `${XDG_DATA_HOME:-~/.local/share}/FlowStudio/data`。旧源码和 Windows 便携版仍使用原目录数据，不会自动搬迁。安装、卸载和升级都不主动删除用户数据。
+
+三种系统使用同一 SVG 图标生成 PNG/ICO/ICNS。构建工作流为 `.github/workflows/installers.yml`，所有平台测试通过后才发布正式版本。安装包尚无商业代码签名/Apple 公证，系统可能提示未知发布者。更新信任官方 GitHub 仓库的 HTTPS 元数据与 SHA-256，不等同于独立签名验证。
+
+以下为原便携版使用与审核说明，版本化审核报告仅描述其标注的审核版本。
+
 
 Windows 本地任务、提示词、Flow 视频生成与达芬奇剪辑工作台。
 

@@ -22,6 +22,7 @@ def bridge_root():
 
 
 def script_dir():
+    if sys.platform.startswith('linux'):return Path.home()/'.local/share/DaVinciResolve/Fusion/Scripts/Utility/FlowStudioAuto'
     if os.name == 'nt':
         return Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming'))) / 'Blackmagic Design/DaVinci Resolve/Support/Fusion/Scripts/Utility/FlowStudioAuto'
     return Path.home() / 'Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/FlowStudioAuto'

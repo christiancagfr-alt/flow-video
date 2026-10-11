@@ -10,6 +10,7 @@ import logging.handlers
 from functools import wraps
 import mimetypes
 import os
+import sys
 import re
 import shutil
 import sqlite3
@@ -887,12 +888,16 @@ def finder_open(group_key):
     if os.name == 'nt':
         os.startfile(str(p))
     else:
-        subprocess.run(["open", str(p)], check=False)
+        subprocess.run(["xdg-open" if sys.platform.startswith("linux") else "open", str(p)], check=False)
     log.info("已打开 Finder：%s", p)
     return str(p)
 
 
 def finder_selection():
+    if sys.platform.startswith('linux'):
+        code="from PySide6.QtWidgets import QApplication,QFileDialog; a=QApplication([]); print('\\n'.join(QFileDialog.getOpenFileNames(None,'选择素材')[0]))"
+        result=subprocess.run([sys.executable,'-c',code],capture_output=True,text=True,encoding='utf-8',check=True)
+        return result.stdout.splitlines()
     if os.name == 'nt':
         script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $s = New-Object -ComObject Shell.Application; @($s.Windows()) | ForEach-Object { if ($_.FullName -like '*explorer.exe') { $_.Document.SelectedItems() | ForEach-Object { $_.Path } } }"
         result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script], capture_output=True, text=True, encoding='utf-8', errors='replace', check=True)
@@ -916,11 +921,11 @@ def finder_selection():
 
 
 def choose_oauth_file():
-    if os.name == 'nt':
+    if os.name == 'nt' or __import__('sys').platform.startswith('linux'):
         # Run the native picker in its own GUI process, also safe from worker threads.
         code = "from PySide6.QtWidgets import QApplication, QFileDialog; app=QApplication([]); print(QFileDialog.getOpenFileName(None, 'Select credentials', '', 'JSON (*.json);;All files (*)')[0])"
         import sys
-        python = str(Path(sys.executable).with_name('python.exe'))
+        python = str(Path(sys.executable).with_name('python.exe')) if os.name=='nt' else sys.executable
         env = dict(os.environ, PYTHONIOENCODING='utf-8')
         result = subprocess.run([python, '-c', code], capture_output=True, text=True, encoding='utf-8', env=env, check=True)
         return result.stdout.strip()
@@ -937,11 +942,11 @@ def choose_oauth_file():
 
 
 def choose_local_folder():
-    if os.name == 'nt':
+    if os.name == 'nt' or __import__('sys').platform.startswith('linux'):
         # Run the native picker in its own GUI process, also safe from worker threads.
         code = "from PySide6.QtWidgets import QApplication, QFileDialog; app=QApplication([]); print(QFileDialog.getExistingDirectory(None, 'Select folder'))"
         import sys
-        python = str(Path(sys.executable).with_name('python.exe'))
+        python = str(Path(sys.executable).with_name('python.exe')) if os.name=='nt' else sys.executable
         env = dict(os.environ, PYTHONIOENCODING='utf-8')
         result = subprocess.run([python, '-c', code], capture_output=True, text=True, encoding='utf-8', env=env, check=True)
         return result.stdout.strip()

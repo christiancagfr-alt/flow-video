@@ -200,6 +200,10 @@ def write_manifest() -> Path:
 
 
 def launch_resolve() -> None:
+    if __import__('sys').platform.startswith('linux'):
+        executable=Path(repo.get_setting('davinci_executable_path','') or '/opt/resolve/bin/resolve')
+        if not executable.is_file():raise RuntimeError('未找到 DaVinci Resolve，请配置可执行文件路径。')
+        subprocess.Popen([str(executable)]);return
     if os.name == 'nt':
         import psutil
         for process in psutil.process_iter(['name']):
@@ -217,6 +221,7 @@ def launch_resolve() -> None:
 
 
 def minimize_resolve() -> tuple[bool, str]:
+    if __import__('sys').platform.startswith('linux'):return False,'Linux 请通过窗口管理器最小化达芬奇。'
     if os.name == 'nt':
         import ctypes
         from ctypes import wintypes

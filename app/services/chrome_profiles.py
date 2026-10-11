@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 from app.services import quiet_process as subprocess
 import os
+import sys
 
 CHROME_APP = "/Applications/Google Chrome.app"
 CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -16,7 +17,11 @@ if os.name == 'nt':
                   for key in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA')]
     CHROME_BIN = next((str(p) for p in candidates if p.is_file()), shutil.which('chrome.exe') or str(candidates[0]))
     CHROME_APP = CHROME_BIN
-
+if sys.platform.startswith('linux'):
+    import shutil
+    CHROME_BIN=shutil.which('google-chrome') or shutil.which('google-chrome-stable') or shutil.which('chromium') or '/usr/bin/google-chrome'
+    CHROME_APP=CHROME_BIN
+    CHROME_DATA=Path(os.environ.get('XDG_CONFIG_HOME',str(Path.home()/'.config')))/('chromium' if 'chromium' in CHROME_BIN else 'google-chrome')
 
 
 def _read_json(path: Path):

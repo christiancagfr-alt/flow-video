@@ -24,10 +24,17 @@ def exception_hook(exc_type, exc_value, exc_tb):
         pass
 
 if __name__ == "__main__":
+    if sys.platform=='win32':
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('FlowStudio.Desktop')
+        ctypes.windll.kernel32.CreateMutexW.restype=ctypes.c_void_p
+        _installer_mutex=ctypes.windll.kernel32.CreateMutexW(None,False,'FlowStudio.Desktop.Running')
     sys.excepthook = exception_hook
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setApplicationName("Flow Studio")
+    from app.version import VERSION
+    app.setApplicationVersion(VERSION)
     from app.services.perf_diagnostics import start
     start(app)
     window = MainWindow()
