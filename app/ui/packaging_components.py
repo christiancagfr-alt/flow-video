@@ -10,7 +10,7 @@ class PackagingComponentsPage(QWidget):
     def __init__(self,packaging,parent=None):
         super().__init__(parent);self.packaging=packaging;self.process=None
         self.setObjectName("pageRoot")
-        self.setStyleSheet('QPushButton{min-width:0px;min-height:26px;padding:4px 10px;} QLineEdit,QComboBox{min-height:26px;padding:3px 6px;} QLabel#pageTitle{font-size:24px;} QTabWidget::pane{background:white;border:1px solid #dce5f3;border-radius:8px;} QTabBar::tab{background:#edf2fa;padding:9px 18px;} QTabBar::tab:selected{background:white;color:#2563eb;} QScrollArea{background:white;border:0;} QScrollArea>QWidget>QWidget{background:white;}')
+        self.setStyleSheet('QPushButton{min-width:0px;min-height:26px;padding:4px 10px;} QLineEdit,QComboBox{min-height:26px;padding:3px 6px;} QLabel#pageTitle{font-size:24px;}')
         outer=QVBoxLayout(self);outer.setContentsMargins(16,12,16,12);outer.setSpacing(12)
         header=QHBoxLayout();header.addWidget(QLabel('组件管理',objectName='pageTitle'));header.addStretch()
         check=QPushButton('检查全部');check.clicked.connect(lambda:self.run('check'));header.addWidget(check);outer.addLayout(header)
@@ -29,15 +29,29 @@ class PackagingComponentsPage(QWidget):
             scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(page);tabs.addTab(scroll,title)
             return layout
         basic=section('渲染 / FFmpeg')
-        hint=QLabel('常规 Reels 字幕使用 FFmpeg 渲染，无需启动浏览器。显卡编码可用时自动启用；也可在输出参数中选择 CPU。');hint.setWordWrap(True);basic.addWidget(hint)
+        hint=QLabel('常规 Reels 字幕使用 FFmpeg 渲染，无需启动浏览器。显卡编码可用时自动启用；也可在下方选择 CPU。');hint.setWordWrap(True);basic.addWidget(hint)
         form=QFormLayout();form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow);basic.addLayout(form)
+        form.addRow('默认渲染方式',packaging.render_mode);packaging.render_mode.show()
         row=QHBoxLayout();row.addWidget(packaging.asr_ffmpeg,1);browse=QPushButton('选择文件');browse.clicked.connect(packaging._pick_ffmpeg);row.addWidget(browse);form.addRow('FFmpeg 路径',row)
         row=QHBoxLayout();install=QPushButton('安装 / 修复 FFmpeg');install.clicked.connect(lambda:self.run('ffmpeg'));row.addWidget(install);self.action_buttons.append(install);row.addStretch();basic.addLayout(row);basic.addStretch()
         local=section('字幕识别')
+        service_form=QFormLayout();service_form.addRow('默认识别服务',packaging.asr_provider);service_form.addRow('识别模型',packaging.asr_model);local.addLayout(service_form);packaging.asr_provider.show();packaging.asr_model.show()
         label=QLabel('先安装识别组件，再下载模型。base 体积较小；较大的模型需要更多内存和下载时间。');label.setWordWrap(True);local.addWidget(label)
         row=QHBoxLayout();row.addWidget(packaging.asr_install_btn);row.addStretch();local.addLayout(row)
         row=QHBoxLayout();self.model=QComboBox();self.model.addItems(['base','small','medium','large-v3']);self.model.setMaximumWidth(250);row.addWidget(self.model)
         self.download=QPushButton('下载 / 重试模型');self.download.clicked.connect(lambda:self.run('model'));row.addWidget(self.download);row.addStretch();local.addLayout(row);self.action_buttons.append(self.download);local.addStretch()
+        # Configuration used by automatic editing lives here, not in general settings.
+        from app.core import repository as repo
+        paths=QFormLayout();local.addLayout(paths)
+        for label,key in [('whisper.cpp 命令','whisper_cli_path'),('whisper.cpp 模型','whisper_model_path')]:
+            field=QLineEdit(repo.get_setting(key,''));field.setPlaceholderText('自动剪辑使用；留空采用自动检测')
+            field.editingFinished.connect(lambda field=field,key=key:repo.set_setting(key,field.text().strip()))
+            paths.addRow(label,field)
+        templates=section('提示词模板')
+        for label,key in [('睁眼基础模板','talking_base_prompt'),('闭眼基础模板','praying_base_prompt')]:
+            templates.addWidget(QLabel(label));field=QPlainTextEdit(repo.get_setting(key,''));field.setMaximumHeight(120);templates.addWidget(field)
+            field.textChanged.connect(lambda field=field,key=key:repo.set_setting(key,field.toPlainText().strip()))
+        templates.addStretch()
         keys=section('API 密钥')
         from app.ui.credential_pool_dialog import edit_pool
         gpt=QPushButton('GPT 提示词 · 批量密钥 / 轮询');gpt.clicked.connect(lambda:edit_pool(self,'com.flowstudio.openai','FlowStudio'))

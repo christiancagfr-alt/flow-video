@@ -16,7 +16,7 @@ def choices(con, video_id):
     saved=con.execute('SELECT value FROM app_settings WHERE key=?',(f'segment_eye_types:{int(video_id)}',)).fetchone()
     try:
         data=json.loads(saved[0]) if saved else {}
-        return data.get('segments',{}) if data.get('work_date')==day else {}
+        return {key:{**value,'source':value.get('source',data.get('source','manual'))} for key,value in data.get('segments',{}).items() if isinstance(value,dict)} if data.get('work_date')==day else {}
     except (ValueError,TypeError,AttributeError):return {}
 
 
@@ -40,7 +40,7 @@ def _all_choices(con, video_dates=None):
     for row in settings:
         try:
             vid=int(row['key'].split(':')[1]);data=json.loads(row['value'])
-            if isinstance(data,dict) and data.get('work_date')==video_dates.get(vid) and isinstance(data.get('segments'),dict):result[vid]={key:{**value,'source':data.get('source','manual')} for key,value in data['segments'].items() if isinstance(value,dict)}
+            if isinstance(data,dict) and data.get('work_date')==video_dates.get(vid) and isinstance(data.get('segments'),dict):result[vid]={key:{**value,'source':value.get('source',data.get('source','manual'))} for key,value in data['segments'].items() if isinstance(value,dict)}
         except (ValueError,TypeError):pass
     return result
 

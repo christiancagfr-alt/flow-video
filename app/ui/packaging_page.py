@@ -161,11 +161,14 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         self.editor_split.setHandleWidth(7)
         self.editor_split.addWidget(self._build_material_panel())
         self.editor_split.addWidget(self._build_preview_panel())
-        self.editor_split.addWidget(self._build_properties_panel())
-        self.editor_split.setSizes([210, 690, 350])
+        properties=self._build_properties_panel()
+        self.editor_split.addWidget(self.section_menu)
+        self.editor_split.addWidget(properties)
+        self.editor_split.setSizes([190, 630, 72, 330])
         self.editor_split.setStretchFactor(0, 0)
         self.editor_split.setStretchFactor(1, 1)
         self.editor_split.setStretchFactor(2, 0)
+        self.editor_split.setStretchFactor(3, 0)
 
         # Full page vertical split with a real timeline summary.
         self.vertical_split = QSplitter(Qt.Vertical, objectName="packagingVerticalSplitter")
@@ -245,6 +248,7 @@ class PackagingPage(PackagingReelsMixin, QWidget):
             self.player = QMediaPlayer(self); self.player.setAudioOutput(self.audio); self.player.setVideoOutput(self.video_widget.video_item)
             self.player.positionChanged.connect(self._player_position)
             self.player.durationChanged.connect(self._player_duration)
+            self.player.playbackStateChanged.connect(lambda _: self._update_preview_overlays())
             stack.addWidget(self.video_widget)
         else:
             self.video_widget = None; self.audio = None; self.player = None
@@ -260,8 +264,8 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         self.preview_title = QLabel(""); self.preview_title.setAlignment(Qt.AlignCenter); self.preview_title.setWordWrap(True)
         self.preview_title.setStyleSheet("color:white;font-size:20px;font-weight:800;background:rgba(0,0,0,110);padding:6px;border-radius:6px;")
         og.addWidget(self.preview_title, 0, 0, 1, 3, Qt.AlignTop | Qt.AlignHCenter)
-        self.preview_watermark = QLabel(""); self.preview_watermark.setAlignment(Qt.AlignCenter); self.preview_watermark.setFixedSize(100, 70)
-        og.addWidget(self.preview_watermark, 0, 2, Qt.AlignTop | Qt.AlignRight)
+        from app.ui.packaging_watermark_preview import WatermarkPreview
+        self.preview_watermark=WatermarkPreview(self.preview_canvas)
         og.setRowStretch(1, 1)
         self.preview_caption = QLabel(""); self.preview_caption.setAlignment(Qt.AlignCenter); self.preview_caption.setWordWrap(True)
         self.reels_preview=QLabel(self.preview_canvas);self.reels_preview.setAttribute(Qt.WA_TransparentForMouseEvents,True);self.reels_preview.hide()
@@ -288,7 +292,7 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         return card
 
     def _build_properties_panel(self):
-        card = QFrame(objectName="pageCard"); card.setMinimumWidth(310)
+        card = QFrame(objectName="pageCard"); card.setMinimumWidth(280)
         box = QVBoxLayout(card); box.setContentsMargins(10, 10, 10, 10); box.setSpacing(5)
         head = QHBoxLayout(); head.addWidget(QLabel("包装设置", objectName="sectionTitle")); head.addStretch(1)
         self.modified_badge = QLabel("未修改", objectName="muted"); head.addWidget(self.modified_badge)
@@ -306,14 +310,16 @@ class PackagingPage(PackagingReelsMixin, QWidget):
             self.tabs.removeTab(index)
             scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setFrameShape(QFrame.NoFrame);scroll.setWidget(page)
             self.tabs.insertTab(index,scroll,label)
-        sections = QGridLayout(); sections.setSpacing(3)
+        self.section_menu=QFrame(objectName="pageCard");self.section_menu.setFixedWidth(76)
+        sections=QVBoxLayout(self.section_menu);sections.setContentsMargins(4,8,4,8);sections.setSpacing(6)
         self.section_buttons=[]
         for i in range(self.tabs.count()):
             button=QPushButton(self.tabs.tabText(i));button.setCheckable(True);button.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Fixed)
             button.clicked.connect(lambda checked=False,index=i:self.tabs.setCurrentIndex(index))
-            sections.addWidget(button,i//4,i%4);self.section_buttons.append(button)
+            button.setToolTip(self.tabs.tabText(i));button.setText(["识别","水印","字幕","B-roll","标题","片头尾","输出"][i]);button.setObjectName("packagingSection")
+            sections.addWidget(button);self.section_buttons.append(button)
         self.tabs.currentChanged.connect(lambda index:[button.setChecked(n==index) for n,button in enumerate(self.section_buttons)])
-        self.tabs.tabBar().hide();box.addLayout(sections)
+        self.tabs.tabBar().hide();sections.addStretch(1)
         self.tabs.setCurrentIndex(2);self.section_buttons[2].setChecked(True)
         box.addWidget(self.tabs, 1)
         return card
@@ -329,6 +335,7 @@ class PackagingPage(PackagingReelsMixin, QWidget):
     def _caption_tab(self):
         w, b = self._tab()
         self._add_reels_styles(b)
+        styles_layout=b;content=QWidget();b=QVBoxLayout(content);b.setContentsMargins(0,0,0,0)
         head = QHBoxLayout(); head.addWidget(QLabel("字幕内容", objectName="cardTitle")); head.addStretch(1)
         import_btn = QPushButton("导入分段文案/SRT"); import_btn.clicked.connect(self._import_captions); head.addWidget(import_btn)
         b.addLayout(head)
@@ -340,7 +347,8 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         auto = QPushButton("自动分配时间"); auto.clicked.connect(self._auto_caption_timing); row.addWidget(auto)
         delete = QPushButton("删除选中"); delete.clicked.connect(self._delete_caption_rows); row.addWidget(delete); b.addLayout(row)
 
-        compact_layout=b
+        self.recognition_layout.addWidget(content)
+        compact_layout=styles_layout
         self.caption_advanced=QWidget()
         b=QVBoxLayout(self.caption_advanced)
         # Data-driven caption preset library. Built-ins live in JSON files and
@@ -401,9 +409,7 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         b.addLayout(style)
 
         note = QLabel("预设只修改字幕视觉效果，不修改字幕正文、字幕时间点或任务映射。内置预设由 JSON 动态加载；你可以保存、复制、重命名、删除自己的预设。", objectName="muted"); note.setWordWrap(True); b.addWidget(note)
-        more=QPushButton("更多字幕样式 / 详细参数")
-        more.clicked.connect(self._show_caption_advanced)
-        compact_layout.addWidget(more)
+        self.caption_advanced.hide()
         compact_layout.addStretch(1)
         return w
 
@@ -670,6 +676,24 @@ class PackagingPage(PackagingReelsMixin, QWidget):
                 self._project["videos"][p] = self._default_state(p); self._project["order"].append(p); changed = True
         if changed: self._rebuild_tree(select_first=not bool(self._current_path))
 
+    def sync_edited_videos(self):
+        from app.services.packaging_tasks import edited_tasks,export_key
+        from sqlite3 import Error as DatabaseError
+        try:
+            dismissed=set(json.loads(self._settings.value('packaging/dismissed_exports','[]',type=str)))
+            for row in edited_tasks():
+                path=Path(row['edit_output_path']).expanduser().resolve()
+                if not path.is_file():continue
+                key=export_key(row)
+                if key in dismissed:continue
+                self._add_video_paths([str(path)])
+                state=self._project['videos'].get(str(path))
+                if state is not None:
+                    state.update(source_video_id=row['id'],source_export_key=key,
+                        source_script=row.get('original_script') or row.get('production_script') or row.get('script') or '')
+        except (OSError,ValueError,TypeError,DatabaseError):
+            return
+
     @staticmethod
     def _group_for_path(path: str):
         p = Path(path); stem = p.stem; bits = stem.split("-")
@@ -804,7 +828,6 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         if title.get("color"):
             px=max(14,min(34,int(title.get("size",58)*0.38))); bg="rgba(0,0,0,110)" if title.get("background",True) else "transparent"
             self.preview_title.setStyleSheet(f"color:{title.get('color')};font-size:{px}px;font-weight:800;background:{bg};padding:6px;border-radius:6px;")
-        self.preview_watermark.hide()
         pos = (self.player.position() / 1000.0) if self.player else 0.0; self._update_current_caption(pos)
         self.ratio_badge.setText((state.get("params") or {}).get("ratio", "9:16"))
 
@@ -820,6 +843,15 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         cw,ch=max(1,int(w*factor)),max(1,int(h*factor))
         self.preview_canvas.setGeometry((self.overlay.width()-cw)//2,(self.overlay.height()-ch)//2,cw,ch)
         self.preview_caption.setFixedWidth(max(1,int(cw*.9)))
+        state=self._current_state()
+        if state:
+            params=state.get('params') or {};meta=state.get('media') or {}
+            from app.services.packaging_media import output_size
+            size=output_size(params.get('ratio','9:16'),params.get('output_resolution','1080p'),(meta.get('width',1080),meta.get('height',1920)))
+            self.preview_watermark.setGeometry(self.preview_canvas.rect());self.preview_watermark.lower()
+            playing=bool(self.player and self.player.playbackState()==QMediaPlayer.PlayingState)
+            self.preview_watermark.set_layers(state.get('watermarks',[]),sec,size,playing)
+
         self.reels_preview.hide()
         if self._current_state() and self._current_state().get('reelsStyle'):
             from app.services.packaging_overlay import paint_at
@@ -1260,7 +1292,16 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         if self._render_process is not None or self._preview_process is not None:
             QMessageBox.information(self, "清空任务列表", "请先停止渲染或等待成片预览完成。")
             return
+        try:
+            dismissed=set(json.loads(self._settings.value('packaging/dismissed_exports','[]',type=str)))
+        except (ValueError,TypeError):
+            dismissed=set()
+        dismissed.update(state['source_export_key'] for state in self._project['videos'].values() if state.get('source_export_key'))
+        self._settings.setValue('packaging/dismissed_exports',json.dumps(sorted(dismissed)))
+        self._render_queue.clear()
         self._stop_asr()
+        self.asr_results.clear()
+        self.asr_status.setText('未开始识别')
         if self.player:
             self.player.stop()
             self.player.setSource(QUrl())
@@ -1270,6 +1311,7 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         self._rebuild_tree(False)
         self._load_state(self._default_state(""))
         self.reels_preview.hide()
+        self.preview_watermark.clear()
         self._update_timeline()
         self.seek.setValue(0)
         self.time_label.setText("00:00 / 00:00")

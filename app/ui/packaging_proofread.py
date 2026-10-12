@@ -15,7 +15,7 @@ class BatchScriptProofreadDialog(QDialog):
         self.rows = rows
         self.results = {}
         layout = QVBoxLayout(self)
-        tip = QLabel("每行对应一个视频。填写原文案或导入同名 TXT，再点自动对比。\n"
+        tip = QLabel("已关联任务会自动填入原文案；未关联时可手动填写或导入同名 TXT。\n"
                      "句级时间保持不变；匹配词保留时间，改动词可能需要估时。请核对差异后勾选替换。")
         tip.setWordWrap(True)
         layout.addWidget(tip)
@@ -37,6 +37,7 @@ class BatchScriptProofreadDialog(QDialog):
             self.table.setItem(index, 1, label)
             editor = QPlainTextEdit()
             editor.setPlaceholderText("粘贴此视频对应的原文案")
+            editor.setPlainText(row.get('script',''))
             editor.textChanged.connect(lambda i=index: self.invalidate(i))
             self.table.setCellWidget(index, 2, editor)
             self.table.setCellWidget(index, 3, QTextBrowser())
@@ -89,6 +90,7 @@ class BatchScriptProofreadDialog(QDialog):
         layout.addLayout(actions)
         if rows:
             self.table.setCurrentCell(0, 1)
+        if any(row.get("script") for row in rows):self.compare_all()
 
     def select_results(self, checked):
         self.table.blockSignals(True)

@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QProcess, QTimer
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QLabel,QLineEdit,
     QComboBox,QSpinBox,QPushButton,QCheckBox,QPlainTextEdit,QFileDialog,QMessageBox,
     QTableWidget,QTableWidgetItem,QHeaderView,QDialog,QDialogButtonBox,QInputDialog,
-    QFontComboBox,QColorDialog,QSizePolicy)
+    QFontComboBox,QColorDialog,QSizePolicy,QGridLayout)
 from PySide6.QtGui import QFont,QColor,QPixmap
 from app.services.packaging_media import (captions_to_srt,captions_from_srt,output_size,
     output_basename,available_output,find_ffmpeg,validate_captions,probe_media)
@@ -22,6 +22,7 @@ from app.ui.packaging_proofread import BatchScriptProofreadDialog
 class PackagingReelsMixin:
     def _build_recognition_tab(self):
         w,b = self._tab()
+        self.recognition_layout=b
         self._asr_process = None
         self._asr_install_process = None
         self._preview_process = None
@@ -40,7 +41,7 @@ class PackagingReelsMixin:
         ff = QHBoxLayout(); ff.addWidget(self.asr_ffmpeg)
         choose = QPushButton('选择'); choose.clicked.connect(self._pick_ffmpeg); ff.addWidget(choose)
         self.asr_max_words = QSpinBox(); self.asr_max_words.setRange(1,30); self.asr_max_words.setValue(7)
-        form.addRow('识别服务',self.asr_provider); form.addRow('模型',self.asr_model)
+        self.asr_provider.hide();self.asr_model.hide()
         form.addRow('语言 / 语言代码',self.asr_language); form.addRow('每条最多词数',self.asr_max_words)
         b.addLayout(form)
         self.component_asr = QWidget()
@@ -236,7 +237,8 @@ class PackagingReelsMixin:
     def _asr_finished(self,proc,code,path):
         if proc is not self._asr_process:return
         self._asr_read(proc);self._asr_process=None;proc.deleteLater()
-        state=self._project['videos'].get(path) if self._asr_project is self._project else None
+        if self._asr_project is not self._project:return
+        state=self._project['videos'].get(path)
         if path==self._current_path:self._capture_controls()
         if code==0 and self._asr_result and state:
             if state.get('captions',[])!=self._asr_original:
@@ -273,7 +275,9 @@ class PackagingReelsMixin:
         for path in paths:
             state=self._project['videos'].get(path,{})
             if state.get('captions'):
-                rows.append({'path':path,'srt':captions_to_srt(state['captions']),'words':captions_to_srt(state['captions'],True)})
+                from app.services.packaging_tasks import script_for_output
+                script=state.get('source_script') or script_for_output(path)
+                rows.append({'path':path,'script':script,'srt':captions_to_srt(state['captions']),'words':captions_to_srt(state['captions'],True)})
         if not rows:QMessageBox.information(self,'字幕校对','请先识别或导入字幕。');return
         dialog=BatchScriptProofreadDialog(self,rows)
         if dialog.exec()!=QDialog.Accepted:return
@@ -298,12 +302,61 @@ class PackagingReelsMixin:
         try:presets.update(json.loads(self._settings.value('packaging/reels_presets','{}',type=str)))
         except ValueError:pass
         row=QHBoxLayout();self.reels_preset=QComboBox();self.reels_preset.addItems(presets);self.reels_preset.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon);self.reels_preset.setMinimumContentsLength(10)
-        row.addWidget(self.reels_preset,1);btn=QPushButton('套用');btn.clicked.connect(self._apply_reels_style);row.addWidget(btn);layout.addLayout(row)
+        row.addWidget(self.reels_preset,1);btn=QPushButton('套用');btn.clicked.connect(self._apply_reels_style);row.addWidget(btn);row.addStretch();layout.addLayout(row)
         self.reels_style_hint=QLabel('可使用下方原有样式，或套用 Reels 字幕效果。');self.reels_style_hint.setWordWrap(True);layout.addWidget(self.reels_style_hint)
-        buttons=QHBoxLayout()
-        edit=QPushButton('调整样式');edit.clicked.connect(self._edit_reels_style);buttons.addWidget(edit)
-        save=QPushButton('保存样式');save.clicked.connect(self._save_reels_style);buttons.addWidget(save)
-        layout.addLayout(buttons)
+        self.reels_style_hint.hide()
+        self.inline_style_controls={}
+        grid=QGridLayout();grid.setSpacing(4);grid.setAlignment(Qt.AlignLeft | Qt.AlignTop);layout.addLayout(grid)
+        font=QFontComboBox();font.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon);font.setMinimumContentsLength(6)
+        grid.addWidget(QLabel('字体'),0,0);grid.addWidget(font,0,1,1,3);self.inline_style_controls['font']=font
+        font.currentFontChanged.connect(self._inline_style_changed)
+        position=QComboBox();position.addItems(['顶部','画面中间','底部']);grid.addWidget(QLabel('位置'),1,0);grid.addWidget(position,1,1,1,3);self.inline_style_controls['position']=position
+        position.currentTextChanged.connect(self._inline_style_changed)
+        specs=[('font_size','字号',18,200),('outline_width','描边',0,20),('margin_v','边距',0,1800),('line_length','行宽',4,100),('max_lines','行数',1,6),('letter_spacing','字距',-10,30),('word_spacing','词距',-30,50),('line_spacing','行距%',70,180),('highlight_padding','横留白',0,80),('highlight_padding_y','竖留白',0,80)]
+        for index,(key,label,low,high) in enumerate(specs):
+            spin=QSpinBox();spin.setRange(low,high);spin.setToolTip(label);spin.setFixedWidth(76);spin.setSizePolicy(QSizePolicy.Fixed,QSizePolicy.Fixed);spin.setFixedHeight(26);spin.setStyleSheet('min-height:16px;padding:1px 3px;font-size:12px;')
+            self.inline_style_controls[key]=spin;spin.valueChanged.connect(self._inline_style_changed)
+            row,col=2+index//2,(index%2)*2;grid.addWidget(QLabel(label),row,col);grid.addWidget(spin,row,col+1)
+        for index,(key,label) in enumerate([('text','文字色'),('outline','描边色'),('highlight','跟读色'),('background','底色'),('active_text','活动字色')]):
+            button=QPushButton(label);button.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Fixed);button.setStyleSheet('min-height:16px;padding:2px 4px;');button.setProperty('styleKey',key);self.inline_style_controls[key]=button
+            button.clicked.connect(lambda checked=False,k=key:self._inline_style_color(k))
+            grid.addWidget(button,7+index//2,(index%2)*2,1,2)
+        save=QPushButton('保存样式');save.clicked.connect(self._save_reels_style);grid.addWidget(save,9,2,1,2)
+        font.setMaximumWidth(222);position.setMaximumWidth(132)
+        self.reels_preset.setMaximumWidth(214)
+        for i in range(grid.count()):
+            widget=grid.itemAt(i).widget()
+            if isinstance(widget,QLabel):widget.setStyleSheet('font-size:12px;');widget.setToolTip(widget.text())
+        self._sync_inline_styles()
+
+    def _sync_inline_styles(self):
+        if not hasattr(self,'inline_style_controls'):return
+        style=self._reels_style or self._reels_presets.get('默认白字',{})
+        defaults={'font_size':76,'outline_width':3,'margin_v':180,'line_length':26,'max_lines':2,'letter_spacing':0,'word_spacing':0,'line_spacing':110,'highlight_padding':16,'highlight_padding_y':8}
+        for key,widget in self.inline_style_controls.items():
+            old=widget.blockSignals(True)
+            if isinstance(widget,QFontComboBox):widget.setCurrentFont(QFont(style.get('font','Arial')))
+            elif isinstance(widget,QComboBox):widget.setCurrentText(style.get(key,'底部'))
+            elif isinstance(widget,QSpinBox):widget.setValue(int(style.get(key,defaults[key])))
+            else:
+                color=style.get(key,'#FFFFFF');widget.setProperty('color',color);widget.setToolTip(color)
+                widget.setStyleSheet('min-height:16px;padding:2px 4px;border-bottom:3px solid '+QColor(color).name()+';')
+            widget.blockSignals(old)
+
+    def _inline_style_changed(self,*args):
+        if self._loading_state:return
+        style=copy.deepcopy(self._reels_style or self._reels_presets.get('默认白字',{}))
+        for key,widget in self.inline_style_controls.items():
+            if isinstance(widget,QFontComboBox):style[key]=widget.currentFont().family()
+            elif isinstance(widget,QComboBox):style[key]=widget.currentText()
+            elif isinstance(widget,QSpinBox):style[key]=widget.value()
+            else:style[key]=widget.property('color')
+        self._reels_style=style;self._state_changed()
+
+    def _inline_style_color(self,key):
+        widget=self.inline_style_controls[key];color=QColorDialog.getColor(QColor(widget.property('color')),self,'选择颜色')
+        if color.isValid():
+            widget.setProperty('color',color.name());self._inline_style_changed();self._sync_inline_styles()
 
     def _save_reels_style(self):
         if not self._reels_style:return
@@ -342,6 +395,7 @@ class PackagingReelsMixin:
     def _apply_reels_style(self):
         self._reels_style=copy.deepcopy(self._reels_presets[self.reels_preset.currentText()])
         self.reels_style_hint.setText('当前 Reels 效果：'+self.reels_preset.currentText())
+        self._sync_inline_styles()
         self._state_changed()
 
     def _add_output_controls(self,layout):
@@ -349,7 +403,7 @@ class PackagingReelsMixin:
         form.setVerticalSpacing(4)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.render_mode=QComboBox();self.render_mode.addItems(['自动（优先 FFmpeg）','FFmpeg CPU','Remotion 兼容']);self.render_mode.currentTextChanged.connect(self._state_changed)
-        form.addRow('渲染方式',self.render_mode)
+        self.render_mode.hide()
         self.output_resolution=QComboBox();self.output_resolution.addItems(['默认最高','720p','1080p','2K','4K']);self.output_resolution.setCurrentText('1080p')
         self.output_fps=QComboBox();self.output_fps.addItems(['24','25','30','50','60']);self.output_fps.setCurrentText('30')
         self.output_format=QComboBox();self.output_format.addItems(['MP4 / H.264','MOV / ProRes','WebM / VP9'])
@@ -399,6 +453,7 @@ class PackagingReelsMixin:
         self.reels_style_hint.setText('Reels 字幕 · FFmpeg 快速渲染' if self._reels_style else '原有字幕 · Remotion 兼容渲染')
         for name,preset in self._reels_presets.items():
             if preset==self._reels_style:self.reels_preset.setCurrentText(name);break
+        self._sync_inline_styles()
         p=state.get('params') or {}
         self.render_mode.setCurrentText(p.get('render_mode','自动（优先 FFmpeg）'))
         for key,default in [('output_resolution','1080p'),('output_fps','30'),('output_format','MP4 / H.264'),('output_fit','完整留边')]:getattr(self,key).setCurrentText(str(p.get(key,default)))

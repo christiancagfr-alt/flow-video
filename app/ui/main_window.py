@@ -21,7 +21,7 @@ from app.core import work_dates
 from app.ui.task_calendar import TaskCalendar
 from app.core.default_prompt import DEFAULT_CORE_PROMPT
 from app.core.naming import final_filename
-from app.ui.styles import LIGHT, DARK
+from app.ui.styles import LIGHT, DARK, apply_control_palette
 from app.ui.spreadsheet import SpreadsheetTable
 from app.ui.prompt_center import PromptCenterPage
 from app.ui.flow_task_center import FlowBatchCenterPage
@@ -201,23 +201,6 @@ class SettingsDialog(QDialog):
         oauth_pick = QPushButton("选择…"); oauth_pick.clicked.connect(self.pick_oauth_json); oauth_row.addWidget(oauth_pick)
         form.addRow("Google OAuth 客户端 JSON", oauth_wrap)
 
-        self.talking_base_prompt = QPlainTextEdit(); self.talking_base_prompt.setMaximumHeight(125)
-        self.talking_base_prompt.setPlaceholderText("留空也可以；第一次批量生成 TALKING 提示词前会提醒你设置。")
-        self.talking_base_prompt.setPlainText(repo.get_setting("talking_base_prompt", ""))
-        form.addRow("TALKING｜睁眼基础模板", self.talking_base_prompt)
-
-        self.praying_base_prompt = QPlainTextEdit(); self.praying_base_prompt.setMaximumHeight(125)
-        self.praying_base_prompt.setPlaceholderText("留空也可以；第一次批量生成 PRAYING 提示词前会提醒你设置。")
-        self.praying_base_prompt.setPlainText(repo.get_setting("praying_base_prompt", ""))
-        form.addRow("PRAYING｜闭眼基础模板", self.praying_base_prompt)
-
-        self.whisper_cli = QLineEdit(repo.get_setting("whisper_cli_path", ""))
-        self.whisper_cli.setPlaceholderText("留空自动寻找 whisper-cli")
-        form.addRow("whisper.cpp 命令", self.whisper_cli)
-        self.whisper_model = QLineEdit(repo.get_setting("whisper_model_path", ""))
-        self.whisper_model.setPlaceholderText("请选择本机 whisper.cpp 模型文件")
-        form.addRow("Whisper 模型", self.whisper_model)
-
         self.drive_desktop_path=QLineEdit(repo.get_setting('drive_desktop_path',''))
         self.drive_desktop_path.setPlaceholderText('留空自动识别Google Drive桌面版；也可选择我的云端硬盘')
         sync_wrap=QWidget(self);sync_row=QHBoxLayout(sync_wrap);sync_row.setContentsMargins(0,0,0,0);sync_row.addWidget(self.drive_desktop_path)
@@ -355,10 +338,6 @@ class SettingsDialog(QDialog):
         repo.set_setting("flow_download_root", self.segment_output_root.text().strip())
         repo.set_setting("drive_upload_root_url", self.drive_upload_root_url.text().strip())
         repo.set_setting("google_oauth_client_path", self.google_oauth_client_path.text().strip())
-        repo.set_setting("talking_base_prompt", self.talking_base_prompt.toPlainText().strip())
-        repo.set_setting("praying_base_prompt", self.praying_base_prompt.toPlainText().strip())
-        repo.set_setting("whisper_cli_path", self.whisper_cli.text().strip())
-        repo.set_setting("whisper_model_path", self.whisper_model.text().strip())
         repo.set_setting('timeline_fps', self.timeline_fps.currentText())
         repo.set_setting("whisper_language", self.whisper_language.currentText())
 
@@ -680,6 +659,9 @@ class MainWindow(QMainWindow):
         self.packaging_page = PackagingPage(self)
         from app.ui.packaging_components import PackagingComponentsPage
         self.components_page = PackagingComponentsPage(self.packaging_page,self)
+        self.packaging_sync_timer=QTimer(self);self.packaging_sync_timer.setInterval(3000)
+        self.packaging_sync_timer.timeout.connect(self.packaging_page.sync_edited_videos)
+        self.packaging_sync_timer.start()
         self.stack.addWidget(self.components_page)
         self.stats_page = StatisticsPage(self)
         self.stack.addWidget(self.dashboard)
@@ -834,6 +816,7 @@ class MainWindow(QMainWindow):
 
         app = QApplication.instance()
         if app:
+            apply_control_palette(app, sheet == DARK)
             app.setStyleSheet(sheet)
         self.setStyleSheet("")
         self.style().unpolish(self)

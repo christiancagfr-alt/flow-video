@@ -10,7 +10,7 @@ from app.ui.image_preview import set_image, load_pixmap
 from app.ui.confirmation import confirm_clear
 from app.services.image_assets import resolve_path, ImageAssetError
 from PySide6.QtWidgets import (
-    QLayout, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QDialog, QDialogButtonBox, QFormLayout, QPlainTextEdit, QLineEdit, QMessageBox, QProgressBar, QSplitter, QFrame, QCheckBox, QListWidget, QListWidgetItem, QGroupBox, QApplication, QButtonGroup, QTabWidget, QScrollArea, QGridLayout, QSizePolicy
+    QInputDialog, QLayout, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QDialog, QDialogButtonBox, QFormLayout, QPlainTextEdit, QLineEdit, QMessageBox, QProgressBar, QSplitter, QFrame, QCheckBox, QListWidget, QListWidgetItem, QGroupBox, QApplication, QButtonGroup, QTabWidget, QScrollArea, QGridLayout, QSizePolicy
 )
 
 from app.core import repository as repo
@@ -1610,6 +1610,7 @@ class PromptCenterPage(QWidget):
         task_actions.addWidget(self.delete_segment_btn)
         task_actions.addWidget(self.merge_prev_btn)
         task_actions.addWidget(self.merge_next_btn)
+        change_type=QPushButton('设置类型',objectName='softBtn');change_type.clicked.connect(self._set_selected_prompt_type);task_actions.addWidget(change_type)
         task_actions.addWidget(self.generate_selected)
         task_actions.addStretch(1)
         task_v.addLayout(task_actions)
@@ -1766,10 +1767,21 @@ class PromptCenterPage(QWidget):
         except Exception as exc: QMessageBox.warning(self,"删除片段",str(exc)); return
         self.checked_ids.discard(sid); self.editor_segment_id=None; self.reload_tasks()
 
+    def _set_selected_prompt_type(self):
+        sid=self._selected_prompt_segment_id()
+        if not sid:return
+        label,ok=QInputDialog.getItem(self,'片段类型','手动选择类型',['睁眼说话','闭眼祷告'],0,False)
+        if not ok:return
+        try:repo.set_prompt_segment_type(sid,'TALKING' if label=='睁眼说话' else 'PRAYING')
+        except Exception as exc:QMessageBox.warning(self,'片段类型',str(exc));return
+        self.editor_segment_id=None;self.reload_tasks()
+
     def _merge_selected_prompt_segment(self, direction):
         sid=self._selected_prompt_segment_id()
         if not sid: return
-        try: repo.merge_prompt_segment(sid,direction)
+        label,ok=QInputDialog.getItem(self,'合并文案','合并后的片段类型',['睁眼说话','闭眼祷告'],0,False)
+        if not ok:return
+        try: repo.merge_prompt_segment(sid,direction,'TALKING' if label=='睁眼说话' else 'PRAYING')
         except Exception as exc: QMessageBox.warning(self,"合并文案",str(exc)); return
         self.checked_ids.discard(sid); self.editor_segment_id=None; self.reload_tasks()
 

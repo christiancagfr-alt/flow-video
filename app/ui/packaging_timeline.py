@@ -33,7 +33,8 @@ class PackagingTimeline(QWidget):
 
     def paintEvent(self, event):
         p=QPainter(self);p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(),QColor('#f8faff'))
+        dark=self.palette().window().color().lightness()<128
+        p.fillRect(self.rect(),QColor('#171E29' if dark else '#f8faff'))
         left=94; width=max(1,self.width()-left-12); height=26
         main_duration=max(.1,float(self.state.get('duration') or 0),max((float(c.get('end',0)) for c in self.state.get('captions',[])),default=0))
         intro=self.state.get('intro') or {};outro=self.state.get('outro') or {}
@@ -42,7 +43,7 @@ class PackagingTimeline(QWidget):
         duration=self.offset+main_duration+tail
         self.duration=duration;self.track_width=width;self.hits=[]
         labels=['视频','音频','字幕','标题','水印','B-roll','片头 / 片尾']
-        p.setPen(QColor('#73839c'))
+        p.setPen(QColor('#AFC1DA' if dark else '#526176'))
         for i in range(11):
             x=left+width*i/10;p.drawLine(int(x),22,int(x),self.height())
             sec=duration*i/10;p.drawText(QRectF(x-20,0,50,22),Qt.AlignCenter,f'{int(sec//60):02}:{sec%60:04.1f}')
@@ -50,8 +51,8 @@ class PackagingTimeline(QWidget):
         for i,track in enumerate(active):
             label=labels[track]
             y=24+i*height
-            p.fillRect(QRectF(0,y,left-3,height),QColor('#eef3fa'))
-            p.setPen(QColor('#354663'));p.drawText(QRectF(6,y,left-8,height),Qt.AlignVCenter,label)
+            p.fillRect(QRectF(0,y,left-3,height),QColor('#232D3C' if dark else '#eef3fa'))
+            p.setPen(QColor('#EEF3FC' if dark else '#354663'));p.drawText(QRectF(6,y,left-8,height),Qt.AlignVCenter,label)
         def block(track,start,end,text,color,index=None,absolute=False):
             if track not in active:return
             track=active.index(track)

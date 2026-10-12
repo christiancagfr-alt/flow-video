@@ -1340,3 +1340,43 @@ QPushButton#tierSelectBtn:checked, QPushButton#tierSelectBtn[selected="true"] {
     background:#2F6FED; color:white; border-color:#2F6FED;
 }
 '''
+
+
+# Explicit control surfaces and palette keep OS dark mode from leaking into light UI.
+from pathlib import Path as _ThemePath
+_check_icon = (_ThemePath(__file__).resolve().parents[2] / 'assets/check-white.svg').as_posix()
+for _dark in (False, True):
+    _bg, _field, _fg, _muted, _border = ('#171E29','#232D3C','#EEF3FC','#B6C4D8','#62738A') if _dark else ('#F6F8FC','#FFFFFF','#182235','#526176','#AAB8CB')
+    _extra = f"""
+    QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {{background:{_field};color:{_fg};border:1px solid {_border};selection-background-color:#2867D5;selection-color:white;}}
+    QTabWidget::pane, QScrollArea > QWidget > QWidget {{background:{_bg};}}
+    QTabBar::tab {{background:{_field};color:{_fg};padding:7px 10px;}}
+    QTabBar::tab:selected, QPushButton#packagingSection:checked {{background:#2867D5;color:white;border:1px solid #72A5FF;}}
+    QToolTip {{background:{_field};color:{_fg};border:1px solid {_border};padding:5px;}}
+    QComboBox QAbstractItemView {{background:{_field};color:{_fg};selection-background-color:#2867D5;selection-color:white;}}
+    QCheckBox::indicator, QTableView::indicator, QTreeView::indicator {{width:17px;height:17px;border:1px solid {_border};border-radius:3px;background:{_field};}}
+    QCheckBox::indicator:checked, QCheckBox#largeCheck::indicator:checked, QTableView::indicator:checked, QTreeView::indicator:checked {{background:#2867D5;border:1px solid #2867D5;image:url("{_check_icon}");}}
+    QTableView::item:selected, QTreeView::item:selected, QListView::item:selected {{background:#2867D5;color:white;}}
+    QLabel#muted {{color:{_muted};}}
+    QAbstractSpinBox:disabled, QLineEdit:disabled, QComboBox:disabled {{color:{_muted};background:{_bg};}}
+    """
+    if _dark: DARK += _extra
+    else: LIGHT += _extra
+
+def apply_control_palette(app, dark):
+    from app.ui.control_guard import install_control_guard
+    install_control_guard(app)
+    from PySide6.QtGui import QPalette, QColor
+    app.setStyle('Fusion')
+    palette=QPalette()
+    colors={'Window':'#171E29','Base':'#232D3C','AlternateBase':'#1D2633','Text':'#EEF3FC','WindowText':'#EEF3FC','Button':'#232D3C','ButtonText':'#EEF3FC','PlaceholderText':'#B6C4D8'} if dark else {'Window':'#F6F8FC','Base':'#FFFFFF','AlternateBase':'#EFF3F9','Text':'#182235','WindowText':'#182235','Button':'#FFFFFF','ButtonText':'#182235','PlaceholderText':'#526176'}
+    colors.update(Highlight='#2867D5',HighlightedText='#FFFFFF',Link='#72A5FF' if dark else '#245ECB')
+    for role,color in colors.items():palette.setColor(getattr(QPalette.ColorRole,role),QColor(color))
+    app.setPalette(palette)
+
+for _mode in ('light','dark'):
+    _up=(_ThemePath(__file__).resolve().parents[2]/f'assets/spin-{_mode}-up.svg').as_posix()
+    _down=(_ThemePath(__file__).resolve().parents[2]/f'assets/spin-{_mode}-down.svg').as_posix()
+    _arrows=f'QSpinBox::up-arrow,QDoubleSpinBox::up-arrow {{image:url("{_up}");width:10px;height:9px;}} QSpinBox::down-arrow,QDoubleSpinBox::down-arrow {{image:url("{_down}");width:10px;height:9px;}}'
+    if _mode=='dark':DARK+=_arrows
+    else:LIGHT+=_arrows

@@ -3633,6 +3633,32 @@ def _assert_prompt_copy_editable(con, video_id):
     return rows
 
 
+def _save_manual_segment_type(con, sid, text, mode=None):
+    import json
+    from app.services.performance_types import choices
+    from app.core import work_dates
+    row=con.execute('SELECT fs.video_id,v.performance_mode FROM flow_segments fs JOIN videos v ON v.id=fs.video_id WHERE fs.id=?',(sid,)).fetchone()
+    saved=choices(con,row['video_id'])
+    previous=saved.get(str(sid),{})
+    mode=mode or previous.get('mode') or row['performance_mode']
+    if mode not in ('TALKING','PRAYING'):raise ValueError('请选择睁眼或闭眼')
+    saved[str(sid)]={'text':text,'mode':mode,'source':'manual'}
+    valid={str(r[0]) for r in con.execute('SELECT id FROM flow_segments WHERE video_id=?',(row['video_id'],))}
+    data={'work_date':work_dates.video_work_date(con,row['video_id']),'segments':{k:v for k,v in saved.items() if k in valid}}
+    con.execute('INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+        (f"segment_eye_types:{row['video_id']}",json.dumps(data,ensure_ascii=False)))
+
+
+def set_prompt_segment_type(segment_id, mode):
+    with connect() as con:
+        con.execute('BEGIN IMMEDIATE')
+        row=con.execute('SELECT video_id,foreign_text FROM flow_segments WHERE id=?',(int(segment_id),)).fetchone()
+        if not row:raise ValueError('任务片段不存在')
+        _assert_prompt_copy_editable(con,row['video_id'])
+        _reset_prompt_after_copy_change(con,int(segment_id),row['foreign_text'])
+        _save_manual_segment_type(con,int(segment_id),row['foreign_text'],mode)
+
+
 def _reset_prompt_after_copy_change(con, sid, text):
     from app.services.speech_preparation import timing_metadata
     meta=timing_metadata(text)
@@ -3640,6 +3666,7 @@ def _reset_prompt_after_copy_change(con, sid, text):
         input_tokens=0,cached_tokens=0,output_tokens=0,cost_usd=0,prompt_review_status='待检查',prompt_submitted_at='',
         estimated_speech_duration=?,flow_duration_seconds=?,timing_status=?,manual_text_lock=1 WHERE id=?""",
         (text,float(meta.get('estimated_speech_duration') or 0),int(meta.get('flow_duration_seconds') or 0),str(meta.get('timing_status') or ''),int(sid)))
+    _save_manual_segment_type(con,sid,text)
 
 
 def edit_prompt_segment_text(segment_id, text):
@@ -3665,7 +3692,7 @@ def edit_prompt_segment_text(segment_id, text):
     return True
 
 
-def merge_prompt_segment(segment_id, direction):
+def merge_prompt_segment(segment_id, direction, mode=None):
     sid=int(segment_id); direction=str(direction or '').lower()
     if direction not in ('prev','next'): raise ValueError('无效合并方向')
     with connect() as con:
@@ -3685,6 +3712,7 @@ def merge_prompt_segment(segment_id, direction):
         _reset_prompt_after_copy_change(con,keep,merged)
         con.execute("DELETE FROM flow_duration_choices WHERE segment_id=?",(remove,))
         con.execute("DELETE FROM flow_segments WHERE id=?",(remove,))
+        _save_manual_segment_type(con,keep,merged,mode)
         remaining=con.execute("SELECT id FROM flow_segments WHERE video_id=? ORDER BY seg_seq,id",(int(row['video_id']),)).fetchall()
         for i,r in enumerate(remaining,1): con.execute("UPDATE flow_segments SET seg_seq=? WHERE id=?",(-i,int(r['id'])))
         for i,r in enumerate(remaining,1): con.execute("UPDATE flow_segments SET seg_seq=? WHERE id=?",(i,int(r['id'])))
