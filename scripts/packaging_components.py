@@ -85,10 +85,10 @@ def main():
                 time.sleep(3*(attempt+1))
         print('模型下载完成，可开始识别。',flush=True)
     elif action=='asr':
-        from install_packaging_asr import main as install
+        from scripts.install_packaging_asr import main as install
         raise SystemExit(install())
     elif action=='ffmpeg':
-        from install_packaging_asr import main as install
+        from scripts.install_packaging_asr import main as install
         raise SystemExit(install(['imageio-ffmpeg==0.6.0'],ROOT/'ffmpeg-libs'))
     elif action=='remotion':
         print('准备 Node / npm…',flush=True)
@@ -111,3 +111,4 @@ if __name__=='__main__':
         if any(x in text for x in ('10054','ConnectError','snapshot','Hub')):
             text='模型服务器连接中断或模型缓存不完整。请检查网络 / 代理，在组件管理中点击下载 / 重试；完整缓存下载成功后可离线使用。'
         print('未完成：'+text,flush=True);sys.exit(1)
+
