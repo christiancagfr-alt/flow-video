@@ -137,7 +137,7 @@ function P.io.popen(command,mode)
         if mode=='*a' then local rest=text:sub(self.position);self.position=#text+1;return rest end
         if self.position>#text then return nil end
         local finish=text:find('\n',self.position,true) or #text+1
-        local line=text:sub(self.position,finish-1);self.position=finish+1;return line
+        local line=text:sub(self.position,finish-1):gsub('\r$','');self.position=finish+1;return line
     end
     function object:lines() return function() return self:read('*l') end end
     function object:close() return code==0 and true or nil,'exit',code end

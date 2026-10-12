@@ -173,10 +173,10 @@ def main():
     args=parser.parse_args();request=Path(args.request)
     try:
         output=dispatch(request.read_text(encoding='utf-8'), args.pid)
-        request.with_suffix('.out').write_text(output or '',encoding='utf-8')
+        request.with_suffix('.out').write_text(output or '',encoding='utf-8',newline='\n')
         return 0
     except Exception as exc:
-        request.with_suffix('.out').write_text(str(exc),encoding='utf-8')
+        request.with_suffix('.out').write_text(str(exc),encoding='utf-8',newline='\n')
         return 1
 
 if __name__=='__main__':

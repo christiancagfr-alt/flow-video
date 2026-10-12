@@ -102,8 +102,12 @@ def install_bridge():
     for source in sources:
         if not source.is_file():
             raise RuntimeError('安装文件缺失：' + str(source))
-    changed = [source for source in sources if not (script_dir()/source.name).is_file() or (script_dir()/source.name).read_bytes()!=source.read_bytes()]
-    config = {'python':Path(sys.executable).with_name('python.exe').as_posix(), 'helper':(script_dir()/'windows_resolve_runtime.py').as_posix()} if os.name == 'nt' else {}
+    def destination(source):
+        if source.name == 'windows_resolve_runtime.py':
+            return bridge_root() / 'runtime' / source.name
+        return script_dir() / source.name
+    changed = [source for source in sources if not destination(source).is_file() or destination(source).read_bytes()!=source.read_bytes()]
+    config = {'python':Path(sys.executable).with_name('python.exe').as_posix(), 'helper':(bridge_root()/'runtime/windows_resolve_runtime.py').as_posix()} if os.name == 'nt' else {}
     config_changed = bool(config and read_pairs(script_dir()/'windows-runtime.ini') != config)
     if not changed and not config_changed:
         return False
@@ -112,12 +116,15 @@ def install_bridge():
     script_dir().mkdir(parents=True, exist_ok=True)
     # Install the module first and the calling bridge last.
     for source in reversed(changed):
-        dest=script_dir()/source.name
+        dest=destination(source)
+        dest.parent.mkdir(parents=True,exist_ok=True)
         temp=dest.with_suffix('.tmp')
         shutil.copyfile(source,temp)
         temp.replace(dest)
     if os.name == 'nt':
         atomic_pairs(script_dir()/'windows-runtime.ini', config)
+        # Remove only our former internal helper entry from Resolve's menu.
+        (script_dir()/'windows_resolve_runtime.py').unlink(missing_ok=True)
     return True
 
 

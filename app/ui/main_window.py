@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 import traceback
+import os
 import time
 from functools import partial
 from pathlib import Path
@@ -221,6 +222,16 @@ class SettingsDialog(QDialog):
         browse.clicked.connect(self.pick_edit_root)
         edit_row.addWidget(browse)
         form.addRow("剪辑路径根目录", edit_wrap)
+        self.davinci_executable = QLineEdit(repo.get_setting('davinci_executable_path',''))
+        self.davinci_executable.setPlaceholderText('留空自动检测；也可选择 Resolve.exe')
+        if os.name == 'nt':
+            resolve_row=QHBoxLayout();resolve_row.addWidget(self.davinci_executable,1)
+            pick=QPushButton('选择…')
+            def pick_resolve():
+                path,_=QFileDialog.getOpenFileName(self,'选择达芬奇程序',self.davinci_executable.text(),'Resolve (Resolve.exe)')
+                if path:self.davinci_executable.setText(path)
+            pick.clicked.connect(pick_resolve);resolve_row.addWidget(pick);form.addRow('达芬奇程序',resolve_row)
+        else:self.davinci_executable.hide()
         from app.services.resolve_daily import FPS_VALUES
         self.timeline_fps = QComboBox()
         self.timeline_fps.addItems(FPS_VALUES)
@@ -329,6 +340,7 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def save(self):
+        repo.set_setting('davinci_executable_path',self.davinci_executable.text().strip())
         creator=self.creator.text().strip()
         self.settings.setValue("creator", creator)
         repo.set_default_creator(creator)

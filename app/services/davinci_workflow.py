@@ -210,10 +210,9 @@ def launch_resolve() -> None:
             if (process.info['name'] or '').lower() == 'resolve.exe':
                 return
         configured = str(repo.get_setting('davinci_executable_path', '') or '').strip()
-        executable = Path(configured) if configured else Path(os.environ.get('PROGRAMFILES', 'C:/Program Files')) / 'Blackmagic Design/DaVinci Resolve/Resolve.exe' 
-        if not executable.is_file():
-            raise RuntimeError('DaVinci Resolve.exe not found: ' + str(executable))
-        subprocess.Popen([str(executable)])
+        from app.services.resolve_windows_paths import find_executable
+        executable = find_executable(configured)
+        subprocess.Popen([str(executable)], cwd=str(executable.parent))
         return
     if os.name != 'posix':
         raise RuntimeError('当前 DaVinci 自动启动流程针对 macOS。')
