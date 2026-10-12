@@ -19,4 +19,13 @@ def load_desktop_config(path):
     required=('client_id','client_secret','auth_uri','token_uri','redirect_uris')
     if any(not config.get(key) for key in required) or not isinstance(config.get('redirect_uris'),list):
         raise ValueError('OAuth 桌面应用客户端文件缺少必要字段，请从 Google Cloud 重新下载完整 JSON。')
+    from urllib.parse import urlsplit
+    endpoints={'auth_uri':{'accounts.google.com'},'token_uri':{'oauth2.googleapis.com','accounts.google.com'}}
+    for key,hosts in endpoints.items():
+        try:
+            uri=urlsplit(config[key])
+            valid=uri.scheme=='https' and uri.hostname in hosts and uri.port in (None,443) and not uri.username and not uri.password and not uri.fragment
+        except (TypeError,ValueError):
+            valid=False
+        if not valid:raise ValueError('OAuth 授权地址必须是 Google 官方 HTTPS 地址，请从 Google Cloud 重新下载客户端文件。')
     return data

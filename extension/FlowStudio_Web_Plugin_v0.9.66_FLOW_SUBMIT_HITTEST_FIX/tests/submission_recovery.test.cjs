@@ -1,0 +1,26 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const core=require('../result-core.js');
+const prompt='A complete exact prompt including speech and shot instructions.';
+const item={id:'new-video',type:'VIDEO',current:{prompt}};
+assert.deepEqual(core.exactPromptVideoIds([item],prompt,['old-video']),['new-video']);
+assert.deepEqual(core.exactPromptVideoIds([item],prompt,['new-video']),[]);
+assert.deepEqual(core.exactPromptVideoIds([{...item,type:'IMAGE'}],prompt),[]);
+assert.deepEqual(core.exactPromptVideoIds([{id:'history',type:'VIDEO',history:{prompt}}],prompt),[]);
+assert.deepEqual(core.exactPromptVideoIds([{id:'title',type:'VIDEO',displayName:prompt}],prompt),[]);
+assert.deepEqual(core.exactPromptVideoIds([item],prompt.slice(0,-1)),[]);
+assert.equal(core.exactPromptVideoIds([item,{...item,id:'another'}],prompt).length,2);
+const source=fs.readFileSync(path.join(__dirname,'../downloads.js'),'utf8').replace('void dlRecover().catch(()=>{});','');
+let listener;const ctx=vm.createContext({URL,Date,Promise,setTimeout,clearTimeout,setInterval(){},console,chrome:{storage:{local:{get:async()=>({}),set:async()=>{}}},downloads:{onChanged:{addListener(){}}},runtime:{id:'ext-test',onMessage:{addListener(f){listener=f}}},alarms:{onAlarm:{addListener(){}},create(){}}}});
+vm.runInContext(source,ctx);const run=s=>vm.runInContext(s,ctx);
+(async()=>{
+ const first=await run(`dlReserve({info:{segment_id:2920,document_number:1,command_id:'c',round:1}},{tab:{url:'https://flow.google.com/project/p/collection/c'}})`);
+ const second=await run(`dlReserve({info:{segment_id:2920,document_number:1,command_id:'c',round:1}},{tab:{url:'https://flow.google.com/project/p/collection/c'}})`);
+ assert.equal(first.key,second.key);assert.equal(second.existing,true);assert.equal(first.existing,undefined);
+ assert.equal(listener({type:'FS_DOWNLOAD_POLL'},{id:'other',tab:{url:'https://flow.google.com/project/p'}},()=>{throw new Error('untrusted')}),undefined);
+ const send=(msg,url='https://flow.google.com/project/p/collection/c')=>new Promise(resolve=>listener(msg,{id:'ext-test',tab:{url}},resolve));
+ assert.equal((await send({type:'FS_DOWNLOAD_SUBMITTING',key:first.key})).ok,true);
+ assert.equal((await send({type:'FS_DOWNLOAD_SUBMITTING',key:first.key})).ok,false);
+ assert.equal((await send({type:'FS_DOWNLOAD_PENDING',command_id:'c'})).result.length,1);
+ assert.equal((await send({type:'FS_DOWNLOAD_PENDING',command_id:'c'},'https://flow.google.com/project/p/collection/other')).result.length,0);
+ console.log('PASS: full prompt only; image/history/title/substring rejected; baseline exclusion; ambiguity retained; durable duplicate guard; scoped pending recovery');
+})().catch(e=>{console.error(e);process.exitCode=1});

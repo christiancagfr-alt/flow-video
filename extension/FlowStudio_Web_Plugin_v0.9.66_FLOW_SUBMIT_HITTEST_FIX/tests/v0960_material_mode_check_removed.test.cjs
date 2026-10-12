@@ -1,0 +1,12 @@
+const fs=require('fs');
+const path=require('path');
+const assert=require('assert');
+const page=fs.readFileSync(path.join(__dirname,'..','page-engine.js'),'utf8');
+const manifest=JSON.parse(fs.readFileSync(path.join(__dirname,'..','manifest.json'),'utf8'));
+assert.ok(['0.9.60','0.9.62'].includes(manifest.version));
+assert.doesNotMatch(page,/FLOW_MODE_NOT_CONFIRMED_AFTER_MATERIAL_SELECT:VIDEO_REFERENCES/,'post-select MATERIAL mode hard failure must be removed');
+assert.doesNotMatch(page,/FLOW_MODE_CHANGED_BEFORE_SUBMIT:\+mode/,'pre-submit MATERIAL mode hard failure must be removed');
+assert.match(page,/if \(mode==='VIDEO_FRAMES' && signal\(service,v => modes\.includes\(v\)\)\(\) !== mode\) throw new Error\('FLOW_MODE_NOT_CONFIRMED:'\+mode\)/,'FRAME strict confirmation must remain');
+assert.match(page,/durationSignal\.set\(mode==='VIDEO_REFERENCES' \? 8 : Number\(detail\.duration \|\| 8\)\)/,'MATERIAL fixed 8s must remain');
+assert.match(page,/await select\(item\);/,'Flow-native asset select must remain');
+console.log('PASS: v0.9.60 removes MATERIAL mode confirmation vetoes while preserving FRAME checks and MATERIAL fixed 8s');

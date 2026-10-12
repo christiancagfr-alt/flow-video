@@ -1,0 +1,12 @@
+const fs=require('fs');
+const path=require('path');
+const assert=require('assert');
+const root=path.join(__dirname,'..');
+const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
+const page=fs.readFileSync(path.join(root,'page-engine.js'),'utf8');
+assert.ok(['0.9.58','0.9.59','0.9.60','0.9.62'].includes(manifest.version));
+assert.match(page,/durationSignal\.set\(mode==='VIDEO_REFERENCES' \? 8 : Number\(detail\.duration \|\| 8\)\)/,'configure must force MATERIAL hidden duration to 8 while preserving FRAME requested duration');
+assert.match(page,/if \(materialMode && Number\(durationSignal\(\)\)!==8\) durationSignal\.set\(8\)/,'verify must repair retained non-8 MATERIAL duration');
+assert.match(page,/FLOW_DURATION_NOT_CONFIRMED:expected=/,'duration must be verified after material asset selection');
+assert.match(page,/if \(\(detail\.mode\|\|'VIDEO_FRAMES'\)==='VIDEO_REFERENCES'\) \{\s*detail\.duration=8;/,'incoming MATERIAL task duration must normalize to 8');
+console.log('PASS: v0.9.58 MATERIAL forces the hidden Flow duration state to 8 without changing FRAME duration behavior');

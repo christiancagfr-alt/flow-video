@@ -1,6 +1,6 @@
 # Flow Studio 安全审核报告
 
-审核日期：2026-10-10 至 2026-10-11。发布版本：0.13.5.106；扩展版本：1.8.6。
+审核日期：2026-10-10 至 2026-10-12。当前源码版本：1.0.0；随包扩展：0.9.66。2026-10-11 报告中的 0.13.5.106 / 1.8.6 记录仍保留。
 
 ## 1. 项目概况与范围
 
@@ -29,6 +29,10 @@ Python/PySide6 桌面 UI、SQLite、本地 HTTP 桥接、Google OAuth/Sheets/Dri
 | C08 | 代码 | High | app/services/workflow.py:49 | 已修复 | 伪造回执可能移动或清理下载目录之外的视频；解析真实路径后限制在配置下载根目录内；辅助图同样受限。 |
 | K01 | 密钥 | Medium | app/services/credential_file.py:5 | 已修复 | 本地 OAuth 刷新凭据原为明文；Windows DPAPI 加密，旧文件在下次读取时自动迁移。 |
 | K02 | 密钥 | High | .gitignore:4; scripts/build_windows_portable.py:43 | 已修复 | 直接压缩工作目录可能发布真实凭据、数据库和日志；忽略规则加源码白名单，发行包单独扫描。 |
+| K03 | 密钥 | High | app/services/credential_file.py | 已修复 | macOS/Linux 曾把 Google 刷新令牌明文写入 `google_token.json`。现在写入系统凭据库，回读一致后才把本地文件换成不含令牌的指针；凭据库失败则报错并保留原文件。 |
+| C09 | 代码 | Medium | extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX/downloads.js | 已修复 | 下载消息监听器未校验扩展 ID 与 `https://flow.google.com` 来源。已与其他后台监听器使用同一校验。 |
+| C10 | 代码 | Low | extension/.../content.js 媒体地址 | 已修复 | 面板图片地址只接受 http、https、blob，避免 `javascript:` 一类地址进入 `img src`。 |
+| C11 | 代码 | Low | scripts/packaging_components.py Node 压缩包 | 已修复 | Windows Node 压缩包改为逐项校验路径后写出，不再整包 `extractall`。 |
 | R01 | 代码 | Medium | app/services/bridge_security.py:7 | 建议关注 | 桥接仍信任任意已安装 Chrome 扩展及本机同用户进程；严格固定扩展 ID/配对会改变安装流程，本次未加入。 |
 | R02 | 依赖 | Low | requirements-release.lock:35 | 建议关注 | pywinauto 0.6.9 更新频率偏低；上游 datafilename 反序列化风险入口未被本项目调用。 |
 | R03 | 代码 | Low | app/services/quiet_runtime.py:26 | 建议关注 | 原生组件 stderr 直接落本地日志，无法保证所有第三方输出都脱敏；日志和任务素材不随发行版发布。 |
@@ -131,3 +135,13 @@ SQL 查询的用户值使用参数绑定；动态表名/字段路径重点检查
 建议后续考虑桥接固定扩展 ID 或一次性配对（需安装流程设计）；目前信任本机同用户及已安装扩展。任务源 CSV 等非图片 URL 的使用仍应只配置可信来源。Qt/FFmpeg/Chromium 等原生组件的细粒度 SBOM/CVE 映射、Chrome/Resolve/可选外部工具具体版本审计均为**待确认**，不纳入 pip 零漏洞结论。UI 页面适配及真实账号全流程验收也为**待确认**。
 
 发布应只从白名单 staging 生成源码和便携压缩包，附 SHA-256，并对 ZIP 文件清单与凭据模式再次检查。不要上传原始环境扫描、原始运行日志、截图中的任务信息或数据库。未来依赖升级仍需重新执行审计及功能测试。
+
+## 7. 2026-10-12 复核
+
+复核范围是当前源码、`requirements-release.lock`、`requirements-macos.lock`、`requirements-linux.lock`、`requirements-asr.txt`、`.github/workflows/installers.yml` 和 0.9.66 扩展运行文件。`build/`、`dist/`、`data/` 不作为发行物。本地原始扫描留在 `audit/local-2026-10-12/`，该目录已被 `.gitignore` 排除。
+
+依赖：发行锁中的 urllib3 2.8.0 已包含 2026-09-15 公告的三项修复（GHSA-8988-9cw3-xx77、GHSA-vxq7-64xx-v4gw、GHSA-gh4c-6fx4-qh6g），当前版本不在受影响范围内。Pillow 12.3.0 是官方说明中上述 2026 年图像解析问题的修复版本。oauthlib 4.0.0、httplib2 0.32.0、protobuf 6.33.6、pyasn1 0.6.4、idna 3.20 仍高于此前记录的修复线。psutil 7.2.2 的公开页面未列出影响该版本的漏洞。Qt CVE-2025-4211 的修复版本早于 PySide6 6.11.2；PySide6 / FFmpeg / Chromium 的完整原生映射仍为**待确认**。未发现需要大版本升级才能修复的 Critical / High 项，因此没有改锁文件。pywinauto 0.6.9 仍是低更新频率，且本项目未调用其 datafilename 反序列化入口。
+
+密钥：工作区 `data/google_token.json` 被 `/data/` 与 `*token*.json` 忽略。本次没有读取或记录其中的值。若该文件或任何 API Key 曾经离开这台电脑，必须在对应平台作废并重新生成；只改代码不够。
+
+插件：Windows、macOS、Linux 构建都只复制 0.9.66 的运行文件。`REPLACE.txt` 说明以后可以直接替换该目录。1.8.3 源码目录仍在仓库里，三个平台的打包脚本都会跳过它，安装包不再附带。

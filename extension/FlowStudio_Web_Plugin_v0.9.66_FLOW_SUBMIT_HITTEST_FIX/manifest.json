@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "Flow Studio Web Plugin",
+  "description": "Flow Studio：后台最小化自愈、按浏览器独立错峰、动态通道、Google任务源同步、持久事件队列；保留原上传/下载核心。",
+  "version": "0.9.66",
+  "version_name": "0.9.66 · Flow Studio 1.0 · 提交命中与下载修复 · 睁眼参考图",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "tabs",
+    "debugger",
+    "downloads",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://flow.google.com/*",
+    "http://127.0.0.1/*",
+    "https://*.googleapis.com/*",
+    "https://*.googleusercontent.com/*",
+    "https://flow-content.google/*",
+    "https://docs.google.com/*",
+    "https://drive.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://flow.google.com/*"
+      ],
+      "js": [
+        "result-core.js",
+        "page-engine.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://flow.google.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Flow Studio"
+  }
+}

@@ -931,7 +931,7 @@ def generate_enhanced_prompts(*, model, core_prompt, group, config, preset_snaps
     if data.get('status')=='incomplete':raise RuntimeError('辅助图规划返回不完整，请检查后重试')
     plan=json.loads(_extract_output_text(data))
     camera_motion.prepare_review_draft(plan,segments)
-    if len(plan.get('IMAGE_PLAN') or [])>int(config.get('camera_limit') or 0):raise ValueError('CAMERA_PLAN: auxiliary image limit exceeded')
+    if len(plan.get('IMAGE_PLAN') or [])>int(config.get('camera_limit') or 0):raise ValueError('运镜方案：辅助图片数量超过设置上限')
     prompts={};original={};by_id={str(x['segment_id']):x for x in segments}
     for item in plan['VIDEO_PLAN']:
         sid=str(item['SEGMENT_ID']);seg=by_id[sid];cp=item.get('camera_motion') or {}

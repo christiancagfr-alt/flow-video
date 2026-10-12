@@ -16,12 +16,14 @@ def main():
     run(str(python),'-m','pip','install','--only-binary=:all:','-r',str(ROOT/'requirements-linux.lock'))
     run(str(python),'-m','pip','check')
     for name in subprocess.check_output(['git','ls-files','-z'],cwd=ROOT).decode().split('\0'):
-        if not name or name.startswith('.github/'):continue
+        if not name or name.startswith('.github/') or name.startswith('extension/FlowStudio_Web_Plugin_v1.8.3_IDENTITY_ALIAS_DOWNLOAD'):continue
         source=ROOT/name
         if source.is_file():
             target=app/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
     (app/'installed.flag').write_text('Flow Studio managed installation\n')
     from bundle_packaging_components import bundle
+    from bundle_web_plugin import copy_plugin
+    copy_plugin(ROOT, app)
     bundle(app,python)
     manifest={'python':'3.13.16','python_sha256':SHA,'architecture':'x86_64','packages':json.loads(subprocess.check_output([str(python),'-m','pip','list','--format=json']))}
     (app/'RUNTIME_MANIFEST.json').write_text(json.dumps(manifest,indent=2))

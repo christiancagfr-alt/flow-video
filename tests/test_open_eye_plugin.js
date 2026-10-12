@@ -1,6 +1,6 @@
 const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
 const path=require('path');
-const root=path.join(__dirname,'../extension/FlowStudio_Web_Plugin_v1.8.3_IDENTITY_ALIAS_DOWNLOAD');
+const root=path.join(__dirname,'../extension/'+(process.env.FLOW_TEST_PLUGIN||'FlowStudio_Web_Plugin_v1.8.3_IDENTITY_ALIAS_DOWNLOAD'));
 const results=require(path.join(root,'result-core.js'));
 const code=fs.readFileSync(path.join(root,'page-engine.js'),'utf8');
 const start=code.indexOf('  async function ensureOpenEye(detail)');

@@ -30,10 +30,19 @@ def node_runtime():
             while chunk:=response.read(1024*1024):digest.update(chunk);out.write(chunk)
         if digest.hexdigest()!=checksum:raise ValueError('Node 下载校验失败')
         if system=='win':
+            from pathlib import PurePosixPath
             with zipfile.ZipFile(archive) as z:
                 for member in z.infolist():
-                    if not (folder/member.filename).resolve().is_relative_to(folder.resolve()):raise ValueError('非法压缩包路径')
-                z.extractall(folder)
+                    parts=PurePosixPath(member.filename.replace('\\','/')).parts
+                    if member.is_dir():
+                        if '..' in parts or any(':' in part for part in parts):raise ValueError('非法压缩包路径')
+                        continue
+                    if not parts or '..' in parts or any(':' in part or part.startswith('/') for part in parts):
+                        raise ValueError('非法压缩包路径')
+                    target=folder.joinpath(*parts).resolve()
+                    if not target.is_relative_to(folder.resolve()):raise ValueError('非法压缩包路径')
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with z.open(member) as source, target.open('wb') as output:shutil.copyfileobj(source, output)
         else:
             with tarfile.open(archive) as t:t.extractall(folder,filter='data')
     return node_runtime()
@@ -100,7 +109,14 @@ def main():
         manifest={'private':True,'dependencies':{'remotion':'4.0.534','@remotion/cli':'4.0.534','react':'19.2.0','react-dom':'19.2.0'}}
         (folder/'package.json').write_text(json.dumps(manifest),encoding='utf-8')
         process.run([str(node),str(npm),'install','--registry=https://registry.npmjs.org','--cache',str(ROOT/'npm-cache')],cwd=folder,env=env,check=True,stdout=sys.stdout,stderr=sys.stderr)
-        process.run([str(node),str(folder/'node_modules/@remotion/cli/remotion-cli.js'),'browser','ensure'],cwd=folder,env=env,check=True,stdout=sys.stdout,stderr=sys.stderr)
+        for attempt in range(3):
+            try:
+                process.run([str(node),str(folder/'node_modules/@remotion/cli/remotion-cli.js'),'browser','ensure'],cwd=folder,env=env,check=True,stdout=sys.stdout,stderr=sys.stderr,timeout=300)
+                break
+            except (process.CalledProcessError,process.TimeoutExpired):
+                if attempt==2:raise
+                print('渲染浏览器下载未完成，保留缓存后重试…',flush=True)
+                time.sleep(5*(attempt+1))
         print('渲染引擎和浏览器安装完成。',flush=True)
     else:raise ValueError('未知组件操作')
 

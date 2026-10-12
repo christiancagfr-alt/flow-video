@@ -1,0 +1,12 @@
+const fs=require('fs'),path=require('path'),assert=require('assert/strict');
+const root=path.join(__dirname,'..');
+const content=fs.readFileSync(path.join(root,'content.js'),'utf8');
+const page=fs.readFileSync(path.join(root,'page-engine.js'),'utf8');
+assert.ok(page.includes("const formalAsset=String(x.id||'').trim().length>=8"),'formal Flow IMAGE row must count as real catalog evidence without requiring refresh-only preview URL');
+assert.ok(page.includes('!!url || !!flags.ready || formalAsset'),'scan_media must release the gate for a stable formal image while still blocking explicit loading/error');
+assert.ok(content.includes('failedUploadHistory: new Map()'),'failure history state missing');
+assert.ok(content.includes("return 'fs-upload-failures:'"),'failure names must be persisted per task wave across page refresh');
+assert.ok(content.includes("status:'曾失败，后续已上传成功'"),'recovered uploads must keep the historical failed filename visible');
+assert.ok(content.includes("<b>上传失败图片（完整文件名）</b>"),'plugin must display full failed image names');
+assert.ok(content.includes("if(mediaUploadUsable(m)){\n        // Only a truly usable Flow image may clear the retry ledger."),'uploading/error placeholders must not clear retry/failure evidence');
+console.log('PASS refresh-stall readiness fallback and persistent failed-image-name history');

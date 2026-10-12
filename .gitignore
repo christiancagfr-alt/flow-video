@@ -21,3 +21,6 @@ build/
 dist/
 audit/environment-audit.json
 .DS_Store
+
+# Private audit evidence; never publish or bundle.
+/audit/local-*/

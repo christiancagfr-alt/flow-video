@@ -90,4 +90,66 @@ class SecurityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             p=Path(folder)/'token.json';payload={'refresh_token':'not-a-real-test-secret'};p.write_text(json.dumps(payload))
             self.assertEqual(credential_file.load(p),payload);self.assertNotIn(payload['refresh_token'],p.read_text());self.assertEqual(credential_file.load(p),payload)
+
+    def test_keyring_migration_replaces_file_only_after_readback(self):
+        class Vault:
+            def __init__(self):
+                self.data={}
+            def set_password(self,service,account,password):
+                self.data[(service,account)]=password
+            def get_password(self,service,account):
+                return self.data.get((service,account))
+            def delete_password(self,service,account):
+                self.data.pop((service,account),None)
+        class Mismatch(Vault):
+            def get_password(self,service,account):
+                return 'different'
+        class Down:
+            def set_password(self,*args):
+                raise OSError('locked')
+            def get_password(self,*args):
+                return None
+        with tempfile.TemporaryDirectory() as folder:
+            payload={'refresh_token':'not-a-real-test-secret','token':'abc'}
+            original=json.dumps(payload)
+            p=Path(folder)/'google_token.json'
+            p.write_text(original,encoding='utf-8')
+            with self.assertRaises(credential_file.CredentialStoreError):
+                credential_file.load(p,vault=Mismatch())
+            self.assertEqual(p.read_text(encoding='utf-8'),original)
+            with self.assertRaises(credential_file.CredentialStoreError):
+                credential_file.save(p,original,vault=Down())
+            self.assertEqual(p.read_text(encoding='utf-8'),original)
+            vault=Vault()
+            self.assertEqual(credential_file.load(p,vault=vault),payload)
+            stored=p.read_text(encoding='utf-8')
+            self.assertNotIn(payload['refresh_token'],stored)
+            self.assertIn('keyring',stored)
+            self.assertEqual(credential_file.load(p,vault=vault),payload)
+            missing=Path(folder)/'new.json'
+            with self.assertRaises(credential_file.CredentialStoreError):
+                credential_file.save(missing,original,vault=Down())
+            self.assertFalse(missing.exists())
+            credential_file.delete(p,vault=vault)
+            self.assertFalse(p.exists())
+            self.assertEqual(vault.data,{})
+
+    def test_packaged_plugin_is_replaceable_runtime(self):
+        import importlib.util
+        script=Path(__file__).resolve().parents[1]/'scripts'/'bundle_web_plugin.py'
+        spec=importlib.util.spec_from_file_location('bundle_web_plugin',script)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        names={path.name for path in module.iter_plugin_files(script.parents[1])}
+        self.assertIn('manifest.json',names)
+        self.assertIn('background.js',names)
+        self.assertIn('downloads.js',names)
+        self.assertIn('REPLACE.txt',names)
+        self.assertNotIn('background.js.bak',names)
+        self.assertTrue(all('tests' not in path.parts for path in module.iter_plugin_files(script.parents[1])))
+        with tempfile.TemporaryDirectory() as folder:
+            copied=module.copy_plugin(script.parents[1],folder)
+            manifest=json.loads((Path(folder)/module.PLUGIN_REL/'manifest.json').read_text(encoding='utf-8'))
+            self.assertEqual(manifest['version'],'0.9.66')
+            self.assertTrue(copied)
+            self.assertFalse((Path(folder)/module.PLUGIN_REL/'tests').exists())
 if __name__=='__main__':unittest.main()

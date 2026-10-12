@@ -1,4 +1,4 @@
-# Flow Studio 0.13.5.107
+# Flow Studio 1.0.0
 
 ## 视频包装新增功能（当前源码，尚未发布安装包）
 
@@ -27,11 +27,11 @@ Windows 本地任务、提示词、Flow 视频生成与达芬奇剪辑工作台�
 
 ## Windows 便携版
 
-从本仓库 Releases 下载 `FlowStudio-0.13.5.106-Windows-x64.zip`，完整解压到可写目录，双击 **Flow Studio.vbs** 启动。已包含 Python 3.13.16 和运行依赖，无需安装 Python。正常启动不显示终端；诊断信息保存在本地 `data/logs/`。
+从本仓库 Releases 下载 `FlowStudio-1.0.0-Windows-x64-Setup.exe` 安装。安装包已包含 Python 3.13.16 和运行依赖，无需另外安装 Python。正常启动不显示终端；诊断信息保存在本地数据目录的 `logs/`。
 
-支持 Windows 10/11 x64。首次启动是空白任务库，需要设置任务来源并授权 Google。Google OAuth 使用桌面应用客户端 JSON；服务账号文件不是桌面 OAuth 客户端。Windows 刷新凭据使用当前账户的 DPAPI 加密，换电脑或 Windows 账户后需重新授权。
+支持 Windows 10/11 x64。首次启动是空白任务库，需要设置任务来源并授权 Google。Google OAuth 使用桌面应用客户端 JSON；服务账号文件不是桌面 OAuth 客户端。Windows 刷新凭据使用当前账户的 DPAPI 加密，换电脑或 Windows 账户后需重新授权。macOS 与 Linux 把同一令牌放进系统凭据库；钥匙串或密钥环不可用时会直接报错，不会改成明文文件。
 
-Chrome 扩展：打开 `chrome://extensions`，启用开发者模式，加载解压后的 `extension/FlowStudio_Web_Plugin_v1.8.3_IDENTITY_ALIAS_DOWNLOAD` 文件夹。目录名保留兼容性，实际插件版本为 **1.8.6**。关闭旧版本扩展，避免重复接收任务。
+Chrome 扩展：打开 `chrome://extensions`，启用开发者模式，加载软件目录里的 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX` 文件夹。插件版本为 **0.9.66**。后期更新时直接替换该目录中的文件，保持目录名不变，然后在扩展管理页重新加载。关闭其他版本的 Flow Studio 扩展，避免重复接收任务。
 
 达芬奇、Chrome、账户及付费模型权限需自行准备。可选 FFmpeg/Whisper/Remotion 工作流的外部工具和工程不包含在本包内。达芬奇自动化依赖其版本、脚本权限、窗口和菜单状态。
 
@@ -63,15 +63,15 @@ python -m unittest discover -s tests
 
 ## macOS Apple Silicon / Intel
 
-GitHub Actions 的 **Build macOS Apple Silicon and Intel** 工作流分别在 `macos-15`（arm64）和 `macos-15-intel`（x86_64）运行。两种构建都通过依赖检查、单元测试、原生媒体框架导入、界面启动与重新解压后的启动验证后，自动附加到 v0.13.5.106 发布页。
+GitHub Actions 的安装包工作流分别在 `macos-15`（arm64）和 `macos-15-intel`（x86_64）运行。两种构建都通过依赖检查、单元测试、原生媒体框架导入、界面启动与重新解压后的启动验证后，附加到当前版本的发布页。当前正式版是 v1.0.0。
 
 下载名称含 `macOS-arm64` 的包用于 Apple M 系列；`macOS-x86_64` 用于 Intel。要求 macOS 13 或更新版本。解压后把 **Flow Studio.app** 放到应用程序目录，双击启动，无需安装 Python，不打开终端。软件未进行 Apple Developer ID 签名和公证；首次启动可能需要在“系统设置 → 隐私与安全性”允许打开。不要全局关闭系统安全检查。
 
 Mac 包内含 Python 3.13.16（Astral python-build-standalone 20261009，固定 SHA-256）、Qt 和 PyObjC。运行依赖单独固定在 `requirements-macos.lock`；Intel 缺少 cryptography 50.0.2 的预编译 wheel，因此在 GitHub Mac 运行器上编译同一版本。内置环境不依赖本机 Homebrew。运行版本与包列表保存在应用内部 `Contents/Resources/RUNTIME_MANIFEST.json`。
 
-Mac 应用数据与日志位于 `~/Library/Application Support/FlowStudio/data`，更新应用不会覆盖它们。源码直接运行仍保留原目录布局。旧 Windows DPAPI 凭据不能直接迁移到 Mac，需重新授权 Google。Mac OAuth 文件采用用户读写权限限制，未声称有 Windows DPAPI 加密。达芬奇自动控制可能需要系统的辅助功能与自动化授权，真实 Flow/达芬奇业务流程仍须在用户环境验证。
+Mac 应用数据与日志位于 `~/Library/Application Support/FlowStudio/data`，更新应用不会覆盖它们。源码直接运行仍保留原目录布局。旧 Windows DPAPI 凭据不能直接迁移到 Mac，需重新授权 Google。Mac 上新的或仍是明文的 Google 登录令牌会写入系统钥匙串；只有回读成功后，本地文件才会换成不含令牌的指针。钥匙串锁定或不可用时保留原文件并报错。达芬奇自动控制可能需要系统的辅助功能与自动化授权，真实 Flow/达芬奇业务流程仍须在用户环境验证。
 
-扩展在应用内部 `Contents/Resources/extension`，可通过 Finder“显示包内容”找到并加载。构建使用的第三方 Actions 固定到提交 SHA，构建阶段仅有只读权限，发布阶段才有上传附件权限。工作流只接受手动启动，不运行不可信 PR 的发布脚本。
+扩展在应用内部 `Contents/Resources/extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`，可通过 Finder“显示包内容”找到并加载。更新插件时替换该目录中的文件后，在 Chrome 扩展页重新加载。构建使用的第三方 Actions 固定到提交 SHA，构建阶段仅有只读权限，发布阶段才有上传附件权限。工作流只接受手动启动，不运行不可信 PR 的发布脚本。
 
 
 ### 视频包装组件与批量执行

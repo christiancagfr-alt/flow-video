@@ -1,0 +1,12 @@
+const fs=require('fs'),assert=require('assert');
+const content=fs.readFileSync(__dirname+'/../content.js','utf8');
+const engine=fs.readFileSync(__dirname+'/../page-engine.js','utf8');
+const downloads=fs.readFileSync(__dirname+'/../downloads.js','utf8');
+assert.match(engine,/if\(!ticket\.started\s*&&/,'page engine must distinguish no network generation request');
+assert.match(engine,/FLOW_SUBMISSION_NOT_STARTED/,'safe retry signal missing');
+assert.match(content,/FLOW_SUBMISSION_NOT_STARTED/,'content retry gate missing safe signal');
+assert.match(content,/FS_DOWNLOAD_UNCERTAIN/,'uncertain submission must be explicitly persisted');
+assert.match(downloads,/attempt_started_at=Date\.now\(\)/,'pre-click attempt marker missing');
+assert.doesNotMatch(downloads,/FS_DOWNLOAD_SUBMITTING:[^\n]*submitted_at=Date\.now\(\)/,'pre-click code must not write submitted_at');
+assert.match(downloads,/submitted_at=e\.submitted_at\|\|e\.confirmed_at/,'confirmed bind must become submission proof');
+console.log('PASS: v0.9.48 confirmed-submit gate present');

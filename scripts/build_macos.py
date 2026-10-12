@@ -28,11 +28,13 @@ def main():
     run(str(python),'-m','pip','check')
     # Copy only version-controlled source, never local credentials or generated data.
     for name in subprocess.check_output(['git','ls-files','-z'],cwd=ROOT).decode().split('\0'):
-        if not name or name.startswith('.github/'): continue
+        if not name or name.startswith('.github/') or name.startswith('extension/FlowStudio_Web_Plugin_v1.8.3_IDENTITY_ALIAS_DOWNLOAD'): continue
         source=ROOT/name
         if source.is_file():
             target=resources/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
     from bundle_packaging_components import bundle
+    from bundle_web_plugin import copy_plugin
+    copy_plugin(ROOT, resources)
     bundle(resources,python)
     manifest={'python':'3.13.16','python_build':'20261009','architecture':args.arch,'python_sha256':HASHES[args.arch],
               'packages':json.loads(subprocess.check_output([str(python),'-m','pip','list','--format=json']))}

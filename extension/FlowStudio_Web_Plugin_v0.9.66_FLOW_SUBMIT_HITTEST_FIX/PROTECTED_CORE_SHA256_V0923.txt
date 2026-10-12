@@ -1,0 +1,6 @@
+Flow Studio Web Plugin v0.9.23 protected core hashes
+Baseline: V0.13.2 bundled v0.9.22
+709b9bab10a972f567501afeea7842d803e86ad521970044dfbd6e388755dbf4  downloads.js
+3d728f5b34077518a1a8ce1651b38e38b4fa026955e3e33339c7a4276e554a42  page-engine.js
+24b0d5ce31fdec76f786fda695eb44826591bc7c213dd68ea25bc3a899f462e9  result-core.js
+cc088151f0ffe686180bf59589de1683108ab100dccbe87a0e51805d2c67621b  styles.css

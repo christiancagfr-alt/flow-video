@@ -1,0 +1,16 @@
+const fs=require('fs'),path=require('path'),assert=require('assert');
+const root=path.join(__dirname,'..');
+const content=fs.readFileSync(path.join(root,'content.js'),'utf8');
+const page=fs.readFileSync(path.join(root,'page-engine.js'),'utf8');
+const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
+assert.ok(['0.9.57','0.9.58','0.9.59','0.9.60','0.9.62'].includes(manifest.version));
+assert.match(content,/function noteSubmissionOutcome\(job,source='confirmed'\)/,'confirmed-outcome submit gate missing');
+assert.match(content,/noteSubmissionOutcome\(job,'confirmed'\)/,'successful submission must re-arm interval from confirmation');
+assert.match(content,/noteSubmissionOutcome\(job,'uncertain'\)/,'uncertain outcome must still preserve pacing');
+assert.match(content,/await waitForNextSubmission\(0,job\)/,'first task of a refilled wave must obey persisted channel gate');
+assert.match(page,/material_binding_protection='disabled'/,'MATERIAL protection disable flag missing');
+assert.match(page,/requireMaterial:false/,'request-level material hard gate must be disabled');
+assert.match(page,/await select\(item\)/,'Flow-native material asset selection must remain');
+assert.match(page,/detail\.duration=8/,'MATERIAL fixed 8s must remain');
+assert.doesNotMatch(content,/素材绑定保护/,'old MATERIAL binding protection loop must be removed');
+console.log('PASS: v0.9.57 confirmed interval persists across one-task waves; MATERIAL protection relaxed; native select + fixed 8s preserved');

@@ -517,19 +517,25 @@ def google_creds(interactive=False, force_account_picker=False):
         from google_auth_oauthlib.flow import InstalledAppFlow
     except Exception as e:
         raise RuntimeError("Google API 依赖未安装，请重新运行 run_mac.command。") from e
+    from app.services.credential_file import load, save as save_token, CredentialStoreError
 
     creds = None
     if TOKEN_FILE.exists() and not force_account_picker:
         try:
-            from app.services.credential_file import load
             creds = Credentials.from_authorized_user_info(load(TOKEN_FILE), SCOPES)
+        except CredentialStoreError as exc:
+            log.error("系统凭据库不可用，已保留本地 Google 令牌文件：%s", exc)
+            raise
         except Exception:
             log.exception("读取 Google token 失败，将要求重新授权")
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            __import__("app.services.credential_file",fromlist=["save"]).save(TOKEN_FILE,creds.to_json())
+            save_token(TOKEN_FILE, creds.to_json())
             log.info("Google OAuth token 已自动刷新")
+        except CredentialStoreError as exc:
+            log.error("刷新后的 Google 令牌未能写入系统凭据库，原本地文件未替换：%s", exc)
+            raise
         except Exception:
             log.exception("Google OAuth token 自动刷新失败")
             creds = None
@@ -547,7 +553,7 @@ def google_creds(interactive=False, force_account_picker=False):
     # select_account 强制出现账号选择器，避免误用浏览器里上一次登录的 Google 账号。
     prompt = "select_account consent" if force_account_picker else "consent"
     creds = flow.run_local_server(port=0, open_browser=True, prompt=prompt, authorization_prompt_message="请在浏览器中完成 Google 授权。")
-    __import__("app.services.credential_file",fromlist=["save"]).save(TOKEN_FILE,creds.to_json())
+    save_token(TOKEN_FILE, creds.to_json())
     log.info("Google OAuth 授权成功，token 已保存：%s", TOKEN_FILE)
     return creds
 
@@ -609,9 +615,9 @@ def google_account_info():
 
 
 def disconnect_google():
-    if TOKEN_FILE.exists():
-        TOKEN_FILE.unlink()
-        log.warning("已清除本地 Google OAuth token；下次将重新授权")
+    from app.services.credential_file import delete
+    delete(TOKEN_FILE)
+    log.warning("已清除 Google 登录令牌；下次将重新授权")
     return {"ok": True}
 
 def resolve_sheet_title(sheets, sid, gid):

@@ -78,23 +78,23 @@ def enforce_praying(plan):
 
 def normalize(value):
     p=dict(value or {})
-    if p.get('type') not in TYPES: raise ValueError('CAMERA_PLAN: unsupported movement type')
+    if p.get('type') not in TYPES: raise ValueError('运镜方案：不支持的运镜类型')
     level=p.get('level')
-    if type(level) is not int or not 0<=level<=4: raise ValueError('CAMERA_PLAN: invalid level')
+    if type(level) is not int or not 0<=level<=4: raise ValueError('运镜方案：运镜等级必须是 0 到 4 的整数')
     if not p.get('enabled') or level==0 or p['type']=='STATIC':
         p.update(enabled=False,level=0,type='STATIC',parallax_required=False,requires_aux_image=False)
         return p
     for key in ('start_angle','end_angle'):
-        if not str(p.get(key) or '').strip(): raise ValueError('CAMERA_PLAN: missing '+key)
+        if not str(p.get(key) or '').strip(): raise ValueError('运镜方案：缺少参数 '+key)
     for key in ('duration_sec','movement_amount_deg','movement_distance_m'):
         v=p.get(key)
         if v is not None and (isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) or v<0):
-            raise ValueError('CAMERA_PLAN: invalid '+key)
-    if not p.get('duration_sec') or p['duration_sec']>8: raise ValueError('CAMERA_PLAN: duration must be within 0..8 seconds')
+            raise ValueError('运镜方案：参数无效 '+key)
+    if not p.get('duration_sec') or p['duration_sec']>8: raise ValueError('运镜方案：运镜时长必须大于 0 秒且不超过 8 秒，请调整提示词后重试')
     angular=p['type'].startswith(('ARC','ORBIT'))
     amount=p.get('movement_amount_deg') or 0
     distance=p.get('movement_distance_m') or 0
-    if not (amount if angular else distance): raise ValueError('CAMERA_PLAN: physical amount required')
+    if not (amount if angular else distance): raise ValueError('运镜方案：请提供有效的移动距离或旋转角度')
     angle_text=str(p['end_angle']).upper()
     side=('SIDE' in angle_text or 'REAR' in angle_text) and 'FRONT' in str(p['start_angle']).upper()
     p['parallax_required']=level>=2
@@ -126,7 +126,7 @@ def validate_plans(data, segments, aux_limit):
     plans=data.get('VIDEO_PLAN',[])
     ids=[str(x.get('SEGMENT_ID')) for x in plans]
     expected=[str(x['segment_id']) for x in segments]
-    if len(ids)!=len(set(ids)) or set(ids)!=set(expected): raise ValueError('CAMERA_PLAN: missing or duplicate segments')
+    if len(ids)!=len(set(ids)) or set(ids)!=set(expected): raise ValueError('运镜方案：片段缺失或重复')
     for item in plans:
         p=normalize(item.get('camera_motion')); item['camera_motion']=p
         if p.get('requires_aux_image'):
@@ -136,8 +136,8 @@ def validate_plans(data, segments, aux_limit):
                 binding={'START_IMAGE':'MASTER','END_IMAGE':matches[0]['SHOT_ID']}
                 item['IMAGE_BINDING']=binding;item['GENERATION_MODE']='START_END'
             valid={str(x.get('SHOT_ID')) for x in data.get('IMAGE_PLAN',[]) if str(x.get('IMAGE_PROMPT') or '').strip()}
-            if binding.get('END_IMAGE') not in valid:raise ValueError('CAMERA_PLAN: auxiliary endpoint required')
-    if len(data.get('IMAGE_PLAN') or [])>aux_limit:raise ValueError('CAMERA_PLAN: auxiliary image limit exceeded')
+            if binding.get('END_IMAGE') not in valid:raise ValueError('运镜方案：缺少有效的辅助尾帧图片')
+    if len(data.get('IMAGE_PLAN') or [])>aux_limit:raise ValueError('运镜方案：辅助图片数量超过设置上限')
 def clean_preserving_dialogue(text, dialogue):
     literal='文案： '+dialogue
     if literal not in text: return clean(text)

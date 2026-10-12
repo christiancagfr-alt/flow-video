@@ -1,0 +1,13 @@
+const fs=require('fs');
+const assert=require('assert');
+const p=fs.readFileSync(require('path').join(__dirname,'..','page-engine.js'),'utf8');
+const manifest=JSON.parse(fs.readFileSync(require('path').join(__dirname,'..','manifest.json'),'utf8'));
+assert.ok(['0.9.59','0.9.60','0.9.62'].includes(manifest.version));
+assert.match(p,/async function settleMaterialModeForSelect\(/);
+assert.doesNotMatch(p,/waitModeStable|presentStable|remoteStable/);
+assert.match(p,/Request the mode once/);
+assert.doesNotMatch(p,/FLOW_MODE_NOT_STABLE_BEFORE_MATERIAL_SELECT:VIDEO_REFERENCES/,'pre-select transient mode state must no longer hard-fail');
+if(manifest.version==='0.9.59') assert.match(p,/FLOW_MODE_NOT_CONFIRMED_AFTER_MATERIAL_SELECT:VIDEO_REFERENCES/); else assert.doesNotMatch(p,/FLOW_MODE_NOT_CONFIRMED_AFTER_MATERIAL_SELECT:VIDEO_REFERENCES/,'v0.9.60 must not hard-fail MATERIAL after native select');
+assert.match(p,/!flags.loading && \(mediaURL\(row\)/,'real non-loading image evidence must remain');
+assert.match(p,/if\(last && !lastFlags\?\.loading && !lastFlags\?\.error/,'non-loading formal IMAGE fallback missing');
+console.log('PASS: MATERIAL transient mode resets are retried and stable formal IMAGE assets no longer fail only because preview URL is hidden');

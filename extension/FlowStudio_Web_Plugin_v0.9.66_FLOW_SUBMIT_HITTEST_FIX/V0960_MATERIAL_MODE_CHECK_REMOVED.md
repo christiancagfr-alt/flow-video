@@ -1,0 +1,8 @@
+# v0.9.60 — MATERIAL MODE CHECK REMOVED
+
+- MATERIAL 仍主动设置 `VIDEO_REFERENCES`，并继续使用 Flow 原生 `select(item)` 选择已上传 IMAGE asset。
+- 删除素材选择后的 `FLOW_MODE_NOT_CONFIRMED_AFTER_MATERIAL_SELECT:VIDEO_REFERENCES` 硬失败。
+- 删除 MATERIAL 在提交前的 `FLOW_MODE_CHANGED_BEFORE_SUBMIT` 硬失败。
+- 通用 `FLOW_MODE_NOT_CONFIRMED` 仅保留给 FRAME；FRAME 行为不变。
+- MATERIAL 固定 8 秒逻辑保持不变。
+- 素材绑定保护仍为 disabled。

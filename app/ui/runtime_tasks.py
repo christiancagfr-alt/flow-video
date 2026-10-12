@@ -228,7 +228,16 @@ class RuntimeTasksDialog(QDialog):
             QMessageBox.warning(self,'重试','请先配置并选择通道');return
         prompt=None
         if blocked:
-            prompt,ok=QInputDialog.getMultiLineText(self,'修改提示词','修改后会重新检查通道图片并生成：',task['prompt'])
+            dialog=QDialog(self);dialog.setWindowTitle('修改提示词');dialog.resize(760,520)
+            layout=QVBoxLayout(dialog);layout.addWidget(QLabel('修改后会重新检查通道图片并生成：'))
+            editor=QPlainTextEdit(str(task['prompt'] or ''));editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+            from PySide6.QtGui import QTextOption
+            editor.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff);layout.addWidget(editor)
+            buttons=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
+            buttons.button(QDialogButtonBox.Ok).setText('保存并重试');buttons.button(QDialogButtonBox.Cancel).setText('取消')
+            buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);layout.addWidget(buttons)
+            ok=dialog.exec()==QDialog.Accepted;prompt=editor.toPlainText()
             if not ok:return
             if not prompt.strip() or prompt.strip()==str(task['prompt']).strip():
                 QMessageBox.warning(self,'重试','请先修改提示词再重试');return
