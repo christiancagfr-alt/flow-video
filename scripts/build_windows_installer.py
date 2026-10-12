@@ -12,7 +12,7 @@ test_deps=ROOT/'build/test-dependencies'
 subprocess.run([sys.executable,'-m','pip','download','--only-binary=:all:','--no-deps','--python-version','313','--implementation','cp','--abi','cp313','--platform','win_amd64','--dest',str(test_deps),'lupa==2.8'],check=True)
 for wheel in test_deps.glob('*.whl'):portable.extract_checked(wheel,test_deps,wheel=True)
 runner=ROOT/'build/run-tests.py'
-runner.write_text("import sys,unittest\nfrom pathlib import Path\nsys.path.insert(0,"+repr(str(test_deps))+ ")\nsuite=unittest.defaultTestLoader.discover("+repr(str(output/'tests'))+")\nraise SystemExit(not unittest.TextTestRunner().run(suite).wasSuccessful())\n")
+runner.write_text("import sys,unittest\nfrom pathlib import Path\nsys.path.insert(0,"+repr(str(test_deps))+ ");sys.path.insert(0,"+repr(str(output/'bundled-components/packaging/asr-libs'))+ ")\nsuite=unittest.defaultTestLoader.discover("+repr(str(output/'tests'))+")\nraise SystemExit(not unittest.TextTestRunner().run(suite).wasSuccessful())\n")
 env=dict(os.environ,QT_QPA_PLATFORM='offscreen',FLOWSTUDIO_DATA_DIR=str(ROOT/'build/test-data'))
 subprocess.run([str(python),str(runner)],check=True,env=env,cwd=output)
 subprocess.run([str(python),str(output/'scripts/smoke_desktop.py')],check=True,env=env,cwd=output)

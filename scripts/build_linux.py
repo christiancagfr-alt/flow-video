@@ -27,7 +27,7 @@ def main():
     (app/'RUNTIME_MANIFEST.json').write_text(json.dumps(manifest,indent=2))
     test_deps=build/'test-dependencies'
     run(str(python),'-m','pip','install','--only-binary=:all:','--no-deps','--target',str(test_deps),'lupa==2.8')
-    env=dict(os.environ,QT_QPA_PLATFORM='offscreen',FLOWSTUDIO_DATA_DIR=str(build/'test-data'),PYTHONPATH=str(app)+os.pathsep+str(test_deps))
+    env=dict(os.environ,QT_QPA_PLATFORM='offscreen',FLOWSTUDIO_DATA_DIR=str(build/'test-data'),PYTHONPATH=str(app)+os.pathsep+str(test_deps)+os.pathsep+str(app/'bundled-components/packaging/asr-libs'))
     run(str(python),'-m','unittest','discover','-s',str(app/'tests'),cwd=app,env=env)
     run(str(python),str(app/'scripts/smoke_desktop.py'),cwd=app,env=env)
     xcb=next(app.glob('python/lib/python*/site-packages/PySide6/Qt/plugins/platforms/libqxcb.so'))

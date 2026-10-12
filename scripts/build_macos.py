@@ -50,7 +50,7 @@ def main():
     env=dict(os.environ,QT_QPA_PLATFORM='offscreen',FLOWSTUDIO_DATA_DIR=str(build/'test-data'),PYTHONPATH=str(resources))
     test_deps=build/'test-dependencies'
     run(str(python),'-m','pip','install','--only-binary=:all:','--no-deps','--target',str(test_deps),'lupa==2.8')
-    env['PYTHONPATH']=str(resources)+os.pathsep+str(test_deps)
+    env['PYTHONPATH']=str(resources)+os.pathsep+str(test_deps)+os.pathsep+str(resources/'bundled-components/packaging/asr-libs')
     run(str(python),'-m','unittest','discover','-s',str(resources/'tests'),cwd=resources,env=env)
     run(str(python),str(resources/'scripts/smoke_desktop.py'),cwd=resources,env=env)
     for p in resources.rglob('__pycache__'): shutil.rmtree(p)
