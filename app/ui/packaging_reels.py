@@ -248,7 +248,7 @@ class PackagingReelsMixin:
                 if state['recognitionWarnings']:state['status']='字幕待核对'
                 if path==self._current_path:self._load_state(state)
                 message=f"识别完成：{len(state['captions'])} 条"+('（部分词时间为估计，请试听校对）' if state['captionTimingEstimated'] else '')
-                if state['recognitionWarnings']:message+='\n'+'\n'.join(state['recognitionWarnings'])
+                if state['recognitionWarnings']:message=f"识别存在缺口，待核对：{len(state['captions'])} 条\n"+'\n'.join(state['recognitionWarnings'])
         else:message=self._asr_error or '识别失败或已停止，请检查组件、模型与音轨。'
         self.asr_results.appendPlainText(Path(path).name+'：'+message)
         self._rebuild_tree(False);QTimer.singleShot(0,self._asr_next)

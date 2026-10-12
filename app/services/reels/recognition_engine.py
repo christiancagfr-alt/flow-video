@@ -325,11 +325,9 @@ class TranscribeWorker:
             if use_vad is None:
                 use_vad = vad_default
             if beam_size is None:
-                name = str(getattr(self, "_local_model_name", "") or "").lower()
-                if self._local_device == "cuda" and "large" in name:
-                    beam_size = 2
-                else:
-                    beam_size = 1
+                # Greedy decoding can terminate early on fluent speech (including
+                # Greek prayer clips); a wider search preserves later sentences.
+                beam_size = 5
             try:
                 stream, info = model.transcribe(
                     samples,
@@ -343,8 +341,8 @@ class TranscribeWorker:
                     condition_on_previous_text=False,
                     no_speech_threshold=0.6,
                     vad_parameters={
-                        "min_silence_duration_ms": 350,
-                        "speech_pad_ms": 120,
+                        "min_silence_duration_ms": 2000,
+                        "speech_pad_ms": 400,
                     } if use_vad else None,
                 )
                 return collect_segments(stream, info, offset=offset, label=label)
@@ -470,7 +468,7 @@ class TranscribeWorker:
         try:
             import shutil
             _emit(
-                f"本地识别参数：beam=1、VAD 跳过静音、词级时间戳开启"
+                f"本地识别参数：beam=5、VAD 跳过静音、词级时间戳开启"
                 f"（设备 {self._local_device}，模型 {getattr(self, '_local_model_name', '?')}）"
             )
             segments, info = None, None
