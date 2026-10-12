@@ -346,12 +346,31 @@ class TranscribeWorker:
                     } if use_vad else None,
                 )
                 return collect_segments(stream, info, offset=offset, label=label)
-            except RuntimeError as exc:
-                if not use_vad or "onnxruntime" not in str(exc).lower():
+            except (RuntimeError, IndexError) as exc:
+                alignment_error = isinstance(exc, IndexError) and 'boolean index' in str(exc)
+                if alignment_error and len(samples) > 12 * 16000:
+                    from app.services.asr_timing import stitch_segments
+                    _emit("词轴对齐失败，改用带重叠的短片段重新对齐…")
+                    joined=[];info=None
+                    with tempfile.TemporaryDirectory(prefix='flowstudio-align-') as directory:
+                        start=0
+                        while start < len(samples):
+                            end=min(len(samples),start+12*16000)
+                            clip=Path(directory)/'align.wav'
+                            with wave.open(str(clip),'wb') as out:
+                                out.setnchannels(1);out.setsampwidth(2);out.setframerate(16000)
+                                out.writeframes((samples[start:end]*32768).astype('<i2').tobytes())
+                            parts,info=transcribe_file(model,clip,offset=offset+start/16000,
+                                beam_size=5,use_vad=False,label='[短段对齐]')
+                            joined=stitch_segments(joined,parts,offset+start/16000+1)
+                            if end==len(samples):break
+                            start+=10*16000
+                    return joined,info
+                if not use_vad or not (alignment_error or "onnxruntime" in str(exc).lower()):
                     raise
-                _emit("VAD 组件不可用，已关闭静音过滤并自动重试当前片段。")
+                _emit("语音分段或词轴对齐失败，保留完整音轨并自动重试当前片段。")
                 stream, info = model.transcribe(
-                    samples, language=language, beam_size=1, best_of=1,
+                    samples, language=language, beam_size=5, best_of=1,
                     temperature=0.0, vad_filter=False, word_timestamps=True,
                     condition_on_previous_text=False,
                 )
@@ -605,7 +624,7 @@ class TranscribeWorker:
         if self.language and self.language != "auto":
             data["language"] = self.language
         with chunk.open("rb") as handle:
-            resp = safe_request("POST", 
+            resp = safe_request("POST",
                 "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {key}"},
                 data=data,
@@ -787,7 +806,7 @@ class TranscribeWorker:
                 raise ApiFailure(f"Gemini 文件处理失败：{file_info}")
             time.sleep(1)
             try:
-                meta = safe_request("GET", 
+                meta = safe_request("GET",
                     f"https://generativelanguage.googleapis.com/v1beta/{file_name}",
                     headers={"x-goog-api-key": key}, timeout=30,
                 )
@@ -823,7 +842,7 @@ class TranscribeWorker:
             last_err = ""
             for try_model in fallbacks:
                 self.log.emit(f"Gemini 正在生成带时间码字幕（{try_model}）…")
-                resp = safe_request("POST", 
+                resp = safe_request("POST",
                     f"https://generativelanguage.googleapis.com/v1beta/models/{try_model}:generateContent",
                     headers={"x-goog-api-key": key, "Content-Type": "application/json"},
                     json=body, timeout=1200,
@@ -891,7 +910,7 @@ class TranscribeWorker:
                 self.log.emit(f"ElevenLabs 模型「{model_id}」失败，改用 scribe_v2 重试…")
                 data["model_id"] = "scribe_v2"
                 with audio.open("rb") as handle2:
-                    resp = safe_request("POST", 
+                    resp = safe_request("POST",
                         "https://api.elevenlabs.io/v1/speech-to-text",
                         headers={"xi-api-key": key}, data=data,
                         files={"file": (audio.name, handle2, "audio/wav")}, timeout=1800,
