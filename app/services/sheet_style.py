@@ -39,7 +39,7 @@ def enrich(sheets, spreadsheet_id, title, parsed):
             text = cell.get('userEnteredValue', {}).get('stringValue', cell.get('formattedValue', ''))
             if text != task[key]:
                 raise RuntimeError(f"第 {task['表格行号']} 行文案在读取期间发生变化，请重新同步。")
-            styles[key] = {'text': text, 'cell': cell, 'defaults': props.get('defaultFormat', {}),
+            styles[key] = {'text': text, 'base_mode': task.get('模式','TALKING'), 'cell': cell, 'defaults': props.get('defaultFormat', {}),
                            'theme': props.get('spreadsheetTheme', {})}
         task['_source_styles'] = styles
         from app.services.eye_states import reference_mode

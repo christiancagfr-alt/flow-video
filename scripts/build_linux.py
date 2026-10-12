@@ -21,6 +21,8 @@ def main():
         if source.is_file():
             target=app/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
     (app/'installed.flag').write_text('Flow Studio managed installation\n')
+    from bundle_packaging_components import bundle
+    bundle(app,python)
     manifest={'python':'3.13.16','python_sha256':SHA,'architecture':'x86_64','packages':json.loads(subprocess.check_output([str(python),'-m','pip','list','--format=json']))}
     (app/'RUNTIME_MANIFEST.json').write_text(json.dumps(manifest,indent=2))
     test_deps=build/'test-dependencies'

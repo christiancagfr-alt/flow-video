@@ -26,60 +26,32 @@ PRICING = {
 }
 
 def save_api_key_to_keychain(api_key: str):
-    key = (api_key or "").strip()
-    if not key:
-        raise ValueError("API Key 不能为空")
-    if sys.platform.startswith('linux'):
-        from keyring.backends.SecretService import Keyring
-        Keyring().set_password(KEYCHAIN_SERVICE,KEYCHAIN_ACCOUNT,key)
-        return
-    if os.name == 'nt':
-        from keyring.backends.Windows import WinVaultKeyring
-        WinVaultKeyring().set_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, key)
-        return
-    subprocess.run(
-        ["security", "add-generic-password", "-U",
-         "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-w", key],
-        check=True, capture_output=True, text=True
-    )
+    from app.services.credential_pool import save
+    save(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, api_key)
+
+
+def _api_keys():
+    env = os.environ.get("OPENAI_API_KEY", "").strip()
+    if env: return [env]
+    from app.services.credential_pool import read
+    try: return read(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+    except Exception: return []
+
 
 def get_api_key():
-    env = os.environ.get("OPENAI_API_KEY", "").strip()
-    if env:
-        return env
-    try:
-        if sys.platform.startswith('linux'):
-            from keyring.backends.SecretService import Keyring
-            return Keyring().get_password(KEYCHAIN_SERVICE,KEYCHAIN_ACCOUNT) or ''
-        if os.name == 'nt':
-            from keyring.backends.Windows import WinVaultKeyring
-            return WinVaultKeyring().get_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) or ''
-        p = subprocess.run(
-            ["security", "find-generic-password",
-             "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-w"],
-            check=True, capture_output=True, text=True
-        )
-        return p.stdout.strip()
-    except Exception:
-        return ""
+    keys = _api_keys()
+    return keys[0] if keys else ''
+
+
+def next_api_key():
+    from app.services.credential_pool import next_key
+    return next_key(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, _api_keys())
+
 
 def delete_api_key():
-    if sys.platform.startswith('linux'):
-        from keyring.backends.SecretService import Keyring
-        backend=Keyring()
-        if backend.get_password(KEYCHAIN_SERVICE,KEYCHAIN_ACCOUNT) is not None:backend.delete_password(KEYCHAIN_SERVICE,KEYCHAIN_ACCOUNT)
-        return
-    if os.name == 'nt':
-        from keyring.backends.Windows import WinVaultKeyring
-        vault = WinVaultKeyring()
-        if vault.get_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) is not None:
-            vault.delete_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        return
-    subprocess.run(
-        ["security", "delete-generic-password",
-         "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE],
-        check=False, capture_output=True, text=True
-    )
+    from app.services.credential_pool import clear
+    clear(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+
 
 def _image_data_url(path: str, task_id=''):
     from app.services.image_assets import resolve_image_asset
@@ -466,7 +438,7 @@ def assemble_final_flow_prompt(*, dynamic_prompt: str, dialogue: str, base_templ
 
 
 def generate_prompt(*, model, core_prompt, task, timeout=120):
-    api_key = get_api_key()
+    api_key = next_api_key()
     if not api_key:
         raise RuntimeError("尚未设置 OpenAI API Key。请先进入“AI 设置”。")
 
@@ -571,7 +543,7 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
     - segment payload uses compact keys;
     - image detail is configurable (default: low).
     """
-    api_key = get_api_key()
+    api_key = next_api_key()
     if not api_key:
         raise RuntimeError("尚未设置 OpenAI API Key。请先进入“AI 设置”。")
 
@@ -953,7 +925,7 @@ def generate_enhanced_prompts(*, model, core_prompt, group, config, preset_snaps
        {'type':'input_image','image_url':image,'detail':image_detail}]}],
       'text':{'format':{'type':'json_schema','name':'camera_endpoint_plan','strict':True,'schema':schema}},
       'max_output_tokens':min(30000,max(3000,1000*len(segments)))}
-    req=urllib.request.Request(API_URL,data=json.dumps(payload).encode(),headers={'Authorization':'Bearer '+get_api_key(),'Content-Type':'application/json'},method='POST')
+    req=urllib.request.Request(API_URL,data=json.dumps(payload).encode(),headers={'Authorization':'Bearer '+next_api_key(),'Content-Type':'application/json'},method='POST')
     if on_request:on_request({'segment_count':len(segments)})
     with urllib.request.urlopen(req,timeout=timeout) as response:data=json.loads(response.read().decode())
     if data.get('status')=='incomplete':raise RuntimeError('辅助图规划返回不完整，请检查后重试')

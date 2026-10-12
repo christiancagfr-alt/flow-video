@@ -844,7 +844,7 @@ def move_file_preserve(path, target_dir):
 
 
 def reconcile_group(group_key, auto_only=False, selected_closed=None):
-    from app.services.material_assignment import image_mode, assign, reference_tasks
+    from app.services.material_assignment import image_mode, assign, reference_tasks, manual_modes
     con = init_db()
     try:
         g = con.execute('SELECT talking_count,praying_count FROM groups_tbl WHERE group_key=?', (group_key,)).fetchone()
@@ -853,15 +853,18 @@ def reconcile_group(group_key, auto_only=False, selected_closed=None):
             'SELECT id,mode,matched_asset_path FROM tasks WHERE group_key=? AND sheet_row>0 ORDER BY sheet_row', (group_key,))]
         rows = con.execute('SELECT id,local_path,mode FROM assets WHERE group_key=? ORDER BY lower(original_name),id', (group_key,)).fetchall()
         rows = [r for r in rows if is_valid_local_image(Path(str(r[1] or '')).expanduser())]
-        default = 'PRAYING' if g[1] else 'TALKING'
+        default = 'TALKING'
+        manual = manual_modes(con)
         closed = {str(Path(p).resolve()) for p in selected_closed or []}
         files = [Path(r[1]).expanduser().resolve() for r in rows]
-        modes = {p:('PRAYING' if str(p) in closed else image_mode(p,r[2],default)) for p,r in zip(files,rows)}
+        modes = {p:('PRAYING' if str(p) in closed else image_mode(p,r[2],default,manual)) for p,r in zip(files,rows)}
         references = reference_tasks(tasks, modes)
         previous = {t['id']:Path(t['asset']).expanduser().resolve() for t in tasks if t['asset']}
         assigned = assign(references, files, modes, previous)
         missing = len(tasks)-len(assigned)
         status = 'MATERIAL_SHORTAGE' if missing else 'READY_FOR_GPT'
+        if missing and files and any(t['mode']=='PRAYING' for t in tasks) and 'PRAYING' not in modes.values():
+            status='NEEDS_MANUAL_CLASSIFY'
         message = f'已匹配 {len(assigned)}/{len(tasks)} 条文案，共 {len(files)} 张图片'
         if missing: message += f'；缺少 {missing} 张，可点击“随机补齐缺少的图片”'
         now = datetime.now().isoformat(timespec='seconds')
@@ -1001,20 +1004,23 @@ def scan_named_materials(group_key):
     try:
         row=con.execute('SELECT local_dir FROM groups_tbl WHERE group_key=?',(group_key,)).fetchone()
         if not row: raise ValueError('找不到主播素材目录')
-        folder=Path(row[0])/'素材'
+        from app.services.material_assignment import material_folder
+        folder=material_folder(row[0])
         return sorted((p for p in folder.rglob('*') if is_valid_local_image(p)), key=lambda p:str(p))
     finally: con.close()
 
 
-def confirm_named_materials(group_key):
+def confirm_named_materials(group_key, selected_closed=None):
     files=scan_named_materials(group_key)
-    closed=[p for p in files if '闭眼' in p.stem]
-    if not closed: raise ValueError('未找到文件名包含“闭眼”的图片，请在该主播素材文件夹中重命名后再确认')
-    opened=[p for p in files if '闭眼' not in p.stem]
+    selected={Path(p).resolve() for p in selected_closed} if selected_closed is not None else None
+    if selected is not None and not selected.issubset({p.resolve() for p in files}):raise ValueError('选择包含不属于该主播的图片，请刷新后重试')
+    closed=[p for p in files if (p.resolve() in selected if selected is not None else '闭眼' in p.stem)]
+    opened=[p for p in files if p not in closed]
     con=init_db()
     try:
         tasks=con.execute('SELECT id,mode FROM tasks WHERE group_key=? AND sheet_row>0 ORDER BY sheet_row',(group_key,)).fetchall()
-        if any(t[1]=='TALKING' for t in tasks) and not opened: raise ValueError('该主播还有睁眼任务，请保留至少一张不含“闭眼”的图片')
+        if any(t[1]=='PRAYING' for t in tasks) and not closed:raise ValueError('该主播有闭眼任务，请至少勾选一张闭眼图片')
+        if not files:raise ValueError('没有可用图片')
         # Recover renamed paths by original content hash, retaining Drive file identities.
         assets=con.execute('SELECT id,local_path,sha256 FROM assets WHERE group_key=?',(group_key,)).fetchall()
         hashes={}
@@ -1027,11 +1033,14 @@ def confirm_named_materials(group_key):
                     con.execute('UPDATE assets SET local_path=? WHERE id=?',(str(new),aid))
         indices={'PRAYING':0,'TALKING':0}
         for tid,mode in tasks:
-            pool=closed if mode=='PRAYING' else opened
+            pool=closed if mode=='PRAYING' else (opened or closed)
             path=pool[indices[mode]%len(pool)];indices[mode]+=1
             con.execute("UPDATE tasks SET matched_asset_path=?,status='READY_FOR_GPT',updated_at=? WHERE id=?",(str(path),datetime.now().isoformat(timespec='seconds'),tid))
         for path in files:
-            con.execute('UPDATE assets SET mode=? WHERE group_key=? AND local_path=?',('PRAYING' if '闭眼' in path.stem else 'TALKING',group_key,str(path)))
+            con.execute('UPDATE assets SET mode=? WHERE group_key=? AND local_path=?',('PRAYING' if path in closed else 'TALKING',group_key,str(path)))
+        con.execute('CREATE TABLE IF NOT EXISTS manual_image_modes(group_key TEXT,path TEXT,mode TEXT,PRIMARY KEY(group_key,path))')
+        for path in files:
+            con.execute('INSERT OR REPLACE INTO manual_image_modes VALUES(?,?,?)',(group_key,str(path.resolve()),'PRAYING' if path in closed else 'TALKING'))
         message=f'已准备：识别闭眼图片 {len(closed)} 张，睁眼图片 {len(opened)} 张；同类任务按顺序共用素材'
         con.execute("UPDATE groups_tbl SET status='READY_FOR_GPT',image_count=?,message=? WHERE group_key=?",(len(files),message,group_key))
         con.commit();return {'status':'READY_FOR_GPT','message':message}

@@ -1,0 +1,8 @@
+# Optional local speech recognition; installed in an isolated user-data directory.
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+onnxruntime==1.31.0
+av==19.0.1
+numpy==2.5.4
+tokenizers==0.23.3
+huggingface-hub==2.2.0

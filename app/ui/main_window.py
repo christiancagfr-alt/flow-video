@@ -595,6 +595,7 @@ class MainWindow(QMainWindow):
             ("✓  视频质检", "qc"),
             ("✂  自动剪辑", "davinci"),
             ("▣  视频包装", "packaging"),
+            ("⊞  组件管理", "components"),
             ("▥  数据统计", "stats"),
             ("⚙  系统设置", "settings"),
         ]
@@ -618,6 +619,9 @@ class MainWindow(QMainWindow):
             elif action == "packaging":
                 b.clicked.connect(self.show_packaging_page)
                 self.nav_buttons["packaging"] = b
+            elif action == "components":
+                b.clicked.connect(lambda:self._navigate('components',self.components_page))
+                self.nav_buttons['components']=b
             elif action == "stats":
                 b.clicked.connect(self.show_stats_page)
                 self.nav_buttons["stats"] = b
@@ -674,6 +678,9 @@ class MainWindow(QMainWindow):
         self.qc_page = VideoQCPage(self)
         self.davinci_page = DaVinciPage(self)
         self.packaging_page = PackagingPage(self)
+        from app.ui.packaging_components import PackagingComponentsPage
+        self.components_page = PackagingComponentsPage(self.packaging_page,self)
+        self.stack.addWidget(self.components_page)
         self.stats_page = StatisticsPage(self)
         self.stack.addWidget(self.dashboard)
         self.stack.addWidget(self.recipient_page)
@@ -1019,6 +1026,16 @@ class MainWindow(QMainWindow):
         dialog.show();dialog.raise_();dialog.activateWindow()
 
     def closeEvent(self, event):
+        packaging=getattr(self,'packaging_page',None)
+        if packaging is not None:
+            if packaging._preview_process is not None:
+                self.statusBar().showMessage('正在生成成片预览，请完成后关闭。',3000);event.ignore();return
+            if packaging._asr_install_process is not None:
+                self.statusBar().showMessage('字幕组件正在安装，请安装完成后关闭。',3000);event.ignore();return
+            if packaging._asr_process is not None:
+                packaging._stop_asr();event.ignore();QTimer.singleShot(150,self.close);return
+            if packaging._render_process is not None:
+                packaging._stop_render();event.ignore();QTimer.singleShot(150,self.close);return
         update_dialog=getattr(self,'_update_dialog',None)
         if update_dialog is not None and update_dialog.worker is not None:
             update_dialog.worker.requestInterruption()

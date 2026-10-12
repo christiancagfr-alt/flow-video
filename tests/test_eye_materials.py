@@ -9,10 +9,35 @@ from app.core import database
 
 
 def snapshot(text, offset):
-    return {'text':text,'cell':{'textFormatRuns':[{'startIndex':offset,'format':{'foregroundColor':{'red':1}}}]}}
+    return {'text':text,'base_mode':'PRAYING','cell':{'textFormatRuns':[{'startIndex':offset,'format':{'foregroundColor':{'red':1}}}]}}
 
 
 class EyeMaterialsTests(unittest.TestCase):
+    def test_manual_image_choice_persists_without_renaming(self):
+        from app.services import pre_gpt_pipeline as intake
+        from app.services.material_assignment import manual_modes
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as folder, patch.object(intake,'DB_FILE',Path(folder)/'intake.db'):
+            root=Path(folder);photo=root/'photo.png';Image.new('RGB',(8,8),'red').save(photo)
+            con=intake.init_db()
+            con.execute("INSERT INTO groups_tbl(group_key,local_dir,talking_count) VALUES('g',?,1)",(str(root),))
+            con.execute("INSERT INTO tasks(spreadsheet_id,gid,sheet_row,group_key,mode) VALUES('s','0',1,'g','TALKING')")
+            con.execute("INSERT INTO assets(group_key,local_path,original_name) VALUES('g',?,'photo.png')",(str(photo),));con.commit();con.close()
+            result=intake.confirm_named_materials('g',[])
+            self.assertEqual(result['status'],'READY_FOR_GPT')
+            con=intake.init_db()
+            try:self.assertEqual(image_mode(photo,'PRAYING',manual=manual_modes(con)),'TALKING')
+            finally:con.close()
+            self.assertTrue(photo.is_file())
+
+    def test_open_scripts_do_not_use_ink_as_eye_state(self):
+        source=snapshot('Black text. Red text.',12)
+        source['base_mode']='TALKING'
+        self.assertEqual(eye_states.blocks(source),[('Black text. Red text.','TALKING')])
+        self.assertEqual(eye_states.reference_mode({'外文内容':source},'TALKING'),'TALKING')
+        path=Path('闭眼.png').resolve()
+        self.assertEqual(image_mode(path,'PRAYING',manual={str(path):'TALKING'}),'TALKING')
+
     def test_utf16_color_boundary_and_unchanged_source(self):
         text='Mungu asante.\nAmina. Fungua macho.'
         source=snapshot(text,len('Mungu asante.\n'.encode('utf-16-le'))//2)
@@ -25,10 +50,10 @@ class EyeMaterialsTests(unittest.TestCase):
         self.assertEqual(eye_states.blocks(emoji),[('黑😀','PRAYING'),('红','TALKING')])
 
     def test_theme_red_and_default_black(self):
-        source={'text':'red','theme':{'themeColors':[{'colorType':'ACCENT1','color':{'rgbColor':{'red':.8}}}]},
+        source={'text':'red','base_mode':'PRAYING','theme':{'themeColors':[{'colorType':'ACCENT1','color':{'rgbColor':{'red':.8}}}]},
                 'cell':{'effectiveFormat':{'textFormat':{'foregroundColorStyle':{'themeColor':'ACCENT1'}}}}}
         self.assertEqual(eye_states.blocks(source),[('red','TALKING')])
-        self.assertEqual(eye_states.blocks({'text':'black','cell':{}}),[('black','PRAYING')])
+        self.assertEqual(eye_states.blocks({'text':'black','cell':{}}),[('black','TALKING')])
         self.assertEqual(eye_states.blocks({'text':'edited','local_override':True}),[])
 
     def test_shortage_reuse_is_stable_and_same_type(self):

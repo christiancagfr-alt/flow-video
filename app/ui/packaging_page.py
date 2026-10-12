@@ -13,8 +13,8 @@ import json
 import re
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QSettings, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import Qt, QProcess, QSettings, QTimer, QUrl, QEvent
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QKeySequence, QPixmap, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QFrame, QPushButton,
     QLineEdit, QComboBox, QPlainTextEdit, QTabWidget, QSplitter, QListWidget,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QTreeWidget, QTreeWidgetItem, QAbstractItemView,
     QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar, QStackedLayout,
     QColorDialog, QFontComboBox, QDialog, QDialogButtonBox, QFormLayout, QInputDialog,
+    QScrollArea, QMenu, QStyle,
 )
 
 try:
@@ -34,6 +35,7 @@ except Exception:
 
 from app.services.remotion_renderer import RemotionRenderer
 from app.services.caption_preset_library import CaptionPresetLibrary
+from app.ui.packaging_reels import PackagingReelsMixin
 
 
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
@@ -53,12 +55,13 @@ def _as_float(text, default=0.0):
         return float(default)
 
 
-class PackagingPage(QWidget):
+class PackagingPage(PackagingReelsMixin, QWidget):
     """Production-style packaging editor backed by local Remotion."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("pageRoot")
+        self.setStyleSheet('QLabel#pageTitle{font-size:24px;} QLabel#sectionTitle{font-size:17px;} QPushButton{min-width:0px;min-height:24px;padding:4px 8px;font-size:13px;} QComboBox,QLineEdit,QSpinBox,QDoubleSpinBox{min-height:24px;padding:3px 6px;font-size:13px;} QTabWidget::pane{border:0;}')
         self._settings = QSettings("FlowStudio", "FlowStudio")
         self._project_path = ""
         self._project = {"version": 1, "videos": {}, "order": []}
@@ -87,65 +90,70 @@ class PackagingPage(QWidget):
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(18, 14, 18, 16)
+        outer.setContentsMargins(10, 8, 10, 8)
         outer.setSpacing(10)
 
         # Header / global tools
         top = QHBoxLayout()
         title_box = QVBoxLayout(); title_box.setSpacing(1)
         title = QLabel("视频包装工作台", objectName="pageTitle")
-        sub = QLabel("字幕 · 水印 · B-roll · 标题 · 片头片尾 · Remotion 本地批量渲染", objectName="pageSubtitle")
+        sub = QLabel("字幕 · 水印 · B-roll · 标题 · 片头片尾", objectName="pageSubtitle")
         title_box.addWidget(title); title_box.addWidget(sub)
         top.addLayout(title_box, 1)
 
         self.engine_badge = QLabel("● Remotion 未检测", objectName="statusInfo")
         self.engine_badge.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        top.addWidget(self.engine_badge)
+        self.engine_badge.hide()
         self.detect_top_btn = QPushButton("检测引擎")
         self.detect_top_btn.clicked.connect(self._check_remotion)
-        top.addWidget(self.detect_top_btn)
+        self.detect_top_btn.hide()
         outer.addLayout(top)
 
         tool = QFrame(objectName="pageCard")
-        th = QHBoxLayout(tool); th.setContentsMargins(10, 8, 10, 8); th.setSpacing(7)
+        tool_box = QVBoxLayout(tool); tool_box.setContentsMargins(10, 8, 10, 8); tool_box.setSpacing(6)
+        th = QHBoxLayout(); th.setSpacing(7); tool_box.addLayout(th)
+        templates = th
         self.import_video_btn = QPushButton("＋ 导入视频")
         self.import_video_btn.clicked.connect(self._import_videos)
         th.addWidget(self.import_video_btn)
         self.import_folder_btn = QPushButton("导入文件夹")
         self.import_folder_btn.clicked.connect(self._import_folder)
-        th.addWidget(self.import_folder_btn)
+        self.import_folder_btn.hide()
+        self.import_video_btn.setText('导入');self.import_video_btn.clicked.disconnect()
+        imports=QMenu(self.import_video_btn);imports.addAction('导入视频',self._import_videos);imports.addAction('导入文件夹',self._import_folder);self.import_video_btn.setMenu(imports)
         th.addWidget(self._vline())
-        save_btn = QPushButton("保存工程")
-        save_btn.clicked.connect(self._save_project)
-        th.addWidget(save_btn)
-        load_btn = QPushButton("载入工程")
-        load_btn.clicked.connect(self._load_project)
-        th.addWidget(load_btn)
-        th.addWidget(self._vline())
-        self.preset_combo = QComboBox(); self.preset_combo.setMinimumWidth(150)
+        self.clear_tasks_btn = QPushButton("清空列表")
+        self.clear_tasks_btn.clicked.connect(self._clear_tasks)
+        th.addWidget(self.clear_tasks_btn)
+        self.preset_combo = QComboBox(); self.preset_combo.setMaximumWidth(110)
         self._reload_preset_combo()
-        th.addWidget(self.preset_combo)
+        templates.addWidget(self.preset_combo)
         apply_preset = QPushButton("套用模板")
         apply_preset.clicked.connect(self._apply_named_preset)
-        th.addWidget(apply_preset)
-        save_preset = QPushButton("保存当前为模板")
+        templates.addWidget(apply_preset)
+        save_preset = QPushButton("存为模板")
         save_preset.clicked.connect(self._save_named_preset)
-        th.addWidget(save_preset)
-        apply_all = QPushButton("应用到全部视频")
+        save_preset.hide()
+        apply_all = QPushButton("应用全部")
         apply_all.clicked.connect(self._apply_to_all)
-        th.addWidget(apply_all)
+        apply_all.hide()
+        apply_preset.setText('模板');apply_preset.clicked.disconnect()
+        menu=QMenu(apply_preset);menu.addAction('套用所选模板',self._apply_named_preset);menu.addAction('保存当前为模板',self._save_named_preset);menu.addAction('应用到全部视频',self._apply_to_all);apply_preset.setMenu(menu)
+
         th.addStretch(1)
-        self.render_btn = QPushButton("▶ 渲染当前")
+        self.render_btn = QPushButton("导出成品")
         self.render_btn.clicked.connect(self._render_current)
         th.addWidget(self.render_btn)
-        self.batch_btn = QPushButton("批量渲染全部")
+        self.batch_btn = QPushButton("批量导出成品")
         self.batch_btn.clicked.connect(self._render_all)
         th.addWidget(self.batch_btn)
         self.stop_btn = QPushButton("停止")
         self.stop_btn.clicked.connect(self._stop_render)
         self.stop_btn.setEnabled(False)
         th.addWidget(self.stop_btn)
-        outer.addWidget(tool)
+        tool_scroll = QScrollArea(); tool_scroll.setWidgetResizable(True); tool_scroll.setFrameShape(QFrame.NoFrame)
+        tool_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff); tool_scroll.setWidget(tool); tool_scroll.setFixedHeight(50)
+        outer.addWidget(tool_scroll)
 
         # Editor region: materials / preview / controls
         self.editor_split = QSplitter(Qt.Horizontal, objectName="packagingEditorSplitter")
@@ -154,7 +162,10 @@ class PackagingPage(QWidget):
         self.editor_split.addWidget(self._build_material_panel())
         self.editor_split.addWidget(self._build_preview_panel())
         self.editor_split.addWidget(self._build_properties_panel())
-        self.editor_split.setSizes([310, 620, 430])
+        self.editor_split.setSizes([210, 690, 350])
+        self.editor_split.setStretchFactor(0, 0)
+        self.editor_split.setStretchFactor(1, 1)
+        self.editor_split.setStretchFactor(2, 0)
 
         # Full page vertical split with a real timeline summary.
         self.vertical_split = QSplitter(Qt.Vertical, objectName="packagingVerticalSplitter")
@@ -162,7 +173,9 @@ class PackagingPage(QWidget):
         self.vertical_split.setHandleWidth(7)
         self.vertical_split.addWidget(self.editor_split)
         self.vertical_split.addWidget(self._build_timeline_panel())
-        self.vertical_split.setSizes([630, 250])
+        self.vertical_split.setSizes([650, 160])
+        self.vertical_split.setStretchFactor(0, 1)
+        self.vertical_split.setStretchFactor(1, 0)
         outer.addWidget(self.vertical_split, 1)
 
         # Render status bar
@@ -173,9 +186,17 @@ class PackagingPage(QWidget):
         self.render_progress = QProgressBar(); self.render_progress.setRange(0, 100); self.render_progress.setValue(0)
         self.render_progress.setMaximumWidth(260); self.render_progress.hide()
         sh.addWidget(self.render_progress)
-        self.render_status = QLabel("就绪", objectName="muted")
+        self.render_status = QLabel("就绪", objectName="muted"); self.render_status.setMaximumWidth(310);self.render_status.setWordWrap(True)
         sh.addWidget(self.render_status)
+        details=QPushButton('详情');details.clicked.connect(self._show_render_details);sh.addWidget(details)
         outer.addWidget(status)
+
+    def _show_render_details(self):
+        dialog=QDialog(self);dialog.setWindowTitle('渲染详情');dialog.resize(820,460)
+        layout=QVBoxLayout(dialog);log=QPlainTextEdit();log.setReadOnly(True);layout.addWidget(log)
+        def refresh():log.setPlainText(self.remotion_log.toPlainText());log.moveCursor(QTextCursor.MoveOperation.End)
+        refresh();timer=QTimer(dialog);timer.timeout.connect(refresh);timer.start(1000)
+        close=QDialogButtonBox(QDialogButtonBox.Close);close.rejected.connect(dialog.reject);layout.addWidget(close);dialog.exec()
 
     @staticmethod
     def _vline():
@@ -184,9 +205,9 @@ class PackagingPage(QWidget):
 
     def _build_material_panel(self):
         card = QFrame(objectName="pageCard")
-        card.setMinimumWidth(250)
+        card.setMinimumWidth(190)
         box = QVBoxLayout(card); box.setContentsMargins(12, 12, 12, 12); box.setSpacing(8)
-        head = QHBoxLayout(); head.addWidget(QLabel("素材与片段", objectName="sectionTitle")); head.addStretch(1)
+        head = QHBoxLayout(); head.addWidget(QLabel("任务列表", objectName="sectionTitle")); head.addStretch(1)
         self.material_count = QLabel("0 个视频", objectName="muted"); head.addWidget(self.material_count)
         box.addLayout(head)
         self.search = QLineEdit(); self.search.setPlaceholderText("搜索接收人 / 主播 / 文件名…")
@@ -199,26 +220,29 @@ class PackagingPage(QWidget):
         self.task_tree.itemSelectionChanged.connect(self._tree_selected)
         box.addWidget(self.task_tree, 1)
         hint = QLabel("可直接导入自动剪辑后的母版视频。本页不修改质检、返工、Resolve 或 Flow 任务状态。", objectName="muted")
-        hint.setWordWrap(True); box.addWidget(hint)
+        self.task_tree.setToolTip(hint.text());hint.hide()
         return card
 
     def _build_preview_panel(self):
         card = QFrame(objectName="pageCard")
-        card.setMinimumWidth(350)
+        card.setMinimumWidth(260)
         box = QVBoxLayout(card); box.setContentsMargins(10, 10, 10, 10); box.setSpacing(7)
         head = QHBoxLayout(); head.addWidget(QLabel("实时预览", objectName="sectionTitle")); head.addStretch(1)
-        self.preview_mode = QLabel("UI Overlay Preview", objectName="muted"); head.addWidget(self.preview_mode)
+        self.preview_mode = QLabel("快速预览", objectName="muted"); head.addWidget(self.preview_mode)
+        self.full_preview_btn=QPushButton('预览成片效果');self.full_preview_btn.clicked.connect(self._render_preview_frame);head.addWidget(self.full_preview_btn)
         box.addLayout(head)
 
         self.preview_host = QFrame(objectName="compactCard")
-        self.preview_host.setMinimumHeight(420)
+        self.preview_host.setMinimumSize(1, 120)
+        self.preview_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         stack = QStackedLayout(self.preview_host); stack.setStackingMode(QStackedLayout.StackAll); stack.setContentsMargins(0, 0, 0, 0)
 
         if MULTIMEDIA_OK:
-            self.video_widget = QVideoWidget()
+            from app.ui.packaging_video import PackagingVideoView
+            self.video_widget = PackagingVideoView()
             self.video_widget.setStyleSheet("background:#000;border:none;")
             self.audio = QAudioOutput(self); self.audio.setVolume(0.8)
-            self.player = QMediaPlayer(self); self.player.setAudioOutput(self.audio); self.player.setVideoOutput(self.video_widget)
+            self.player = QMediaPlayer(self); self.player.setAudioOutput(self.audio); self.player.setVideoOutput(self.video_widget.video_item)
             self.player.positionChanged.connect(self._player_position)
             self.player.durationChanged.connect(self._player_duration)
             stack.addWidget(self.video_widget)
@@ -230,7 +254,9 @@ class PackagingPage(QWidget):
 
         # Lightweight overlay preview of the packaging state.
         self.overlay = QWidget(); self.overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        og = QGridLayout(self.overlay); og.setContentsMargins(18, 18, 18, 22); self.overlay_grid = og
+        self.overlay.installEventFilter(self)
+        self.preview_canvas=QWidget(self.overlay)
+        og = QGridLayout(self.preview_canvas); og.setContentsMargins(6, 6, 6, 6); self.overlay_grid = og
         self.preview_title = QLabel(""); self.preview_title.setAlignment(Qt.AlignCenter); self.preview_title.setWordWrap(True)
         self.preview_title.setStyleSheet("color:white;font-size:20px;font-weight:800;background:rgba(0,0,0,110);padding:6px;border-radius:6px;")
         og.addWidget(self.preview_title, 0, 0, 1, 3, Qt.AlignTop | Qt.AlignHCenter)
@@ -238,40 +264,57 @@ class PackagingPage(QWidget):
         og.addWidget(self.preview_watermark, 0, 2, Qt.AlignTop | Qt.AlignRight)
         og.setRowStretch(1, 1)
         self.preview_caption = QLabel(""); self.preview_caption.setAlignment(Qt.AlignCenter); self.preview_caption.setWordWrap(True)
+        self.reels_preview=QLabel(self.preview_canvas);self.reels_preview.setAttribute(Qt.WA_TransparentForMouseEvents,True);self.reels_preview.hide()
         self.preview_caption.setStyleSheet("color:white;font-size:18px;font-weight:800;background:rgba(0,0,0,145);padding:7px;border-radius:7px;")
         og.addWidget(self.preview_caption, 2, 0, 1, 3, Qt.AlignBottom | Qt.AlignHCenter)
         stack.addWidget(self.overlay)
+        stack.setCurrentWidget(self.overlay)
         box.addWidget(self.preview_host, 1)
 
         self.seek = QSlider(Qt.Horizontal); self.seek.setRange(0, 0); self.seek.sliderMoved.connect(self._seek_to)
         box.addWidget(self.seek)
         controls = QHBoxLayout()
-        self.play_btn = QPushButton("▶") ; self.play_btn.setFixedWidth(44); self.play_btn.clicked.connect(self._toggle_play)
+        self.play_btn = QPushButton(); self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay)) ; self.play_btn.setFixedWidth(44); self.play_btn.clicked.connect(self._toggle_play)
         controls.addWidget(self.play_btn)
         self.volume = QSlider(Qt.Horizontal); self.volume.setRange(0, 100); self.volume.setValue(80); self.volume.setMaximumWidth(100)
         self.volume.valueChanged.connect(lambda v: self.audio.setVolume(v / 100.0) if self.audio else None)
-        controls.addWidget(QLabel("🔊")); controls.addWidget(self.volume)
+        controls.addWidget(QLabel("音量")); controls.addWidget(self.volume)
         self.time_label = QLabel("00:00 / 00:00", objectName="muted"); controls.addWidget(self.time_label)
         controls.addStretch(1)
         self.ratio_badge = QLabel("9:16", objectName="statusInfo"); controls.addWidget(self.ratio_badge)
         open_btn = QPushButton("打开原视频"); open_btn.clicked.connect(self._open_current_video); controls.addWidget(open_btn)
-        full_btn = QPushButton("⛶"); full_btn.setFixedWidth(42); full_btn.clicked.connect(self._toggle_fullscreen); controls.addWidget(full_btn)
+        full_btn = QPushButton("全屏"); full_btn.setFixedWidth(48); full_btn.clicked.connect(self._toggle_fullscreen); controls.addWidget(full_btn)
         box.addLayout(controls)
         return card
 
     def _build_properties_panel(self):
-        card = QFrame(objectName="pageCard"); card.setMinimumWidth(360)
+        card = QFrame(objectName="pageCard"); card.setMinimumWidth(310)
         box = QVBoxLayout(card); box.setContentsMargins(10, 10, 10, 10); box.setSpacing(5)
         head = QHBoxLayout(); head.addWidget(QLabel("包装设置", objectName="sectionTitle")); head.addStretch(1)
         self.modified_badge = QLabel("未修改", objectName="muted"); head.addWidget(self.modified_badge)
         box.addLayout(head)
         self.tabs = QTabWidget(objectName="packagingTabs"); self.tabs.setDocumentMode(True)
+        self.tabs.addTab(self._build_recognition_tab(), "识别/校对")
         self.tabs.addTab(self._watermark_tab(), "水印")
         self.tabs.addTab(self._caption_tab(), "字幕")
         self.tabs.addTab(self._broll_tab(), "B-roll")
         self.tabs.addTab(self._title_tab(), "标题/文字")
         self.tabs.addTab(self._intro_outro_tab(), "片头片尾")
         self.tabs.addTab(self._params_tab(), "参数")
+        for index in range(self.tabs.count()):
+            page=self.tabs.widget(index);label=self.tabs.tabText(index)
+            self.tabs.removeTab(index)
+            scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setFrameShape(QFrame.NoFrame);scroll.setWidget(page)
+            self.tabs.insertTab(index,scroll,label)
+        sections = QGridLayout(); sections.setSpacing(3)
+        self.section_buttons=[]
+        for i in range(self.tabs.count()):
+            button=QPushButton(self.tabs.tabText(i));button.setCheckable(True);button.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Fixed)
+            button.clicked.connect(lambda checked=False,index=i:self.tabs.setCurrentIndex(index))
+            sections.addWidget(button,i//4,i%4);self.section_buttons.append(button)
+        self.tabs.currentChanged.connect(lambda index:[button.setChecked(n==index) for n,button in enumerate(self.section_buttons)])
+        self.tabs.tabBar().hide();box.addLayout(sections)
+        self.tabs.setCurrentIndex(2);self.section_buttons[2].setChecked(True)
         box.addWidget(self.tabs, 1)
         return card
 
@@ -280,37 +323,26 @@ class PackagingPage(QWidget):
 
     def _watermark_tab(self):
         w, b = self._tab()
-        self.wm_enabled = QCheckBox("启用水印"); self.wm_enabled.stateChanged.connect(self._state_changed); b.addWidget(self.wm_enabled)
-        b.addWidget(QLabel("图片水印", objectName="cardTitle"))
-        r = QHBoxLayout(); self.wm_path = QLineEdit(); self.wm_path.setPlaceholderText("PNG / JPG / WEBP")
-        self.wm_path.textChanged.connect(self._state_changed); r.addWidget(self.wm_path, 1)
-        choose = QPushButton("选择…"); choose.clicked.connect(self._choose_watermark); r.addWidget(choose); b.addLayout(r)
-        presets = QHBoxLayout(); self.wm_preset = QComboBox(); self.wm_preset.addItems(["右上 Logo", "左上 Logo", "右下 Logo", "底部居中半透明"])
-        self.wm_preset.currentIndexChanged.connect(self._apply_wm_preset); presets.addWidget(self.wm_preset, 1)
-        clear = QPushButton("清除"); clear.clicked.connect(lambda: self.wm_path.setText("")); presets.addWidget(clear); b.addLayout(presets)
-        grid = QGridLayout()
-        grid.addWidget(QLabel("位置", objectName="muted"), 0, 0); self.wm_position = QComboBox(); self.wm_position.addItems(["左上", "顶部居中", "右上", "左中", "居中", "右中", "左下", "底部居中", "右下"]); self.wm_position.currentIndexChanged.connect(self._state_changed); grid.addWidget(self.wm_position, 0, 1)
-        grid.addWidget(QLabel("大小", objectName="muted"), 1, 0); self.wm_scale = QSlider(Qt.Horizontal); self.wm_scale.setRange(4, 45); self.wm_scale.setValue(18); self.wm_scale.valueChanged.connect(self._state_changed); grid.addWidget(self.wm_scale, 1, 1)
-        self.wm_scale_value = QLabel("18%", objectName="muted"); grid.addWidget(self.wm_scale_value, 1, 2)
-        grid.addWidget(QLabel("透明度", objectName="muted"), 2, 0); self.wm_opacity = QSlider(Qt.Horizontal); self.wm_opacity.setRange(10, 100); self.wm_opacity.setValue(92); self.wm_opacity.valueChanged.connect(self._state_changed); grid.addWidget(self.wm_opacity, 2, 1)
-        self.wm_opacity_value = QLabel("92%", objectName="muted"); grid.addWidget(self.wm_opacity_value, 2, 2)
-        b.addLayout(grid)
-        b.addStretch(1)
+        self._add_watermark_controls(b)
         return w
 
     def _caption_tab(self):
         w, b = self._tab()
+        self._add_reels_styles(b)
         head = QHBoxLayout(); head.addWidget(QLabel("字幕内容", objectName="cardTitle")); head.addStretch(1)
         import_btn = QPushButton("导入分段文案/SRT"); import_btn.clicked.connect(self._import_captions); head.addWidget(import_btn)
         b.addLayout(head)
         self.caption_table = QTableWidget(0, 3); self.caption_table.setHorizontalHeaderLabels(["开始", "结束", "字幕原文"])
         self.caption_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents); self.caption_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents); self.caption_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.caption_table.verticalHeader().setVisible(False); self.caption_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.caption_table.setMinimumHeight(150); self.caption_table.setMaximumHeight(230); self.caption_table.verticalHeader().setVisible(False); self.caption_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.caption_table.itemChanged.connect(self._state_changed); b.addWidget(self.caption_table, 1)
         row = QHBoxLayout(); add = QPushButton("＋ 添加一段"); add.clicked.connect(self._add_caption_row); row.addWidget(add)
-        auto = QPushButton("按视频时长自动分配"); auto.clicked.connect(self._auto_caption_timing); row.addWidget(auto)
+        auto = QPushButton("自动分配时间"); auto.clicked.connect(self._auto_caption_timing); row.addWidget(auto)
         delete = QPushButton("删除选中"); delete.clicked.connect(self._delete_caption_rows); row.addWidget(delete); b.addLayout(row)
 
+        compact_layout=b
+        self.caption_advanced=QWidget()
+        b=QVBoxLayout(self.caption_advanced)
         # Data-driven caption preset library. Built-ins live in JSON files and
         # user presets are stored outside the app bundle so upgrades keep them.
         b.addWidget(QLabel("字幕效果模板库", objectName="cardTitle"))
@@ -369,7 +401,17 @@ class PackagingPage(QWidget):
         b.addLayout(style)
 
         note = QLabel("预设只修改字幕视觉效果，不修改字幕正文、字幕时间点或任务映射。内置预设由 JSON 动态加载；你可以保存、复制、重命名、删除自己的预设。", objectName="muted"); note.setWordWrap(True); b.addWidget(note)
+        more=QPushButton("更多字幕样式 / 详细参数")
+        more.clicked.connect(self._show_caption_advanced)
+        compact_layout.addWidget(more)
+        compact_layout.addStretch(1)
         return w
+
+    def _show_caption_advanced(self):
+        dialog=QDialog(self);dialog.setWindowTitle("字幕详细设置");dialog.resize(760,640)
+        layout=QVBoxLayout(dialog);scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(self.caption_advanced);layout.addWidget(scroll)
+        dialog.exec()
+        scroll.takeWidget();self.caption_advanced.setParent(self);self.caption_advanced.hide()
 
     def _broll_tab(self):
         w, b = self._tab()
@@ -417,41 +459,46 @@ class PackagingPage(QWidget):
 
     def _params_tab(self):
         w, b = self._tab()
-        b.addWidget(QLabel("输出参数", objectName="cardTitle"))
+        b.setSpacing(4);b.setContentsMargins(6,4,6,4)
         g = QGridLayout()
-        g.addWidget(QLabel("画面比例", objectName="muted"), 0, 0); self.output_ratio = QComboBox(); self.output_ratio.addItems(["9:16", "16:9", "1:1"]); self.output_ratio.currentIndexChanged.connect(self._state_changed); g.addWidget(self.output_ratio, 0, 1)
-        g.addWidget(QLabel("分辨率", objectName="muted"), 1, 0); self.resolution_label = QLabel("1080 × 1920", objectName="cardTitle"); g.addWidget(self.resolution_label, 1, 1)
-        g.addWidget(QLabel("FPS", objectName="muted"), 2, 0); g.addWidget(QLabel("30", objectName="cardTitle"), 2, 1)
-        g.addWidget(QLabel("编码", objectName="muted"), 3, 0); g.addWidget(QLabel("Remotion 默认 H.264 / AAC", objectName="cardTitle"), 3, 1)
+        g.addWidget(QLabel("画面比例", objectName="muted"), 0, 0); self.output_ratio = QComboBox(); self.output_ratio.addItems(["9:16", "16:9", "1:1", "4:5", "4:3", "原始比例"]); self.output_ratio.currentIndexChanged.connect(self._state_changed); g.addWidget(self.output_ratio, 0, 1)
+        self.resolution_label = QLabel("1080 × 1920", w); self.resolution_label.hide()
         b.addLayout(g)
-        b.addWidget(QLabel("输出目录", objectName="muted"))
+        self.output_ratio.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.output_ratio.setMinimumContentsLength(6);self.output_ratio.setFixedHeight(30)
+        self._add_output_controls(b)
         r = QHBoxLayout(); self.output_dir = QLineEdit(); self.output_dir.setText(self._settings.value("packaging/output_dir", str(Path.home() / "Movies" / "FlowStudio_Packaged"), type=str)); self.output_dir.textChanged.connect(self._state_changed); r.addWidget(self.output_dir, 1)
-        choose = QPushButton("选择…"); choose.clicked.connect(self._choose_output_dir); r.addWidget(choose); b.addLayout(r)
-        open_out = QPushButton("打开输出目录"); open_out.clicked.connect(self._open_output_dir); b.addWidget(open_out)
-        b.addWidget(QLabel("Remotion 引擎", objectName="cardTitle"))
-        self.remotion_status = QLabel("未检测", objectName="statusInfo"); self.remotion_status.setWordWrap(True); b.addWidget(self.remotion_status)
+        self.output_dir.setToolTip('成品输出目录');self.output_dir.setFixedHeight(30)
+        choose = QPushButton("目录…"); choose.clicked.connect(self._choose_output_dir); r.addWidget(choose); b.addLayout(r)
+        actions=QHBoxLayout();actions.addWidget(self.naming_button)
+        open_out = QPushButton("打开成品目录"); open_out.clicked.connect(self._open_output_dir); actions.addWidget(open_out);b.addLayout(actions)
+        self.component_engine = QWidget()
+        engine_layout = QVBoxLayout(self.component_engine)
+        engine_layout.addWidget(QLabel("Remotion 引擎", objectName="cardTitle"))
+        self.remotion_status = QLabel("未检测", objectName="statusInfo"); self.remotion_status.setWordWrap(True); engine_layout.addWidget(self.remotion_status)
         path_row = QHBoxLayout(); self.remotion_dir = QLineEdit(); saved = self._settings.value("packaging/remotion_project_dir", "", type=str); self.remotion_dir.setText(saved or RemotionRenderer.autodetect()); self.remotion_dir.setPlaceholderText("Remotion 项目目录"); path_row.addWidget(self.remotion_dir, 1)
-        browse = QPushButton("选择…"); browse.clicked.connect(self._choose_remotion_dir); path_row.addWidget(browse); b.addLayout(path_row)
-        buttons = QHBoxLayout(); check = QPushButton("检测 Remotion"); check.clicked.connect(self._check_remotion); buttons.addWidget(check)
-        install = QPushButton("安装/更新包装模板"); install.clicked.connect(self._install_template); buttons.addWidget(install); b.addLayout(buttons)
-        self.remotion_log = QPlainTextEdit(); self.remotion_log.setReadOnly(True); self.remotion_log.setMaximumHeight(120); self.remotion_log.setPlaceholderText("这里只显示简洁的检测/渲染日志，不再把 CLI 帮助文档塞到页面顶部。")
-        b.addWidget(self.remotion_log)
+        browse = QPushButton("选择…"); browse.clicked.connect(self._choose_remotion_dir); path_row.addWidget(browse); engine_layout.addLayout(path_row)
+        buttons = QHBoxLayout(); check = QPushButton("检测 Remotion"); self.engine_check_btn=check; check.clicked.connect(self._check_remotion); buttons.addWidget(check)
+        self.engine_install_btn=QPushButton('自动安装 / 修复引擎');buttons.addWidget(self.engine_install_btn)
+        install = QPushButton("安装/更新包装模板"); install.clicked.connect(self._install_template); buttons.addWidget(install); engine_layout.addLayout(buttons)
+        self.remotion_log = QPlainTextEdit(); self.remotion_log.setReadOnly(True); self.remotion_log.setMaximumBlockCount(500); self.remotion_log.setMaximumHeight(120); self.remotion_log.setPlaceholderText("这里只显示简洁的检测/渲染日志，不再把 CLI 帮助文档塞到页面顶部。")
+        engine_layout.addWidget(self.remotion_log)
         b.addStretch(1)
         return w
 
     def _build_timeline_panel(self):
-        card = QFrame(objectName="pageCard"); card.setMinimumHeight(190)
+        card = QFrame(objectName="pageCard"); card.setMinimumHeight(130)
         box = QVBoxLayout(card); box.setContentsMargins(10, 9, 10, 9); box.setSpacing(5)
         top = QHBoxLayout(); top.addWidget(QLabel("包装时间线", objectName="sectionTitle")); top.addStretch(1)
         self.timeline_zoom = QSlider(Qt.Horizontal); self.timeline_zoom.setRange(50, 200); self.timeline_zoom.setValue(100); self.timeline_zoom.setMaximumWidth(180); top.addWidget(QLabel("缩放", objectName="muted")); top.addWidget(self.timeline_zoom)
         box.addLayout(top)
-        self.timeline = QTableWidget(6, 2); self.timeline.setHorizontalHeaderLabels(["轨道", "内容 / 时间范围"]); self.timeline.verticalHeader().setVisible(False); self.timeline.horizontalHeader().setVisible(False)
-        self.timeline.setEditTriggers(QAbstractItemView.NoEditTriggers); self.timeline.setSelectionMode(QAbstractItemView.NoSelection); self.timeline.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents); self.timeline.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.timeline.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        tracks = ["片头/片尾", "水印", "标题/文字", "字幕", "B-roll", "主视频 + 音频"]
-        for i, name in enumerate(tracks):
-            it = QTableWidgetItem(name); it.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft); self.timeline.setItem(i, 0, it); self.timeline.setItem(i, 1, QTableWidgetItem("—")); self.timeline.setRowHeight(i, 35)
-        box.addWidget(self.timeline)
+        from app.ui.packaging_timeline import PackagingTimeline
+        self.timeline = PackagingTimeline()
+        self.timeline.seekRequested.connect(self._seek_to)
+        self.timeline.captionSelected.connect(self._select_timeline_caption)
+        self.timeline_zoom.valueChanged.connect(self.timeline.set_zoom)
+        scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(self.timeline);scroll.setFrameShape(QFrame.NoFrame)
+        box.addWidget(scroll)
         return card
 
     # -------------------------------------------------------------- data model
@@ -462,6 +509,7 @@ class PackagingPage(QWidget):
             "duration": 0.0,
             "watermark": {"enabled": False, "path": "", "position": "右上", "scale": 18, "opacity": 92},
             "captions": [],
+            "reelsStyle": copy.deepcopy(getattr(self,"_reels_presets",{}).get("默认白字",{})),
             "captionStyle": {
                 "preset": "经典白字黑描边", "presetId": "builtin.classic-white-outline", "font": "Arial", "size": 54, "color": "#FFFFFF",
                 "position": "底部居中", "weight": 800, "strokeColor": "#111111", "strokeWidth": 5,
@@ -487,10 +535,7 @@ class PackagingPage(QWidget):
         state = self._current_state()
         if not state or self._loading_state:
             return state
-        state["watermark"] = {
-            "enabled": self.wm_enabled.isChecked(), "path": self.wm_path.text().strip(),
-            "position": self.wm_position.currentText(), "scale": self.wm_scale.value(), "opacity": self.wm_opacity.value(),
-        }
+        state["watermark"] = {"enabled": False}
         captions = []
         for r in range(self.caption_table.rowCount()):
             text_item = self.caption_table.item(r, 2)
@@ -505,6 +550,13 @@ class PackagingPage(QWidget):
             word_payload = text_item.data(Qt.UserRole) if text_item else None
             if isinstance(word_payload, dict) and word_payload.get("sourceText") == cap["text"] and word_payload.get("words"):
                 cap["words"] = copy.deepcopy(word_payload["words"])
+                old_start=float(word_payload.get('sourceStart',cap['start']))
+                old_end=float(word_payload.get('sourceEnd',cap['end']))
+                if old_end>old_start and (old_start!=cap['start'] or old_end!=cap['end']):
+                    scale=(cap['end']-cap['start'])/(old_end-old_start)
+                    for word in cap['words']:
+                        word['start']=cap['start']+(word['start']-old_start)*scale
+                        word['end']=cap['start']+(word['end']-old_start)*scale
             captions.append(cap)
         state["captions"] = captions
         current_preset_id = self.caption_effect_preset.currentData() or ""
@@ -546,13 +598,16 @@ class PackagingPage(QWidget):
         state["intro"] = {"enabled": self.intro_enabled.isChecked(), "path": self.intro_path.text().strip(), "duration": self.intro_duration.value()}
         state["outro"] = {"enabled": self.outro_enabled.isChecked(), "path": self.outro_path.text().strip(), "duration": self.outro_duration.value()}
         state["params"] = {"ratio": self.output_ratio.currentText(), "output_dir": self.output_dir.text().strip()}
+        self._reels_capture(state)
         return state
 
     def _load_state(self, state: dict):
         self._loading_state = True
         try:
-            wm = state.get("watermark") or {}
-            self.wm_enabled.setChecked(bool(wm.get("enabled"))); self.wm_path.setText(str(wm.get("path") or "")); self.wm_position.setCurrentText(str(wm.get("position") or "右上")); self.wm_scale.setValue(int(wm.get("scale") or 18)); self.wm_opacity.setValue(int(wm.get("opacity") or 92))
+            legacy = state.get("watermark") or {}
+            if legacy.get("enabled") and legacy.get("path"):
+                state.setdefault("watermarks", []).append(dict(legacy))
+                state["watermark"] = {"enabled": False}
             cs = state.get("captionStyle") or {}
             preset_key = str(cs.get("presetId") or cs.get("preset") or "经典白字黑描边")
             self._refresh_caption_preset_choices(prefer_id=preset_key, prefer_name=str(cs.get("preset") or ""))
@@ -579,6 +634,7 @@ class PackagingPage(QWidget):
             outro = state.get("outro") or {}; self.outro_enabled.setChecked(bool(outro.get("enabled"))); self.outro_path.setText(str(outro.get("path") or "")); self.outro_duration.setValue(float(outro.get("duration") or 2.0))
             params = state.get("params") or {}; self.output_ratio.setCurrentText(str(params.get("ratio") or "9:16"));
             if params.get("output_dir"): self.output_dir.setText(str(params["output_dir"]))
+            self._reels_load(state)
         finally:
             self._loading_state = False
         self.modified_badge.setText(str(state.get("status") or "未包装"))
@@ -592,8 +648,6 @@ class PackagingPage(QWidget):
                 state["status"] = "已编辑"
             self.modified_badge.setText(state["status"])
             self._update_tree_status(self._current_path)
-        self.wm_scale_value.setText(f"{self.wm_scale.value()}%")
-        self.wm_opacity_value.setText(f"{self.wm_opacity.value()}%")
         self._update_preview_overlays(); self._update_timeline(); self._update_resolution()
 
     # -------------------------------------------------------------- import/tree
@@ -672,7 +726,7 @@ class PackagingPage(QWidget):
         self.current_info.setText(f"当前片段：{Path(path).name}")
         self._load_state(state)
         if self.player:
-            self.player.setSource(QUrl.fromLocalFile(path)); self.player.play(); self.play_btn.setText("❚❚")
+            self.player.setSource(QUrl.fromLocalFile(path)); self.player.play(); self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
 
     def _update_tree_status(self, path):
         if not path: return
@@ -686,6 +740,7 @@ class PackagingPage(QWidget):
 
     # -------------------------------------------------------------- preview
     def _player_position(self, value):
+        self.timeline.set_position(value/1000)
         if not self.seek.isSliderDown(): self.seek.setValue(int(value))
         duration = self.player.duration() if self.player else 0; self.time_label.setText(f"{_fmt_ms(value)} / {_fmt_ms(duration)}")
         self._update_current_caption(value / 1000.0)
@@ -702,11 +757,26 @@ class PackagingPage(QWidget):
 
     def _toggle_play(self):
         if not self.player or not self._current_path: return
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState: self.player.pause(); self.play_btn.setText("▶")
-        else: self.player.play(); self.play_btn.setText("❚❚")
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState: self.player.pause(); self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        else: self.player.play(); self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
 
     def _toggle_fullscreen(self):
-        if self.video_widget and hasattr(self.video_widget, "setFullScreen"): self.video_widget.setFullScreen(not self.video_widget.isFullScreen())
+        if getattr(self, '_preview_dialog', None) is not None:
+            self._preview_dialog.close()
+            return
+        container = self.preview_host.parentWidget().layout()
+        index = container.indexOf(self.preview_host)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("视频预览 · Esc 返回")
+        layout = QVBoxLayout(dialog); layout.setContentsMargins(0,0,0,0)
+        layout.addWidget(self.preview_host)
+        self._preview_dialog = dialog
+        def restore(*args):
+            container.insertWidget(index, self.preview_host, 1)
+            self._preview_dialog = None
+            dialog.deleteLater()
+        dialog.finished.connect(restore)
+        dialog.showFullScreen()
 
     def _open_current_video(self):
         if self._current_path: QDesktopServices.openUrl(QUrl.fromLocalFile(self._current_path))
@@ -734,30 +804,57 @@ class PackagingPage(QWidget):
         if title.get("color"):
             px=max(14,min(34,int(title.get("size",58)*0.38))); bg="rgba(0,0,0,110)" if title.get("background",True) else "transparent"
             self.preview_title.setStyleSheet(f"color:{title.get('color')};font-size:{px}px;font-weight:800;background:{bg};padding:6px;border-radius:6px;")
-        wm = state.get("watermark") or {}; path = str(wm.get("path") or ""); self._place_overlay(self.preview_watermark,wm.get("position","右上"))
-        size=max(44,min(160,int(wm.get("scale",18)*5.3))); self.preview_watermark.setFixedSize(size,max(36,int(size*0.7)))
-        self.preview_watermark.clear(); self.preview_watermark.setVisible(bool(wm.get("enabled") and Path(path).is_file()))
-        if wm.get("enabled") and Path(path).is_file():
-            pm = QPixmap(path)
-            if not pm.isNull(): self.preview_watermark.setPixmap(pm.scaled(self.preview_watermark.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.preview_watermark.hide()
         pos = (self.player.position() / 1000.0) if self.player else 0.0; self._update_current_caption(pos)
         self.ratio_badge.setText((state.get("params") or {}).get("ratio", "9:16"))
 
+    def eventFilter(self, watched, event):
+        if watched is getattr(self,'overlay',None) and event.type()==QEvent.Resize:
+            QTimer.singleShot(0,lambda:self._update_current_caption(self.player.position()/1000 if self.player else 0))
+        return super().eventFilter(watched,event)
+
     def _update_current_caption(self, sec: float):
+        native=self.video_widget.video_item.nativeSize() if self.video_widget else None
+        w,h=(native.width(),native.height()) if native and native.width()>0 and native.height()>0 else (1080,1920)
+        factor=min(self.overlay.width()/w,self.overlay.height()/h)
+        cw,ch=max(1,int(w*factor)),max(1,int(h*factor))
+        self.preview_canvas.setGeometry((self.overlay.width()-cw)//2,(self.overlay.height()-ch)//2,cw,ch)
+        self.preview_caption.setFixedWidth(max(1,int(cw*.9)))
+        self.reels_preview.hide()
+        if self._current_state() and self._current_state().get('reelsStyle'):
+            from app.services.packaging_overlay import paint_at
+            state=self._current_state()
+            try:
+                image=paint_at(state.get('captions',[]),state['reelsStyle'],sec)
+                self.preview_caption.hide()
+                from app.services.packaging_media import output_size
+                params=state.get('params') or {};meta=state.get('media') or {}
+                w,h=output_size(params.get('ratio','9:16'),params.get('output_resolution','1080p'),(meta.get('width',1080),meta.get('height',1920)))
+                factor=min(self.preview_canvas.width()/w,self.preview_canvas.height()/h)
+                rect_w,rect_h=max(1,int(w*factor)),max(1,int(h*factor))
+                self.reels_preview.setGeometry((self.preview_canvas.width()-rect_w)//2,(self.preview_canvas.height()-rect_h)//2,rect_w,rect_h)
+                self.reels_preview.setAlignment(Qt.AlignCenter)
+                self.reels_preview.setPixmap(QPixmap.fromImage(image).scaled(self.reels_preview.size(),Qt.KeepAspectRatio,Qt.SmoothTransformation))
+                self.reels_preview.show();self.reels_preview.raise_()
+                return
+            except Exception as exc:
+                self.preview_caption.clear()
+                self.reels_style_hint.setText('字幕效果预览失败：'+str(exc))
+                return
         state = self._current_state(); current = None
         if state:
             for cap in state.get("captions") or []:
                 if float(cap.get("start") or 0) <= sec < float(cap.get("end") or 0):
                     current = cap; break
             style = state.get("captionStyle") or {}; color = style.get("color", "#FFFFFF"); self._place_overlay(self.preview_caption,style.get("position","底部居中"))
-            px=max(13,min(34,int(style.get("size",54)*0.36)))
+            px=max(5,int(style.get("size",54)*min(cw/1080,ch/1920)))
             bg = "transparent"
             if style.get("background", False):
                 c = QColor(str(style.get("backgroundColor") or "#000000")); alpha = max(0, min(255, int(float(style.get("backgroundOpacity",55))*2.55)))
                 bg = f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
             weight = int(style.get("weight") or 800)
             radius = max(0, int(float(style.get("radius",16))*0.45))
-            self.preview_caption.setStyleSheet(f"color:{color};font-size:{px}px;font-weight:{weight};background:{bg};padding:7px 10px;border-radius:{radius}px;")
+            self.preview_caption.setStyleSheet(f"color:{color};font-size:{px}px;font-weight:{weight};background:{bg};padding:2px;border-radius:{radius}px;")
         if not current:
             self.preview_caption.clear(); self.preview_caption.setVisible(False); return
 
@@ -813,17 +910,9 @@ class PackagingPage(QWidget):
         else:
             self.preview_caption.setText(text)
         self.preview_caption.setVisible(bool(text))
+        self.preview_caption.setFixedHeight(min(max(1,ch-12),max(1,self.preview_caption.heightForWidth(self.preview_caption.width()))))
 
     # -------------------------------------------------------------- controls
-    def _choose_watermark(self):
-        f, _ = QFileDialog.getOpenFileName(self, "选择水印", str(Path.home()), "Image (*.png *.jpg *.jpeg *.webp *.gif)")
-        if f: self.wm_path.setText(f); self.wm_enabled.setChecked(True)
-
-    def _apply_wm_preset(self):
-        name = self.wm_preset.currentText()
-        presets = {"右上 Logo":("右上",18,92), "左上 Logo":("左上",18,92), "右下 Logo":("右下",18,90), "底部居中半透明":("底部居中",24,70)}
-        pos, scale, opacity = presets.get(name, ("右上",18,92)); self.wm_position.setCurrentText(pos); self.wm_scale.setValue(scale); self.wm_opacity.setValue(opacity)
-
     def _refresh_caption_preset_choices(self, *args, prefer_id: str = "", prefer_name: str = ""):
         if not hasattr(self, "caption_effect_preset"):
             return
@@ -898,6 +987,8 @@ class PackagingPage(QWidget):
         }
 
     def _apply_caption_style_dict(self, preset: dict):
+        self._reels_style = {}
+        if hasattr(self, 'reels_style_hint'): self.reels_style_hint.setText('当前使用原有字幕样式')
         preset = CaptionPresetLibrary.normalize_style(preset or {})
         self._loading_state = True
         try:
@@ -1070,10 +1161,10 @@ class PackagingPage(QWidget):
 
     def _append_caption(self, cap):
         r = self.caption_table.rowCount(); self.caption_table.insertRow(r)
-        self.caption_table.setItem(r,0,QTableWidgetItem(f"{float(cap.get('start') or 0):.2f}")); self.caption_table.setItem(r,1,QTableWidgetItem(f"{float(cap.get('end') or 0):.2f}"))
+        self.caption_table.setItem(r,0,QTableWidgetItem(f"{float(cap.get('start') or 0):.3f}")); self.caption_table.setItem(r,1,QTableWidgetItem(f"{float(cap.get('end') or 0):.3f}"))
         text = str(cap.get('text') or ""); text_item = QTableWidgetItem(text)
         if isinstance(cap.get("words"), list) and cap.get("words"):
-            text_item.setData(Qt.UserRole, {"sourceText": text, "words": copy.deepcopy(cap.get("words"))})
+            text_item.setData(Qt.UserRole, {"sourceText": text, "sourceStart":float(cap.get('start',0)),"sourceEnd":float(cap.get('end',0)),"words": copy.deepcopy(cap.get("words"))})
             text_item.setToolTip("包含词级时间戳：卡拉OK高亮将精确跟随单词。")
         self.caption_table.setItem(r,2,text_item)
 
@@ -1089,7 +1180,9 @@ class PackagingPage(QWidget):
         n = self.caption_table.rowCount(); state = self._current_state(); duration = float((state or {}).get("duration") or 0)
         if not n: return
         if duration <= 0 and self._current_path:
-            duration = RemotionRenderer(self.remotion_dir.text().strip()).probe_duration(self._current_path)
+            from app.services.packaging_media import probe_media
+            try:duration=probe_media(self._current_path,self.asr_ffmpeg.text().strip())['duration']
+            except Exception as exc:QMessageBox.warning(self,'读取视频时长',str(exc));return
             if state and duration > 0: state["duration"] = duration
         if duration <= 0: duration = n * 7.5
         step = duration / n; self._loading_state = True
@@ -1144,46 +1237,45 @@ class PackagingPage(QWidget):
         p = Path(self.output_dir.text().strip()).expanduser(); p.mkdir(parents=True, exist_ok=True); QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
 
     def _update_resolution(self):
-        ratio = self.output_ratio.currentText(); text = {"9:16":"1080 × 1920","16:9":"1920 × 1080","1:1":"1080 × 1080"}.get(ratio,"1080 × 1920")
+        from app.services.packaging_media import output_size
+        ratio = self.output_ratio.currentText()
+        resolution=self.output_resolution.currentText() if hasattr(self,'output_resolution') else '1080p'
+        meta=(self._current_state() or {}).get('media') or {}
+        w,h=output_size(ratio,resolution,(meta.get('width',1080),meta.get('height',1920)))
+        text=f'{w} × {h}'
         self.resolution_label.setText(text); self.ratio_badge.setText(ratio)
 
     # -------------------------------------------------------------- timeline
     def _update_timeline(self):
-        state = self._current_state()
-        values = ["—"] * 6
-        if state:
-            intro = state.get("intro") or {}; outro = state.get("outro") or {}
-            parts=[]
-            if intro.get("enabled") and intro.get("path"): parts.append(f"片头 {float(intro.get('duration') or 0):.1f}s · {Path(intro['path']).name}")
-            if outro.get("enabled") and outro.get("path"): parts.append(f"片尾 {float(outro.get('duration') or 0):.1f}s · {Path(outro['path']).name}")
-            values[0] = "  |  ".join(parts) or "—"
-            wm=state.get("watermark") or {}; values[1] = f"{Path(wm.get('path','')).name} · {wm.get('position','右上')} · {wm.get('scale',18)}%" if wm.get("enabled") and wm.get("path") else "—"
-            title=state.get("title") or {}; values[2] = (str(title.get("text") or "")[:80] or "—") if title.get("enabled") else "—"
-            values[3] = f"{len(state.get('captions') or [])} 段字幕" if state.get("captions") else "—"
-            values[4] = "  |  ".join(f"{Path(x.get('path','')).name} [{x.get('start',0):.1f}-{x.get('end',0):.1f}s]" for x in (state.get("broll") or [])[:4]) or "—"
-            values[5] = f"{Path(state.get('source','')).name} · {float(state.get('duration') or 0):.1f}s"
-        for r, value in enumerate(values):
-            if self.timeline.item(r,1): self.timeline.item(r,1).setText(value)
+        self.timeline.set_state(self._current_state())
+
+    def _select_timeline_caption(self,index):
+        self.tabs.setCurrentIndex(2)
+        self.caption_table.selectRow(index)
+        item=self.caption_table.item(index,2)
+        if item:self.caption_table.scrollToItem(item)
 
     # -------------------------------------------------------------- project/presets
-    def _save_project(self):
-        self._capture_controls()
-        target = self._project_path
-        if not target:
-            target, _ = QFileDialog.getSaveFileName(self, "保存视频包装工程", str(Path.home()/"Documents"/"FlowStudio_Packaging.flowpack.json"), "Flow Packaging Project (*.flowpack.json);;JSON (*.json)")
-        if not target: return
-        if not target.lower().endswith(".json"): target += ".flowpack.json"
-        try:
-            Path(target).write_text(json.dumps(self._project, ensure_ascii=False, indent=2), encoding="utf-8"); self._project_path = target; self.render_status.setText("工程已保存")
-        except Exception as exc: QMessageBox.warning(self,"保存工程",str(exc))
-
-    def _load_project(self):
-        f, _ = QFileDialog.getOpenFileName(self, "载入视频包装工程", str(Path.home()/"Documents"), "Flow Packaging Project (*.flowpack.json *.json)")
-        if not f: return
-        try:
-            data = json.loads(Path(f).read_text(encoding="utf-8")); assert isinstance(data.get("videos"), dict)
-        except Exception as exc: QMessageBox.warning(self,"载入工程",f"工程文件无效：{exc}"); return
-        self._project = data; self._project.setdefault("order", list(self._project["videos"].keys())); self._project_path = f; self._current_path = ""; self._rebuild_tree(select_first=True); self.render_status.setText("工程已载入")
+    def _clear_tasks(self):
+        if self._render_process is not None or self._preview_process is not None:
+            QMessageBox.information(self, "清空任务列表", "请先停止渲染或等待成片预览完成。")
+            return
+        self._stop_asr()
+        if self.player:
+            self.player.stop()
+            self.player.setSource(QUrl())
+        self._current_path = ""
+        self._project = {"version": 1, "videos": {}, "order": []}
+        self.search.clear()
+        self._rebuild_tree(False)
+        self._load_state(self._default_state(""))
+        self.reels_preview.hide()
+        self._update_timeline()
+        self.seek.setValue(0)
+        self.time_label.setText("00:00 / 00:00")
+        self.current_info.setText("当前片段：未选择")
+        self.modified_badge.setText("未选择任务")
+        self.render_status.setText("任务列表已清空，原视频和已导出文件保留")
 
     def _preset_store(self):
         try: return json.loads(self._settings.value("packaging/custom_presets", "{}", type=str) or "{}")
@@ -1194,7 +1286,7 @@ class PackagingPage(QWidget):
         current=self.preset_combo.currentText(); self.preset_combo.clear(); self.preset_combo.addItems(["标准包装", "字幕优先", "无水印简洁版"] + sorted(self._preset_store().keys())); self.preset_combo.setCurrentText(current)
 
     def _snapshot_packaging(self, state):
-        return copy.deepcopy({k:state.get(k) for k in ("watermark","captions","captionStyle","broll","title","intro","outro","params")})
+        return copy.deepcopy({k:state.get(k) for k in ("watermark","watermarks","captions","captionStyle","reelsStyle","broll","title","intro","outro","params")})
 
     def _save_named_preset(self):
         state=self._capture_controls()
@@ -1222,7 +1314,7 @@ class PackagingPage(QWidget):
     def _apply_to_all(self):
         state=self._capture_controls()
         if not state: QMessageBox.information(self,"应用到全部","请先选择并设置一个视频。"); return
-        snap=self._snapshot_packaging(state); count=0
+        snap=self._snapshot_packaging(state); snap.pop('captions',None); count=0
         for path, target in self._project.get("videos",{}).items():
             if path==self._current_path: continue
             source=target.get("source",path); duration=target.get("duration",0); status=target.get("status","未包装"); target.update(copy.deepcopy(snap)); target["source"]=source; target["duration"]=duration; target["status"]="已编辑" if status!="已完成" else status; count+=1
@@ -1255,16 +1347,15 @@ class PackagingPage(QWidget):
 
     def _payload_for(self, path: str):
         if path == self._current_path: self._capture_controls()
-        state=self._project["videos"][path]; duration=float(state.get("duration") or 0); renderer=RemotionRenderer(self.remotion_dir.text().strip())
-        if duration<=0: duration=renderer.probe_duration(path); state["duration"]=duration
-        if duration<=0: duration=30.0
+        state=self._project["videos"][path]; duration=float(state.get("duration") or (state.get("media") or {}).get("duration") or 0)
+        # The worker probes unknown durations; never silently truncate batch items to 30 seconds.
         intro=state.get("intro") or {}; outro=state.get("outro") or {}; total=duration + (float(intro.get("duration") or 0) if intro.get("enabled") and intro.get("path") else 0) + (float(outro.get("duration") or 0) if outro.get("enabled") and outro.get("path") else 0)
         wm=copy.deepcopy(state.get("watermark") or {}); wm["opacity"]=float(wm.get("opacity",92))/100.0
         payload={"source":path,"mainDuration":duration,"totalDuration":total,"ratio":(state.get("params") or {}).get("ratio","9:16"),"watermark":wm,"captions":copy.deepcopy(state.get("captions") or []),"captionStyle":copy.deepcopy(state.get("captionStyle") or {}),"broll":copy.deepcopy(state.get("broll") or []),"title":copy.deepcopy(state.get("title") or {}),"intro":copy.deepcopy(intro),"outro":copy.deepcopy(outro)}
-        return payload
+        return self._reels_payload(payload,state)
 
     def _output_for(self, path: str):
-        state=self._project["videos"][path]; outdir=Path((state.get("params") or {}).get("output_dir") or self.output_dir.text() or (Path.home()/"Movies"/"FlowStudio_Packaged")).expanduser(); outdir.mkdir(parents=True,exist_ok=True); return str(outdir/(Path(path).stem+"_packaged.mp4"))
+        return self._reels_output_for(path)
 
     def _render_current(self):
         if not self._current_path: QMessageBox.information(self,"视频包装","请先导入并选择一个视频。"); return
@@ -1276,41 +1367,74 @@ class PackagingPage(QWidget):
         self._start_queue(paths)
 
     def _start_queue(self, paths):
+        if self._asr_install_process is not None:
+            self.render_status.setText('请等待组件任务完成后渲染。');return
+        if getattr(self, '_preview_process', None) is not None: QMessageBox.information(self,"视频包装","请等待成片预览完成。"); return
         if self._render_process is not None: QMessageBox.information(self,"视频包装","已有渲染任务正在进行。"); return
-        if not self._check_remotion(): QMessageBox.warning(self,"Remotion","Remotion 尚未连接，请先检查项目目录。"); return
+        self._render_failed = 0
+        self._render_stopped = False
         self._render_queue=list(paths); self._render_total=len(self._render_queue); self._render_done=0; self.render_progress.show(); self.render_progress.setValue(0); self.stop_btn.setEnabled(True); self.render_btn.setEnabled(False); self.batch_btn.setEnabled(False); self._render_next()
 
     def _render_next(self):
         if not self._render_queue:
-            self._render_process=None; self._rendering_path=""; self.render_progress.setValue(100); self.render_status.setText("批量渲染完成"); self.stop_btn.setEnabled(False); self.render_btn.setEnabled(True); self.batch_btn.setEnabled(True); self._rebuild_tree(False); return
+            self._render_process=None; self._rendering_path=""
+            stopped = getattr(self, '_render_stopped', False)
+            failed = getattr(self, '_render_failed', 0)
+            if not stopped: self.render_progress.setValue(100)
+            self.render_status.setText("已停止" if stopped else f"渲染结束：成功 {self._render_done-failed}，失败 {failed}")
+            self.stop_btn.setEnabled(False); self.render_btn.setEnabled(True); self.batch_btn.setEnabled(True); self._rebuild_tree(False); return
         path=self._render_queue.pop(0); self._rendering_path=path; state=self._project["videos"][path]; state["status"]="渲染中"; self.render_status.setText(f"渲染中：{Path(path).name}"); self.modified_badge.setText("渲染中") if path==self._current_path else None
         try:
-            renderer=RemotionRenderer(self.remotion_dir.text().strip()); payload=self._payload_for(path); output=self._output_for(path); cmd,cwd=renderer.render_flowstudio_command(payload,output)
+            renderer=RemotionRenderer(self.remotion_dir.text().strip()); payload=self._payload_for(path); output=self._output_for(path); self._render_output=output; cmd,cwd=renderer.render_flowstudio_command(payload,output)
         except Exception as exc:
-            state["status"]="失败"; self.remotion_log.appendPlainText(f"准备渲染失败：{exc}"); QTimer.singleShot(0,self._render_next); return
+            state["status"]="失败"; state["last_error"]=str(exc); self._render_done+=1; self._render_failed+=1
+            self.remotion_log.appendPlainText(f"准备渲染失败：{exc}"); QTimer.singleShot(0,self._render_next); return
         self.remotion_log.appendPlainText("\n$ "+" ".join(cmd[:5])+" …")
-        proc=QProcess(self); proc.setWorkingDirectory(cwd); proc.setProgram(cmd[0]); proc.setArguments(cmd[1:]); proc.setProcessChannelMode(QProcess.MergedChannels); proc.readyReadStandardOutput.connect(lambda:self._read_render_output(proc)); proc.finished.connect(lambda code,status:self._render_finished(proc,code)); proc.errorOccurred.connect(lambda err:self.remotion_log.appendPlainText("启动错误："+proc.errorString())); self._render_process=proc; proc.start()
+        proc=QProcess(self); proc.setWorkingDirectory(cwd); proc.setProgram(cmd[0]); proc.setArguments(cmd[1:]); proc.setProcessChannelMode(QProcess.MergedChannels); proc.readyReadStandardOutput.connect(lambda:self._read_render_output(proc)); proc.finished.connect(lambda code,status:self._render_finished(proc,code)); proc.errorOccurred.connect(lambda err:self._render_error(proc,err)); self._render_process=proc; proc.start()
+
+    def _render_error(self, proc, error):
+        if proc is not self._render_process: return
+        self.remotion_log.appendPlainText("渲染错误："+proc.errorString())
+        if error == QProcess.FailedToStart: self._render_finished(proc, 1)
 
     def _read_render_output(self, proc):
         data=bytes(proc.readAllStandardOutput()).decode("utf-8",errors="replace")
         if not data: return
-        self.remotion_log.moveCursor(self.remotion_log.textCursor().End); self.remotion_log.insertPlainText(data)
+        if '渲染方式：' in data:self.render_status.setText(next(line for line in data.splitlines() if '渲染方式：' in line));self.render_status.setToolTip(data.strip())
+        elif '内存不足，等待' in data:self.render_status.setText('等待可用内存，可点击停止；不会关闭其他软件。')
+        elif 'Rendered' in data or 'Bundling' in data:self.render_status.setText('渲染中：'+Path(self._rendering_path).name)
+        self.remotion_log.moveCursor(QTextCursor.MoveOperation.End); self.remotion_log.insertPlainText(data)
+        self.remotion_log.ensureCursorVisible()
         m=re.findall(r"(\d{1,3})%",data)
         if m: self.render_progress.setValue(max(0,min(99,int(m[-1]))))
 
     def _render_finished(self, proc, code):
+        if proc is not self._render_process: return
         self._read_render_output(proc); path=self._rendering_path; self._render_process=None
+        stopped = getattr(self, '_render_stopped', False)
         if path in self._project.get("videos",{}):
             state=self._project["videos"][path]; state["status"]="已完成" if code==0 else "失败"
-            state["last_output"]=self._output_for(path) if code==0 else ""
+            state["last_output"]=self._render_output if code==0 else ""
+            if stopped: state["status"]="已停止"
+            state["last_error"]="" if code==0 else ("用户停止" if stopped else "渲染失败，请查看包装日志末尾的错误详情")
         self.remotion_log.appendPlainText(f"\n退出码：{code} · {'完成' if code==0 else '失败'}")
         self._render_done += 1; self.render_progress.setValue(min(99,int(self._render_done/max(1,self._render_total)*100)))
+        if code != 0: self._render_failed = getattr(self, '_render_failed', 0) + 1
+        proc.deleteLater()
         if path==self._current_path: self.modified_badge.setText(self._project["videos"][path]["status"])
         self._rebuild_tree(False); QTimer.singleShot(0,self._render_next)
 
     def _stop_render(self):
+        self._render_stopped = True
         self._render_queue.clear()
         if self._render_process is not None:
+            try:
+                import psutil
+                parent=psutil.Process(int(self._render_process.processId()))
+                for child in parent.children(recursive=True):
+                    try:child.kill()
+                    except psutil.Error:pass
+            except Exception:pass
             try: self._render_process.kill()
             except Exception: pass
         self.render_status.setText("已停止"); self.stop_btn.setEnabled(False); self.render_btn.setEnabled(True); self.batch_btn.setEnabled(True)
@@ -1318,16 +1442,17 @@ class PackagingPage(QWidget):
     # -------------------------------------------------------------- shortcuts/lifecycle
     def _install_shortcuts(self):
         self._shortcuts=[]
-        for key, fn in (("Space",self._toggle_play),("Ctrl+S",self._save_project),("Meta+S",self._save_project)):
+        for key, fn in (("Space",self._toggle_play),):
             sc=QShortcut(QKeySequence(key),self); sc.setContext(Qt.WidgetWithChildrenShortcut); sc.activated.connect(fn); self._shortcuts.append(sc)
 
     def hideEvent(self, event):
         if self.player:
-            try:self.player.pause(); self.play_btn.setText("▶")
+            try:self.player.pause(); self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
             except Exception:pass
         super().hideEvent(event)
 
     def closeEvent(self, event):
+        self._stop_asr()
         if self._render_process is not None:
             try:self._render_process.kill()
             except Exception:pass

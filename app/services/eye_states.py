@@ -11,8 +11,11 @@ OPEN_EYE_PROMPT = (
 )
 
 
-def blocks(snapshot, fallback='PRAYING'):
+def blocks(snapshot, fallback='TALKING'):
     if not snapshot or snapshot.get('local_override'): return []
+    fallback=snapshot.get('base_mode',fallback)
+    # Only an explicitly closed-eye script uses red/black as segment metadata.
+    if fallback != 'PRAYING':return [(snapshot.get('text',''),'TALKING')]
     raw = snapshot.get('text', '').encode('utf-16-le')
     result = []
     for start, end, fmt in runs(snapshot):
@@ -27,9 +30,8 @@ def blocks(snapshot, fallback='PRAYING'):
 
 
 def reference_mode(styles, fallback='TALKING'):
-    parts = blocks(styles.get('外文内容', {}), fallback)
-    modes = {mode for text, mode in parts if text.strip()}
-    return 'PRAYING' if 'PRAYING' in modes else ('TALKING' if modes else fallback)
+    # The neighbouring requirement column determines the script type, not ink.
+    return fallback
 
 
 def prepare(snapshot, prepare_text, fallback='TALKING'):

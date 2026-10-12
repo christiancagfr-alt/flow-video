@@ -45,6 +45,9 @@ def source_files():
         for p in (ROOT/folder).rglob('*'):
             if p.is_file() and p.suffix in suffixes and '__pycache__' not in p.parts and not any(x.startswith('TEST_RESULTS') for x in p.parts):files.append(p)
     files.extend((ROOT/'app/data/caption_presets/builtin').glob('*.json'))
+    files.extend((ROOT/'app/services/reels').glob('*.json'))
+    files.extend(ROOT.glob('requirements-asr.txt'))
+    files.extend(ROOT.glob('THIRD_PARTY_NOTICES.md'))
     for name in ['main.py','Flow Studio.vbs','requirements-release.lock','requirements-windows.txt','requirements-macos.lock','requirements-linux.lock','README.md','RELEASE_NOTES.md','SECURITY_AUDIT.md','.env.example','.gitignore']:
         p=ROOT/name
         if p.exists():files.append(p)
@@ -82,6 +85,8 @@ def main():
     # Embed mode otherwise does not process pywin32.pth on some Python builds.
     (runtime/'sitecustomize.py').write_text("import os,sys\nfrom pathlib import Path\np=Path(__file__).parent/'Lib/site-packages'\nfor name in ('win32','win32/lib','Pythonwin'):sys.path.append(str(p/name))\n_dll=os.add_dll_directory(str(p/'pywin32_system32'))\n",encoding='utf-8')
     (OUT/'RUNTIME_MANIFEST.json').write_text(json.dumps({'python':PYTHON_VERSION,'python_sha256':PYTHON_SHA256,'wheels':records},indent=2),encoding='utf-8')
+    from bundle_packaging_components import bundle
+    bundle(OUT,runtime/'python.exe')
     print('Portable tree prepared:',OUT,flush=True)
 
 if __name__=='__main__':main()

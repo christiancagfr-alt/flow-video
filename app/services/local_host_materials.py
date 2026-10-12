@@ -50,9 +50,9 @@ def rescan(group_key, day, progress_callback=None, *, random_fill=False):
                     renamed[str(Path(old[1]).expanduser().resolve())] = str(path)
                     con.execute('INSERT OR REPLACE INTO image_path_aliases(old_path,new_path) VALUES(?,?)',
                                 (str(Path(old[1]).expanduser().resolve()), str(path)))
-            from app.services.material_assignment import image_mode
-            default = 'PRAYING' if any(t.get('mode') == 'PRAYING' for t in tasks) else 'TALKING'
-            mode = image_mode(path, old[3] if old else None, default)
+            from app.services.material_assignment import image_mode, manual_modes
+            default = 'TALKING'
+            mode = image_mode(path, old[3] if old else None, default, manual_modes(con))
             modes[path] = mode
             if old:
                 con.execute('UPDATE assets SET local_path=?,original_name=?,sha256=?,mode=? WHERE id=?',
@@ -74,6 +74,7 @@ def rescan(group_key, day, progress_callback=None, *, random_fill=False):
         assigned = assign(reference_tasks(tasks, modes), files, modes, previous, random_fill)
         missing = len(tasks) - len(assigned)
         status = 'READY_FOR_GPT' if not missing else ('NEEDS_MANUAL_CLASSIFY' if mixed and files else 'MATERIAL_SHORTAGE')
+        if missing and files and any(t.get('mode')=='PRAYING' for t in tasks) and 'PRAYING' not in modes.values():status='NEEDS_MANUAL_CLASSIFY'
         message = f'本地扫描：发现 {len(files)} 张图片，已匹配 {len(assigned)}/{len(tasks)} 条任务'
         if missing:
             message += f'；还有 {missing} 条未匹配' + ('，请在闭眼图片文件名中添加“闭眼”后重新扫描' if mixed and files else '，请补充图片后重新扫描')

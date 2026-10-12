@@ -9,7 +9,14 @@ def material_folder(raw):
     return pictures if pictures.is_dir() else folder
 
 
-def image_mode(path, recorded=None, default='TALKING'):
+def manual_modes(con):
+    exists=con.execute("SELECT 1 FROM sqlite_master WHERE name='manual_image_modes'").fetchone()
+    return {r[0]:r[1] for r in con.execute('SELECT path,mode FROM manual_image_modes')} if exists else {}
+
+
+def image_mode(path, recorded=None, default='TALKING', manual=None):
+    chosen=(manual or {}).get(str(Path(path).resolve()))
+    if chosen in ('PRAYING','TALKING'):return chosen
     name = Path(path).stem
     if '闭眼' in name: return 'PRAYING'
     if '睁眼' in name: return 'TALKING'

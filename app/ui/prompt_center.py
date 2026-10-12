@@ -80,7 +80,7 @@ class APISettingsDialog(QDialog):
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.Password)
         self.api_key.setPlaceholderText(
-            "已保存到 macOS 钥匙串"
+            "已保存到系统凭据库"
             if openai_service.get_api_key()
             else "粘贴 OpenAI API Key"
         )
@@ -97,6 +97,10 @@ class APISettingsDialog(QDialog):
         form.addRow("默认模型", self.model)
         form.addRow("图像理解精度", self.image_detail)
         form.addRow("OpenAI API Key", self.api_key)
+        from app.ui.credential_pool_dialog import edit_pool
+        bulk_keys = QPushButton('批量密钥 / 轮询设置')
+        bulk_keys.clicked.connect(lambda: edit_pool(self, openai_service.KEYCHAIN_SERVICE, openai_service.KEYCHAIN_ACCOUNT))
+        form.addRow('', bulk_keys)
         layout.addLayout(form)
 
         core_title = QLabel("Flow 提示词核心规则")
@@ -152,7 +156,7 @@ class APISettingsDialog(QDialog):
         openai_service.delete_api_key()
         self.api_key.clear()
         self.api_key.setPlaceholderText("未保存 API Key")
-        QMessageBox.information(self, "API Key", "已从 macOS 钥匙串删除。")
+        QMessageBox.information(self, "API Key", "已从系统凭据库删除全部密钥。")
 
     def save(self):
         if self.api_key.text().strip():

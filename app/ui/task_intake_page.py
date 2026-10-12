@@ -3,14 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from app.services import quiet_process as subprocess
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl, QSize
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QPlainTextEdit,
     QDialog, QDialogButtonBox, QProgressBar, QFileDialog, QCheckBox, QSpinBox,
-    QScrollArea, QGridLayout, QSizePolicy, QSplitter, QComboBox
+    QScrollArea, QGridLayout, QSizePolicy, QSplitter, QComboBox, QListWidget, QListWidgetItem
 )
-from PySide6.QtGui import QPixmap, QDesktopServices
+from PySide6.QtGui import QPixmap, QDesktopServices, QIcon
 from app.ui.image_preview import set_image
 
 from app.core import repository as repo
@@ -76,7 +76,7 @@ class ManualClassifyDialog(QDialog):
         self.group_key = group["group_key"]
         self.required = int(group.get("praying") or 0)
         self.selected = []
-        self.setWindowTitle("闭眼素材确认")
+        self.setWindowTitle("图片睁眼 / 闭眼确认")
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.resize(460, 250)
 
@@ -84,13 +84,10 @@ class ManualClassifyDialog(QDialog):
         title = QLabel(f'{group.get("anchor_name", "主播")} · 闭眼素材确认')
         title.setStyleSheet("font-size:20px;font-weight:800;")
         root.addWidget(title)
-        tip = QLabel(
-            '请在访达中给闭眼图片的文件名加上“闭眼”，可带其他文字。'
-            '确认后扫描本地文件夹，同类任务可共用图片，不读取当前选中项。',
-            objectName="muted"
-        )
-        tip.setWordWrap(True)
-        root.addWidget(tip)
+        tip=QLabel('勾选闭眼图片，未勾选的是睁眼图片。可全部勾选或全部取消；不会改动图片文件。')
+        tip.setWordWrap(True);root.addWidget(tip)
+        self.images=QListWidget();self.images.setIconSize(QSize(96,96));root.addWidget(self.images,1)
+        self.resize(680,580)
         self.counter = QLabel(f"尚未扫描本地图片")
         self.counter.setStyleSheet("font-size:18px;font-weight:700;")
         root.addWidget(self.counter)
@@ -99,10 +96,10 @@ class ManualClassifyDialog(QDialog):
         root.addWidget(self.note)
 
         row = QHBoxLayout()
-        open_btn = QPushButton("打开 Finder")
+        open_btn = QPushButton("打开图片文件夹")
         open_btn.clicked.connect(self.open_finder)
         row.addWidget(open_btn)
-        refresh_btn = QPushButton("扫描文件名")
+        refresh_btn = QPushButton("刷新图片")
         refresh_btn.clicked.connect(self.refresh_selection)
         row.addWidget(refresh_btn)
         self.confirm_btn = QPushButton("确认并继续", objectName="primaryBtn")
@@ -114,26 +111,35 @@ class ManualClassifyDialog(QDialog):
         cancel = QDialogButtonBox(QDialogButtonBox.Close)
         cancel.rejected.connect(self.reject)
         root.addWidget(cancel)
-        QTimer.singleShot(150, self.open_finder)
+        QTimer.singleShot(0, self.refresh_selection)
 
     def open_finder(self):
         try:
             intake.finder_open(self.group_key)
-            self.note.setText("访达已打开，请重命名闭眼图片，完成后点击确认。")
+            self.note.setText("图片文件夹已打开。也可以直接在本窗口勾选闭眼图片，无需重命名。")
         except Exception as exc:
             self.note.setText(str(exc))
 
     def refresh_selection(self):
         try:
             files=intake.scan_named_materials(self.group_key)
-            self.selected=[str(p) for p in files if '闭眼' in p.stem]
-            self.counter.setText(f'识别闭眼图片：{len(self.selected)} 张')
-            self.note.setText('可以确认' if self.selected else '请给图片文件名加上“闭眼”后再确认')
+            previous={self.images.item(i).data(Qt.UserRole):self.images.item(i).checkState()==Qt.Checked for i in range(self.images.count())}
+            self.images.clear()
+            from app.services.material_assignment import image_mode, manual_modes
+            con=intake.init_db()
+            try:manual=manual_modes(con)
+            finally:con.close()
+            for path in files:
+                item=QListWidgetItem(QIcon(str(path)),path.name);item.setData(Qt.UserRole,str(path));item.setFlags(item.flags()|Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if previous.get(str(path),image_mode(path,manual=manual)=='PRAYING') else Qt.Unchecked)
+                self.images.addItem(item)
+            self.counter.setText(f'共 {len(files)} 张图片 · 勾选代表闭眼')
+            self.note.setText('请根据缩略图确认眼睛状态，再点击确认并继续。')
         except Exception as exc:self.note.setText(str(exc))
 
     def confirm(self):
         try:
-            result=intake.confirm_named_materials(self.group_key)
+            result=intake.confirm_named_materials(self.group_key,[self.images.item(i).data(Qt.UserRole) for i in range(self.images.count()) if self.images.item(i).checkState()==Qt.Checked])
             intake.promote_ready_to_studio()
             self.note.setText(result['message']);self.completed.emit(self.group_key);self.accept()
         except Exception as exc:QMessageBox.warning(self,'素材确认',str(exc))
@@ -398,7 +404,7 @@ class TaskIntakePage(QWidget):
             self.detail_counts.setText(f'本地目录：{g.get("local_dir") or "尚未建立"}')
             st=str(g.get("status") or ""); self.detail_status.setText("✓ 已准备进入 GPT" if st=="READY_FOR_GPT" else (g.get("message") or st or "准备中")); self.detail_status.setObjectName("statusGood" if st=="READY_FOR_GPT" else "statusWarn"); self.detail_status.style().unpolish(self.detail_status); self.detail_status.style().polish(self.detail_status)
             self.manual_btn.setEnabled(bool(g.get("local_dir")) and not g.get("archived"))
-            self.manual_btn.setToolTip("文案按红黑字体自动分类；只有原始图片类型识别不符时才需要调整。")
+            self.manual_btn.setToolTip("手动确认图片睁眼/闭眼。文案优先读取需求说明，闭眼文案内部再按红黑颜色区分。")
             self.download_btn.setEnabled(not g.get("archived"))
             self.rescan_btn.setEnabled(True); self.delete_host_btn.setEnabled(True)
             can_manage=bool(g.get("host_id")) or st=="READY_FOR_GPT"
