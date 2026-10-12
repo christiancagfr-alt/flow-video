@@ -301,11 +301,12 @@ def analyze_speech(segment_id: int, video_path: str, target_text: str, force: bo
         except Exception:
             pass
 
-    cli = _find_whisper_cli(); model = _find_whisper_model()
+    from app.services.whisper_cpp import resolve_paths
+    found = resolve_paths(); cli, model = found["cli"], found["model"]
     if not cli:
-        raise RuntimeError("未找到 whisper-cli；请在系统设置填写 whisper-cli 路径，或安装到 /opt/homebrew/bin/whisper-cli")
+        raise RuntimeError("未找到 whisper-cli；请在组件管理填写路径，或点击“检测 / 安装 whisper.cpp”。")
     if not model:
-        raise RuntimeError("未设置 Whisper 模型路径；Studio 不会自动下载模型")
+        raise RuntimeError("未找到 whisper.cpp 模型；请在组件管理填写 ggml 模型，或点击“检测 / 安装 whisper.cpp”。")
 
     with tempfile.TemporaryDirectory(prefix="flowstudio-whisper-") as td:
         td = Path(td); wav = td/"audio.wav"; outbase = td/"whisper"

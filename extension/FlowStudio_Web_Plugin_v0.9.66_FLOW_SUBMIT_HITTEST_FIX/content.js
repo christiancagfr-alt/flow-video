@@ -244,7 +244,6 @@
       download_names: Array.isArray(t.download_names) ? t.download_names.map(String) : [],
       dispatch_order: Number(t.dispatch_order || i+1),
       segment_id: t.segment_id ?? null,
-      open_eye_prompt: String(t.open_eye_prompt || ''),
       host_id: Number(t.host_id || job?.host_id || 0),
       host_name: String(t.host_name || job?.host_name || ''),
       recipient_id: Number(t.recipient_id || job?.recipient_id || 0),
@@ -925,7 +924,7 @@
   function missingImagePaths() {
     const pathMap=getPathMap(state.job);
     let names=missingImageNames();
-
+    
     if (names.length > 0 && state.tasks) {
       const hostMap = new Map();
       for (const t of state.tasks) {
@@ -1444,24 +1443,6 @@
   }
   setInterval(()=>{void recoverPendingReservations();},10000);
 
-  async function prepareOpenEyeReference(job,t) {
-    if(!t.open_eye_prompt)return null;
-    const identity=JSON.stringify([location.pathname,t.host_id,t.image,t.open_eye_prompt]);
-    const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(identity));
-    const eyeKey=[...new Uint8Array(hash)].map(n=>n.toString(16).padStart(2,'0')).join('');
-    const prompt=t.open_eye_prompt+' Internal reference '+eyeKey+' (metadata only, do not render text).';
-    const deadline=Date.now()+240000;
-    state.message='正在准备同一人物的睁眼参考图，图片就绪后再生成睁眼视频';render();
-    while(Date.now()<deadline){
-      if(state.cancelledCommand===job.command_id)throw Error('COMMAND_CANCELLED');
-      if(!await claimSegment(job.command_id,t.segment_id,false))throw Error('TASK_REMOVED');
-      const result=await submitViaMainWorld({action:'ensure_open_eye',eye_key:eyeKey,
-        image_id:t.flow_media_id,prompt,aspect_ratio:job.settings?.aspect_ratio||'9:16'},30000);
-      if(result.ready && result.image_id)return result;
-      await sleep(3000);
-    }
-    throw Error('睁眼参考图尚未就绪，未提交视频；重试将继续查找原图片任务，不会重复生成图片');
-  }
   async function submitWithRecovery(payload, taskMeta){
     const normalWaits=[1500,3000,5000,8000,12000];
     // One retry sequence; ENGINE_BUSY only reports the actual submit mutex.
@@ -1569,7 +1550,6 @@
     const prompt=finalPromptForTask(t);
     if(!prompt) throw new Error(`任务 ${taskLabel} 没有可提交的提示词`);
 
-    const eyeReference=await prepareOpenEyeReference(job,t);
     const reservation=await downloadMessage({type:'FS_DOWNLOAD_RESERVE',info:{
       document_number:t.document_number,task_id:t.task_id,task_name:taskLabel,download_name:downloadName,dispatch_order:t.dispatch_order,
       segment_id:t.segment_id,round,command_id:job.command_id,
@@ -1613,7 +1593,7 @@
     // release/refill so a one-task wave cannot bypass the configured spacing.
     noteSubmissionAttempt(job);
     try { result=await submitWithRecovery({
-      action:'submit_task', recovery_key:reservation.key, image_name:eyeReference?.image_name||t.image, image_id:eyeReference?.image_id||t.flow_media_id, open_eye_reference:!!eyeReference,
+      action:'submit_task', recovery_key:reservation.key, image_name:t.image, image_id:t.flow_media_id,
       model:job.video_model || job.videoModel || job.generation_model || job.model || 'veo_3_1_lite_low_priority',
       aspect_ratio:job.aspect_ratio ?? job.aspectRatio ?? job.video_aspect_ratio ?? job.video_ratio ?? job.ratio ?? job.settings?.aspect_ratio ?? job.settings?.aspectRatio ?? job.generation_settings?.aspect_ratio ?? '9:16',
       duration:t.duration, needs_split:t.needs_split, force_submit:t.force_submit, image_path:t.image_path, prompt, mode:(t.generation_mode==='MATERIAL'?'VIDEO_REFERENCES':'VIDEO_FRAMES'), generation_mode:t.generation_mode, round,

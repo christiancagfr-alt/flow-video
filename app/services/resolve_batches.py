@@ -197,6 +197,6 @@ def sync_results():
             _log(bid,'已核对导入回执并同步数据库')
         elif st.get('batch_id')==bid and st.get('request_id')==batch['request_id'] and st.get('stage')=='ERROR':
             with database.connect() as con:con.execute("UPDATE davinci_batches SET status='IMPORT_ERROR',error_message=?,updated_at=CURRENT_TIMESTAMP WHERE batch_id=?",(st.get('detail','导入失败'),bid))
-        elif not st.get('alive') and batch['status']=='IMPORTING':
+        elif batch['status']=='IMPORTING' and (st.get('stage')=='OFFLINE' or daily.heartbeat_age(st) > daily.IMPORT_DISCONNECT_SECONDS):
             # Keep the batch frozen; next click retries the exact manifest, never a new batch.
             with database.connect() as con:con.execute("UPDATE davinci_batches SET status='IMPORT_ERROR',error_message='Bridge 连接中断；保留原批次，重新唤醒后可重试' WHERE batch_id=?",(bid,))

@@ -52,6 +52,10 @@ def main():
     restore()
     action=sys.argv[1]
     print('开始组件操作：'+action,flush=True)
+    if action=='whisper':
+        from app.services.whisper_cpp import install
+        install()
+        return
     model=sys.argv[2] if len(sys.argv)>2 else 'base'
     if action=='check':
         from app.services.remotion_renderer import RemotionRenderer

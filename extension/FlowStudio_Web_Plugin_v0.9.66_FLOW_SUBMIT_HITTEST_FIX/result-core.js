@@ -131,12 +131,12 @@
   visit(item,'item',0);return fields;
  }
  // Match a full prompt on the current video record, never a title, substring or history.
- function exactPromptVideoIds(catalog,prompt,excluded=[],kind="VIDEO"){
+ function exactPromptVideoIds(catalog,prompt,excluded=[]){
   const normalize=v=>String(v||'').normalize('NFC').replace(/\r\n/g,'\n').trim();
   const wanted=normalize(prompt);if(wanted.length<30)return [];
   const omit=new Set(excluded),ids=new Set();
   for(const item of catalog||[]){
-   if(item?.type!==kind||typeof item.id!=='string'||omit.has(item.id))continue;
+   if(item?.type!=='VIDEO'||typeof item.id!=='string'||omit.has(item.id))continue;
    let budget=1500;const seen=new WeakSet();
    function matches(v,depth=0){
     if(--budget<0||depth>12)return false;

@@ -1,4 +1,4 @@
-# Flow Studio 1.0.0
+# Flow Studio 1.0.1
 
 ## 视频包装新增功能（当前源码，尚未发布安装包）
 
@@ -27,7 +27,7 @@ Windows 本地任务、提示词、Flow 视频生成与达芬奇剪辑工作台�
 
 ## Windows 便携版
 
-从本仓库 Releases 下载 `FlowStudio-1.0.0-Windows-x64-Setup.exe` 安装。安装包已包含 Python 3.13.16 和运行依赖，无需另外安装 Python。正常启动不显示终端；诊断信息保存在本地数据目录的 `logs/`。
+从本仓库 Releases 下载 `FlowStudio-1.0.1-Windows-x64-Setup.exe` 安装。安装包已包含 Python 3.13.16 和运行依赖，无需另外安装 Python。正常启动不显示终端；诊断信息保存在本地数据目录的 `logs/`。
 
 支持 Windows 10/11 x64。首次启动是空白任务库，需要设置任务来源并授权 Google。Google OAuth 使用桌面应用客户端 JSON；服务账号文件不是桌面 OAuth 客户端。Windows 刷新凭据使用当前账户的 DPAPI 加密，换电脑或 Windows 账户后需重新授权。macOS 与 Linux 把同一令牌放进系统凭据库；钥匙串或密钥环不可用时会直接报错，不会改成明文文件。
 
@@ -63,7 +63,7 @@ python -m unittest discover -s tests
 
 ## macOS Apple Silicon / Intel
 
-GitHub Actions 的安装包工作流分别在 `macos-15`（arm64）和 `macos-15-intel`（x86_64）运行。两种构建都通过依赖检查、单元测试、原生媒体框架导入、界面启动与重新解压后的启动验证后，附加到当前版本的发布页。当前正式版是 v1.0.0。
+GitHub Actions 的安装包工作流分别在 `macos-15`（arm64）和 `macos-15-intel`（x86_64）运行。两种构建都通过依赖检查、单元测试、原生媒体框架导入、界面启动与重新解压后的启动验证后，附加到当前版本的发布页。当前正式版是 v1.0.1。
 
 下载名称含 `macOS-arm64` 的包用于 Apple M 系列；`macOS-x86_64` 用于 Intel。要求 macOS 13 或更新版本。解压后把 **Flow Studio.app** 放到应用程序目录，双击启动，无需安装 Python，不打开终端。软件未进行 Apple Developer ID 签名和公证；首次启动可能需要在“系统设置 → 隐私与安全性”允许打开。不要全局关闭系统安全检查。
 

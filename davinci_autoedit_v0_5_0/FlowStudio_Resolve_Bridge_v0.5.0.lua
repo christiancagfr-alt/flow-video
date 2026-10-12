@@ -168,14 +168,15 @@ if legacyHeartbeat then
         local stat = io.popen('/usr/bin/stat -f %m '..quote(root..'/bridge_heartbeat.txt'))
         local stamp = stat and tonumber(stat:read('*l'))
         if stat then stat:close() end
-        if stamp and os.time()-stamp<8 then
+        if stamp and os.time()-stamp<30 then
             error('LEGACY_BRIDGE_RUNNING: 请先停止旧版 Bridge，新版未启动')
         end
     end
 end
 local old = readPairs(stateFile)
 local age = os.time() - (tonumber(old.updated_at) or 0)
-if old.version == '0.5.0' and old.stage~='OFFLINE' and age >= 0 and age < 8 then
+-- A Resolve API call can block longer than a few seconds. 30s avoids a second Bridge during that gap.
+if old.version == '0.5.0' and old.stage~='OFFLINE' and age >= 0 and age < 30 then
     print('[FlowStudio] Bridge 已在线，不重复启动'); return
 end
 -- Reclaim only an expired instance directory; mkdir remains the exclusive acquisition.
@@ -186,7 +187,7 @@ if not runOK('mkdir '..quote(lockDir)..' 2>/dev/null') then
     local stat = io.popen('/usr/bin/stat -f %m '..quote(lockDir))
     local lockTime = stat and tonumber(stat:read('*l')) or os.time()
     if stat then stat:close() end
-    if (fresh.version=='0.5.0' and fresh.stage~='OFFLINE' and leaseAge>=0 and leaseAge<8) or os.time()-(lockTime or os.time())<8 then
+    if (fresh.version=='0.5.0' and fresh.stage~='OFFLINE' and leaseAge>=0 and leaseAge<30) or os.time()-(lockTime or os.time())<30 then
         print('[FlowStudio] Bridge 正在启动，不重复启动'); return
     end
     local importing=readPairs(root..'/pipeline.lock')
@@ -230,10 +231,11 @@ local ok, err = pcall(function()
     report('IDLE', 'Bridge 在线，等待唤醒')
     local lostChecks=0
     while not exists(root..'/v0_5_0/STOP') do
-        -- A surviving Lua host must not advertise a live Resolve connection.
+        -- Publish before the Resolve call so a slow or briefly failing API does not look offline.
+        publish()
         local linked=pcall(acquireResolve)
         lostChecks=linked and 0 or lostChecks+1
-        if lostChecks>=3 then
+        if lostChecks>=15 then
             report('OFFLINE','达芬奇连接已失效，旧 Bridge 已退出；请重新唤醒')
             return
         end

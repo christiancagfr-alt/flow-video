@@ -3,7 +3,7 @@
   "name": "Flow Studio Web Plugin",
   "description": "Flow Studio：后台最小化自愈、按浏览器独立错峰、动态通道、Google任务源同步、持久事件队列；保留原上传/下载核心。",
   "version": "0.9.66",
-  "version_name": "0.9.66 · Flow Studio 1.0 · 提交命中与下载修复 · 睁眼参考图",
+  "version_name": "0.9.66 · Flow 提交按钮命中检测修复 · 保留原核心流程",
   "minimum_chrome_version": "116",
   "permissions": [
     "storage",

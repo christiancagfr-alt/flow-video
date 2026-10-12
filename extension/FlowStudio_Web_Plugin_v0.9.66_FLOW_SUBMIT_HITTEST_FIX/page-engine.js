@@ -182,7 +182,7 @@
     throw new Error('FLOW_IMAGE_SELECTION_METHOD_NOT_FOUND');
   }
   const modes = ['VIDEO_EXTEND','VIDEO_FRAMES','VIDEO_REFERENCES','IMAGE','IMAGE_EDIT'];
-  const models = ['banana2','abra','veo_3_1_lite','veo_3_1_fast','veo_3_1_quality','veo_3_1_lite_low_priority'];
+  const models = ['abra','veo_3_1_lite','veo_3_1_fast','veo_3_1_quality','veo_3_1_lite_low_priority'];
   function aspectValue(value) {
     const text=String(value??'9:16').trim().toUpperCase().replace(/\s/g,'').replace('：',':');
     if (['9:16','PORTRAIT','VERTICAL','竖版','竖屏','VIDEO_ASPECT_RATIO_PORTRAIT'].includes(text)) return 'PORTRAIT';
@@ -923,7 +923,7 @@
     validateDuration(detail);
     if (!String(detail.prompt || '').trim()) throw new Error('EMPTY_PROMPT');
     const catalog=mediaList(instance);
-    const matches = catalog.filter(x => x.type === 'IMAGE' && (detail.image_id ? x.id === detail.image_id && (detail.open_eye_reference===true || normal(x.displayName) === normal(detail.image_name)) : normal(x.displayName) === normal(detail.image_name)));
+    const matches = catalog.filter(x => x.type === 'IMAGE' && (detail.image_id ? x.id === detail.image_id && normal(x.displayName) === normal(detail.image_name) : normal(x.displayName) === normal(detail.image_name)));
     if (matches.length !== 1) throw new Error(matches.length ? 'AMBIGUOUS_IMAGE_NAME：同名图片超过一张，请清理重复素材' : 'IMAGE_NOT_UPLOADED:'+detail.image_name);
     let item = matches[0]; const select = selectMethod(instance);
     // All generation modes must consume a finished Flow IMAGE asset. A catalog placeholder
@@ -1049,55 +1049,6 @@
       throw new Error('SUBMISSION_UNCONFIRMED：Flow 已发起生成请求但未收到确认，保留恢复记录并禁止重复点击');
     } finally { if (pending===ticket) pending=null; if(!execute._generateButton?.isConnected)execute._generateButton=null; }
   }
-  async function ensureOpenEye(detail) {
-    const {instance,service}=context();
-    if(!/^[a-f0-9]{64}$/.test(String(detail.eye_key||'')))throw Error('INVALID_EYE_REFERENCE_KEY');
-    const storageKey='flowstudio.open-eye.v1.'+detail.eye_key;
-    const prompt=String(detail.prompt||'');
-    if(!prompt.trim())throw Error('EMPTY_EYE_PROMPT');
-    const raw=localStorage.getItem(storageKey),saved=raw?JSON.parse(raw):null;
-    const catalog=mediaList(instance);
-    if(saved && saved.prompt!==prompt)throw Error('EYE_REFERENCE_PROMPT_CHANGED');
-    const ids=FlowStudioResults.exactPromptVideoIds(catalog,prompt,saved?.excluded||[],'IMAGE');
-    if(ids.length>1)throw Error('EYE_REFERENCE_AMBIGUOUS');
-    const found=ids.length===1?catalog.find(x=>x.id===ids[0] && x.type==='IMAGE'):null;
-    if(found){
-      const flags=flowAssetFlags(found);
-      if(flags.error)throw Error('睁眼参考图生成失败，请在 Flow 中检查该图片任务');
-      // A generic IMAGE placeholder / thumbnail is not a completed generated edit.
-      if(!flags.loading && flags.ready && mediaURL(found)){
-        localStorage.setItem(storageKey,JSON.stringify({...(saved||{}),prompt,image_id:found.id,ready:true}));
-        return {ready:true,image_id:found.id,image_name:found.displayName||'',image_url:mediaURL(found)};
-      }
-      return {ready:false,state:'generating'};
-    }
-    if(saved)return {ready:false,state:'awaiting_identity'};
-    const original=catalog.find(x=>x.type==='IMAGE' && String(x.id)===String(detail.image_id));
-    if(!original)throw Error('EYE_REFERENCE_SOURCE_MISSING');
-    const item=await waitExistingFlowImageAssetReady(instance,original,15000);
-    const identities=attachmentIdentities(item,catalog);
-    const before=new Map(composerPreviews(composerContext()).map(p=>[p.node,p.src]));
-    service.clear();
-    signal(service,v=>modes.includes(v)).set('IMAGE_EDIT');
-    signal(service,v=>(models.includes(v)||(typeof v==='string'&&/omni/i.test(v)))).set('banana2');
-    service.setAspectRatio(aspectValue(detail.aspect_ratio));
-    constructorSignal(service,/this\.(\w+)=[^;]+1\);/,'outputs').set(1);
-    await selectMethod(instance)(item);
-    const editor=editorSignal(service),key=Object.keys(editor())[0];
-    const attachments=(Array.isArray(editor()?.[key])?editor()[key]:[]).filter(x=>x?.type!=='text');
-    editor.set({[key]:[...attachments,{type:'text',content:prompt}]});
-    await syncComposerUi(prompt);
-    await waitGenerateButton(prompt);
-    if(!['IMAGE','IMAGE_EDIT'].includes(signal(service,v=>modes.includes(v))()))throw Error('EYE_IMAGE_MODE_NOT_CONFIRMED');
-    if(signal(service,v=>(models.includes(v)||(typeof v==='string'&&/omni/i.test(v))))()!=='banana2')throw Error('EYE_IMAGE_MODEL_NOT_CONFIRMED');
-    const attached=[...stateSnapshot(service).values()].some(x=>hasTarget(x.data,identities));
-    if(!attached && !referencePreview(item,identities,before,prompt))throw Error('EYE_REFERENCE_NOT_ATTACHED');
-    const record={prompt,source_id:item.id,excluded:catalog.map(x=>x.id),attempted_at:Date.now()};
-    localStorage.setItem(storageKey,JSON.stringify(record));
-    if(!localStorage.getItem(storageKey))throw Error('EYE_LEDGER_UNAVAILABLE');
-    await safeGenerateClick(prompt);
-    return {ready:false,state:'submitted'};
-  }
   window.addEventListener('FLOW_STUDIO_MAIN_COMMAND', async ev => {
     const d=ev.detail || {};
     if (!d.request_id) return;
@@ -1145,16 +1096,6 @@
       }catch(e){return reply({ok:false,error:String(e.message||e)});}
     }
     if(d.action==='scan_video_results')return reply({ok:true,...completedVideos(d.ids)});
-    if(d.action==='ensure_open_eye'){
-      if(busy)return reply({ok:false,error:'ENGINE_BUSY'});
-      busy=true;
-      try{
-        if(!navigator.locks)throw Error('EYE_REFERENCE_LOCK_UNAVAILABLE');
-        const result=await navigator.locks.request('flowstudio.eye.'+d.eye_key,()=>ensureOpenEye(d));
-        reply({ok:true,...result});
-      }catch(e){reply({ok:false,error:String(e.message||e)});}finally{busy=false;}
-      return;
-    }
     if (d.action === 'scan_media') {
       try { reply({ok:true,media:scan()}); } catch(e) { reply({ok:false,error:String(e.message || e)}); }
       return;

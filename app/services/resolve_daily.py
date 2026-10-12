@@ -13,6 +13,8 @@ from app.core import repository as repo
 
 VERSION = '0.5.0'
 SCRIPT = 'FlowStudio_Resolve_Bridge_v0.5.0.lua'
+HEARTBEAT_FRESH_SECONDS = 30
+IMPORT_DISCONNECT_SECONDS = 45
 FPS_VALUES = ('23.976', '24', '25', '29.97', '30', '50', '59.94', '60')
 BASE = Path(__file__).resolve().parents[2]
 
@@ -40,10 +42,17 @@ def snapshot(root=None):
     state = read_pairs(root / 'bridge_state.ini')
     try:
         age = time.time() - float(state.get('updated_at', '0'))
-        alive = 0 <= age < 8 and state.get('version') == VERSION and state.get('stage') != 'OFFLINE'
+        alive = 0 <= age < HEARTBEAT_FRESH_SECONDS and state.get('version') == VERSION and state.get('stage') != 'OFFLINE'
     except ValueError:
         alive = False
     return dict(state, alive=alive, root=str(root))
+
+
+def heartbeat_age(state):
+    try:
+        return time.time() - float(state.get('updated_at') or 0)
+    except (TypeError, ValueError):
+        return 10 ** 9
 
 
 def atomic_pairs(path, values):
@@ -169,7 +178,7 @@ class DailyWake:
             raise RuntimeError('DaVinci 自动化支持 Windows 与 macOS。')
         state = snapshot(self.root)
         heartbeat = self.root / 'bridge_heartbeat.txt'
-        if not state['alive'] and state.get('version') != VERSION and heartbeat.exists() and time.time() - heartbeat.stat().st_mtime < 8:
+        if not state['alive'] and state.get('version') != VERSION and heartbeat.exists() and time.time() - heartbeat.stat().st_mtime < HEARTBEAT_FRESH_SECONDS:
             raise RuntimeError('检测到旧版 Resolve Bridge 正在运行。请先停止旧 Bridge；旧版本文件会保留。')
         installed = install_bridge()
         # open -a reuses a running application and brings it to the front.
@@ -211,9 +220,14 @@ class DailyWake:
             'timeline_fps': self.fps, 'whisper_language': str(repo.get_setting('whisper_language', 'sw')).split(' · ')[-1].strip(),
         })
         deadline = time.monotonic() + 60
+        last_alive = time.monotonic()
         while time.monotonic() < deadline:
             state = snapshot(self.root)
-            if not state['alive']:
+            if state.get('stage') == 'OFFLINE':
+                raise RuntimeError('Resolve Bridge 连接中断，未继续发送任务。')
+            if state['alive']:
+                last_alive = time.monotonic()
+            elif time.monotonic() - last_alive > HEARTBEAT_FRESH_SECONDS:
                 raise RuntimeError('Resolve Bridge 连接中断，未继续发送任务。')
             if state.get('request_id') == self.request_id:
                 self.stage, self.detail = state.get('stage', ''), state.get('detail', '')

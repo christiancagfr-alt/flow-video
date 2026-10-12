@@ -274,7 +274,8 @@ def resolve_bridge_status() -> dict:
     root = resolve_bridge_root()
     heartbeat = root / "bridge_heartbeat.txt"
     status = root / "bridge_status.txt"
-    alive = heartbeat.exists() and (time.time() - heartbeat.stat().st_mtime) < 8
+    from app.services.resolve_daily import HEARTBEAT_FRESH_SECONDS
+    alive = heartbeat.exists() and (time.time() - heartbeat.stat().st_mtime) < HEARTBEAT_FRESH_SECONDS
     text = ""
     try:
         text = status.read_text(encoding="utf-8").strip() if status.exists() else ""

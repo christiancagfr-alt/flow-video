@@ -1,7 +1,7 @@
 from pathlib import Path
 import sys,codecs,time,json
 from PySide6.QtCore import QProcess,QTimer
-from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QComboBox,QPlainTextEdit,QScrollArea,QProgressBar,QTabWidget,QFormLayout,QToolButton,QLineEdit,QMessageBox
+from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QComboBox,QPlainTextEdit,QScrollArea,QProgressBar,QTabWidget,QFormLayout,QToolButton,QLineEdit,QMessageBox,QFileDialog
 from app.services.app_paths import data_dir
 from app.services.reels.recognition_engine import LOCAL_PROVIDER
 
@@ -39,14 +39,32 @@ class PackagingComponentsPage(QWidget):
         label=QLabel('先安装识别组件，再下载模型。base 体积较小；较大的模型需要更多内存和下载时间。');label.setWordWrap(True);local.addWidget(label)
         row=QHBoxLayout();row.addWidget(packaging.asr_install_btn);row.addStretch();local.addLayout(row)
         row=QHBoxLayout();self.model=QComboBox();self.model.addItems(['base','small','medium','large-v3']);self.model.setMaximumWidth(250);row.addWidget(self.model)
-        self.download=QPushButton('下载 / 重试模型');self.download.clicked.connect(lambda:self.run('model'));row.addWidget(self.download);row.addStretch();local.addLayout(row);self.action_buttons.append(self.download);local.addStretch()
-        # Configuration used by automatic editing lives here, not in general settings.
+        self.download=QPushButton('下载 / 重试模型');self.download.clicked.connect(lambda:self.run('model'));row.addWidget(self.download);row.addStretch();local.addLayout(row);self.action_buttons.append(self.download)
+        # Automatic editing reads these paths. Fill them when a real whisper.cpp install is already present.
         from app.core import repository as repo
-        paths=QFormLayout();local.addLayout(paths)
-        for label,key in [('whisper.cpp 命令','whisper_cli_path'),('whisper.cpp 模型','whisper_model_path')]:
-            field=QLineEdit(repo.get_setting(key,''));field.setPlaceholderText('自动剪辑使用；留空采用自动检测')
+        from app.services.whisper_cpp import discover
+        saved_cli=repo.get_setting('whisper_cli_path','');saved_model=repo.get_setting('whisper_model_path','')
+        found=discover(saved_cli,saved_model)
+        if found['cli']:repo.set_setting('whisper_cli_path',found['cli'])
+        if found['model']:repo.set_setting('whisper_model_path',found['model'])
+        paths=QFormLayout();paths.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow);local.addLayout(paths)
+        def path_row(title,key,value,browse_filter):
+            field=QLineEdit(value);field.setPlaceholderText('尚未找到，请点击下方“检测 / 安装”')
             field.editingFinished.connect(lambda field=field,key=key:repo.set_setting(key,field.text().strip()))
-            paths.addRow(label,field)
+            line=QHBoxLayout();line.addWidget(field,1)
+            browse=QPushButton('选择文件')
+            def pick(field=field,key=key,browse_filter=browse_filter,title=title):
+                chosen,_=QFileDialog.getOpenFileName(self,'选择'+title,'',browse_filter)
+                if chosen:field.setText(chosen);repo.set_setting(key,chosen)
+            browse.clicked.connect(pick);line.addWidget(browse);paths.addRow(title,line)
+            return field
+        self.whisper_cli=path_row('whisper.cpp 命令','whisper_cli_path',found['cli'] or saved_cli,'可执行文件 (whisper-cli.exe whisper-cli);;所有文件 (*)')
+        self.whisper_model=path_row('whisper.cpp 模型','whisper_model_path',found['model'] or saved_model,'模型 (*.bin);;所有文件 (*)')
+        row=QHBoxLayout();whisper_btn=QPushButton('检测 / 安装 whisper.cpp');whisper_btn.clicked.connect(lambda:self.run('whisper'))
+        row.addWidget(whisper_btn);row.addStretch();local.addLayout(row);self.action_buttons.append(whisper_btn)
+        if not (found['cli'] and found['model']):
+            self.status.setText('未找到可用的 whisper.cpp。请在“字幕识别”里点击“检测 / 安装 whisper.cpp”。')
+        local.addStretch()
         templates=section('提示词模板')
         for label,key in [('睁眼基础模板','talking_base_prompt'),('闭眼基础模板','praying_base_prompt')]:
             templates.addWidget(QLabel(label));field=QPlainTextEdit(repo.get_setting(key,''));field.setMaximumHeight(120);templates.addWidget(field)
@@ -112,6 +130,7 @@ class PackagingComponentsPage(QWidget):
                                 p.remotion_dir.setText(result['path']);p._settings.setValue('packaging/remotion_project_dir',result['path'])
                         except (ValueError,KeyError):pass
             if code==0 and action=='model' and p.asr_provider.currentText()==LOCAL_PROVIDER:p.asr_model.setCurrentText(self.model.currentText())
+            if action=='whisper':self._apply_whisper_output(self.log.toPlainText())
             proc.deleteLater()
         proc.readyReadStandardOutput.connect(read);proc.finished.connect(done)
         def failed(err):
@@ -124,6 +143,14 @@ class PackagingComponentsPage(QWidget):
         self.log.appendPlainText('已启动：'+action+'。网络下载期间可停止后重试。')
         self.cancel.setEnabled(True);self.progress.setRange(0,0);self.timer.start()
         proc.start()
+
+    def _apply_whisper_output(self,text):
+        for line in text.splitlines():
+            if line.startswith('WHISPER_CLI='):self.whisper_cli.setText(line.split('=',1)[1].strip())
+            elif line.startswith('WHISPER_MODEL='):self.whisper_model.setText(line.split('=',1)[1].strip())
+        cli=self.whisper_cli.text().strip();model=self.whisper_model.text().strip()
+        if cli and model:self.status.setText('whisper.cpp 路径已填入，自动剪辑可以使用。')
+        elif cli:self.status.setText('whisper.cpp 命令已填入。模型还没有下载成功，可重试，或点“选择文件”指定 ggml-base.bin。')
 
     def tick(self):
         elapsed=int(time.monotonic()-self.started)

@@ -20,6 +20,14 @@ def process_options():
     return dict(creationflags=FLAGS, stdin=subprocess.DEVNULL)
 
 
+def _window_area(window):
+    try:
+        rect = window.rectangle()
+        return max(0, int(rect.width())) * max(0, int(rect.height()))
+    except Exception:
+        return 0
+
+
 def resolve_window(pid=None):
     import psutil
     from pywinauto import Application
@@ -32,13 +40,25 @@ def resolve_window(pid=None):
         if len(found) != 1:
             raise RuntimeError('请启动并进入唯一一个 DaVinci Resolve 主窗口。')
         process = found[0]
-    app = Application(backend='uia').connect(process=process.pid, timeout=5)
-    windows = [w for w in app.windows() if w.is_visible() and 'DaVinci Resolve' in w.window_text()]
-    if len(windows) != 1:
-        raise RuntimeError('RESOLVE_MAIN_WINDOW_NOT_READY')
-    window = windows[0]
-    window.set_focus()
-    return app, window, process.pid
+    last = RuntimeError('RESOLVE_MAIN_WINDOW_NOT_READY')
+    for _ in range(3):
+        try:
+            app = Application(backend='uia').connect(process=process.pid, timeout=8)
+            windows = [w for w in app.windows() if w.is_visible() and 'DaVinci Resolve' in (w.window_text() or '')]
+            if not windows:
+                last = RuntimeError('RESOLVE_MAIN_WINDOW_NOT_READY')
+            else:
+                window = max(windows, key=_window_area)
+                try:
+                    window.set_focus()
+                except Exception:
+                    pass
+                time.sleep(0.15)
+                return app, window, process.pid
+        except Exception as exc:
+            last = exc if isinstance(exc, RuntimeError) else RuntimeError('RESOLVE_MAIN_WINDOW_NOT_READY')
+        time.sleep(0.4)
+    raise last
 
 
 def foreground_is(pid):
@@ -61,6 +81,12 @@ def menu_path(names, pid=None):
         if len(matches) != 1:
             raise RuntimeError('RESOLVE_MENU_NOT_FOUND: ' + ' / '.join(alternatives))
         if not foreground_is(pid):
+            try:
+                window.set_focus()
+            except Exception:
+                pass
+            time.sleep(0.2)
+        if not foreground_is(pid):
             raise RuntimeError('RESOLVE_FOCUS_LOST')
         matches[0].click_input()
         time.sleep(0.12)
@@ -77,6 +103,13 @@ def invoke_menu(script_name, pid=None):
 def timeline_focus(pid):
     pid = menu_path([('Workspace','工作区'),('Active Panel Selection','活动面板选择'),('Timeline','时间线')], pid)
     from pywinauto.keyboard import send_keys
+    _, window, pid = resolve_window(pid)
+    if not foreground_is(pid):
+        try:
+            window.set_focus()
+        except Exception:
+            pass
+        time.sleep(0.2)
     if not foreground_is(pid): raise RuntimeError('RESOLVE_FOCUS_LOST')
     send_keys('k^+a', pause=0.04)
     return 'ok'

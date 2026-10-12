@@ -2,7 +2,6 @@
 import json
 import os
 import re
-import shutil
 import sys
 import uuid
 from datetime import date
@@ -69,11 +68,10 @@ def submit(day, reanalyze=False):
     if state.get('stage') not in allowed_stages or state.get('project')!='FlowStudio-'+day or state.get('timeline')!='MAIN-'+day:
         raise ValueError('请先唤醒当天主时间线。')
     verify_autoedit_install()
-    cli=repo.get_setting('whisper_cli_path','').strip() or shutil.which('whisper-cli') or ''
-    model=repo.get_setting('whisper_model_path','').strip()
-    if not cli or not Path(cli).expanduser().is_file() or not os.access(Path(cli).expanduser(),os.X_OK):
-        raise ValueError('请在系统设置中填写可执行的 whisper.cpp 命令路径。')
-    if not model or not Path(model).expanduser().is_file():raise ValueError('请在系统设置中填写 Whisper 模型路径。')
+    from app.services.whisper_cpp import resolve_paths
+    found=resolve_paths();cli,model=found['cli'],found['model']
+    if not cli:raise ValueError('请在组件管理中填写可执行的 whisper.cpp 命令路径，或点击“检测 / 安装 whisper.cpp”。')
+    if not model:raise ValueError('请在组件管理中填写 whisper.cpp 模型路径，或点击“检测 / 安装 whisper.cpp”。')
     runner=daily.BASE/'scripts/run_batch_whisper.py'
     if not runner.is_file():raise ValueError('Whisper运行模块缺失，请重新解压完整版本。')
     bid=batch['batch_id'];attempt=uuid.uuid4().hex
