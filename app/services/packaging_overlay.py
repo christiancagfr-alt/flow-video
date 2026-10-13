@@ -29,18 +29,59 @@ def paint_settings(raw):
     return settings
 
 
+FULL_SCROLL = '持续向上滚动'
+BAND_SCROLL = '中间固定滚动'
+SCROLL_ANIMATIONS = (FULL_SCROLL, BAND_SCROLL)
+
+
+def scroll_band(style, canvas_h=1920):
+    """Fixed middle window. Text is clipped here and does not travel off the frame."""
+    if (style or {}).get('free_animation') != BAND_SCROLL:
+        return None
+    height = int(round(canvas_h * 0.42))
+    height = max(360, min(int(canvas_h) - 200, height))
+    top = (int(canvas_h) - height) // 2
+    fade = max(36, int(round(height * 0.08)))
+    return {'top': top, 'height': height, 'fade': fade}
+
+
+def scroll_offset(progress, view_h, image_h):
+    progress = max(0.0, min(1.0, float(progress)))
+    return view_h - (view_h + image_h) * progress
+
+
 def paint_at(captions,style,time):
     load_caption_fonts()
-    if style.get('free_animation')=='持续向上滚动' and captions:
-        from PySide6.QtGui import QImage,QPainter
+    if style.get('free_animation') in SCROLL_ANIMATIONS and captions:
+        from PySide6.QtGui import QImage,QPainter,QLinearGradient,QColor
         from PySide6.QtCore import Qt
         text='\n'.join(c['text'] for c in captions)
         scroll=scroll_image(text,json.dumps(style,sort_keys=True))
         start=float(captions[0]['start']);end=float(captions[-1]['end'])
         canvas=QImage(1080,1920,QImage.Format_ARGB32_Premultiplied);canvas.fill(Qt.transparent)
         if start<=time<end:
-            y=1920-(1920+scroll.height())*((time-start)/max(.001,end-start))
-            painter=QPainter(canvas);painter.drawImage(0,int(y),scroll);painter.end()
+            progress=(time-start)/max(.001,end-start)
+            band=scroll_band(style)
+            painter=QPainter(canvas);painter.setRenderHint(QPainter.Antialiasing,True)
+            if band:
+                y=band['top']+scroll_offset(progress,band['height'],scroll.height())
+                painter.setClipRect(0,band['top'],1080,band['height'])
+                painter.drawImage(0,int(y),scroll)
+                fade=QImage(1080,band['height'],QImage.Format_ARGB32_Premultiplied);fade.fill(Qt.transparent)
+                fade_painter=QPainter(fade)
+                gradient=QLinearGradient(0,0,0,band['height'])
+                edge=min(band['fade'],band['height']//3)/band['height']
+                gradient.setColorAt(0,QColor(0,0,0,0))
+                gradient.setColorAt(edge,QColor(0,0,0,255))
+                gradient.setColorAt(1-edge,QColor(0,0,0,255))
+                gradient.setColorAt(1,QColor(0,0,0,0))
+                fade_painter.fillRect(0,0,1080,band['height'],gradient);fade_painter.end()
+                painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+                painter.drawImage(0,band['top'],fade)
+            else:
+                y=scroll_offset(progress,1920,scroll.height())
+                painter.drawImage(0,int(y),scroll)
+            painter.end()
         return canvas
     return paint_caption_overlay_image(paint_settings(style),captions_to_srt(captions),
                                       captions_to_srt(captions,True),time)
@@ -76,12 +117,15 @@ def prepare_overlays(payload,root):
     frames=sorted({max(0,min(math.ceil(duration*fps),math.ceil(t*fps-1e-7))) for t in cuts})
     key=hashlib.sha256(json.dumps([3,style,captions,fps],ensure_ascii=False,sort_keys=True).encode()).hexdigest()[:24]
     directory=Path(root)/key;directory.mkdir(parents=True,exist_ok=True)
-    if style.get('free_animation')=='持续向上滚动':
+    if style.get('free_animation') in SCROLL_ANIMATIONS:
         image=scroll_image('\n'.join(c['text'] for c in captions),json.dumps(style,sort_keys=True))
         path=directory/'scroll.png'
         if not image.save(str(path),'PNG'):raise RuntimeError('无法保存滚动字幕')
         start=max(0,math.ceil(float(captions[0]['start'])*fps));end=min(math.ceil(duration*fps),math.ceil(float(captions[-1]['end'])*fps))
-        payload['captionOverlays']=[{'path':str(path),'start':start,'duration':max(1,end-start),'scroll':True,'imageHeight':image.height()}]
+        layer={'path':str(path),'start':start,'duration':max(1,end-start),'scroll':True,'imageHeight':image.height()}
+        band=scroll_band(style)
+        if band:layer['scrollBand']=band
+        payload['captionOverlays']=[layer]
         payload['captions']=[];payload['_reels_prepared']=True;return payload
     layers=[]
     for index,(start,end) in enumerate(zip(frames,frames[1:])):

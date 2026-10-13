@@ -5,6 +5,11 @@
   const sessions=new Map(), lanes=new Map(), dismissed=new Map();
   let logger=()=>{};
   const log=(event,detail)=>{try{logger(event,detail);}catch(_){}};
+  function debuggerApi(){
+    const api=globalThis.chrome&&globalThis.chrome.debugger;
+    if(!api||typeof api.attach!=='function'||typeof api.sendCommand!=='function')throw Error('DEBUGGER_UNAVAILABLE');
+    return api;
+  }
   function serial(tabId,fn){
     const previous=lanes.get(tabId)||Promise.resolve();
     const promise=previous.catch(()=>{}).then(fn);
@@ -25,7 +30,7 @@
       log('background_guard_reacquire',{tab_id:tabId,previous_reason:previous?.reason||'canceled_by_user'});
     }
     const target={tabId};
-    await chrome.debugger.attach(target,'1.3');
+    await debuggerApi().attach(target,'1.3');
     entry={target,held:false,configured:false,autoDiscardable:tab.autoDiscardable,attachedAt:Date.now(),lastError:''};
     sessions.set(tabId,entry);
     return entry;
@@ -34,17 +39,17 @@
     // A background tab can be throttled without tab.frozen ever being true.
     // The emulation belongs to this session and must remain attached while busy.
     try{
-      await chrome.debugger.sendCommand(entry.target,'Emulation.setFocusEmulationEnabled',{enabled:true});
-      await chrome.debugger.sendCommand(entry.target,'Page.setWebLifecycleState',{state:'active'});
+      await debuggerApi().sendCommand(entry.target,'Emulation.setFocusEmulationEnabled',{enabled:true});
+      await debuggerApi().sendCommand(entry.target,'Page.setWebLifecycleState',{state:'active'});
       entry.configured=true;entry.lastError='';
     }catch(error){entry.configured=false;entry.lastError=String(error?.message||error);throw error;}
   }
   async function releaseInside(tabId){
     const entry=sessions.get(tabId);if(!entry)return;
     // Restore flags only for a session owned by this module.
-    try{await chrome.debugger.sendCommand(entry.target,'Emulation.setFocusEmulationEnabled',{enabled:false});}catch(_){}
+    try{await debuggerApi().sendCommand(entry.target,'Emulation.setFocusEmulationEnabled',{enabled:false});}catch(_){}
     entry.releasing=true;
-    try{await chrome.debugger.detach(entry.target);}catch(_){}
+    try{await debuggerApi().detach(entry.target);}catch(_){}
     sessions.delete(tabId);
     if(typeof entry.autoDiscardable==='boolean')try{await chrome.tabs.update(tabId,{autoDiscardable:entry.autoDiscardable});}catch(_){}
   }
@@ -52,7 +57,7 @@
     return serial(tabId,async()=>{
       const entry=await acquire(tabId);entry.held=true;entry.command=command;
       await configure(entry);
-      await chrome.tabs.update(tabId,{autoDiscardable:false});
+      try{await chrome.tabs.update(tabId,{autoDiscardable:false});}catch(_){}
       return {ok:true,attached:true,focus_emulated:true};
     });
   }
@@ -64,7 +69,7 @@
     });
   }
   function release(tabId){return serial(tabId,()=>releaseInside(tabId));}
-  chrome.debugger.onDetach.addListener((target,reason)=>{
+  if(chrome.debugger&&chrome.debugger.onDetach)chrome.debugger.onDetach.addListener((target,reason)=>{
     const entry=sessions.get(target.tabId);if(!entry)return;
     sessions.delete(target.tabId);
     if(reason==='canceled_by_user' && !entry.releasing)dismissed.set(target.tabId,{reason,time:Date.now()});

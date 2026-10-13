@@ -1,5 +1,6 @@
 from __future__ import annotations
 from app.services import camera_motion
+from app.services import flow_master_v8
 import base64
 import hashlib
 import json
@@ -552,6 +553,7 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
         raise ValueError("当前图片没有可生成的 Flow 片段。")
 
     detail = image_detail if image_detail in ("low", "auto", "high") else "low"
+    v8 = flow_master_v8.is_active(group)
     auto_action_match = bool(group.get("auto_action_match", True))
     action_catalog = _motion_catalog(group)
     camera_catalog = group.get("camera_presets", [])
@@ -568,8 +570,12 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
     # Stable prefix kept identical across requests to maximize prompt-cache reuse.
     # Append a mandatory coverage guard after the editable core/base template so
     # "keep it concise" can never be interpreted as "drop execution rules".
+    # The anti-break source replaces that prefix entirely and does not use persona.
     from app.services import camera_motion
-    stable_text = camera_motion.clean(core_prompt.strip()) + "\n\n" + _dynamic_prompt_generation_guard() + "\n" + camera_motion.INSTRUCTIONS
+    if v8:
+        stable_text = flow_master_v8.developer_instructions()
+    else:
+        stable_text = camera_motion.clean(core_prompt.strip()) + "\n\n" + _dynamic_prompt_generation_guard() + "\n" + camera_motion.INSTRUCTIONS
 
     # Only include non-empty shared rules.
     shared_parts = []
@@ -621,17 +627,22 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
             row["rule"] = rule
         compact_segments.append(row)
 
-    dynamic_parts = []
-    if shared_parts:
+    if v8:
+        dynamic_text = flow_master_v8.dynamic_text(group, segments)
+        dynamic_parts = []
+    else:
+        dynamic_parts = []
+    if not v8 and shared_parts:
         dynamic_parts.append("\n".join(shared_parts))
-    dynamic_parts.append(
-        "片段数据(JSON)：\n" + json.dumps(
-            compact_segments,
-            ensure_ascii=False,
-            separators=(",", ":")
+    if not v8:
+        dynamic_parts.append(
+            "片段数据(JSON)：\n" + json.dumps(
+                compact_segments,
+                ensure_ascii=False,
+                separators=(",", ":")
+            )
         )
-    )
-    if auto_action_match:
+    if not v8 and auto_action_match:
         dynamic_parts.append(
             "先完成一次且仅一次参考图动作状态判断，并在 motion_selection 中返回结果；该选择对当前图片下全部片段共享。"
             "selected_action_ids 只能来自动作候选预设 id 或 __SAFE_STATIC__，可选择多个但必须互不冲突。"
@@ -642,7 +653,7 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
             "【注意】你必须从 camera_catalog 中选择合适的镜头，只在 camera_id 返回其 ID，绝对不要在 prompt 中把镜头预设英文抄写出来。"
             "不要复述候选预设全文、共享固定规则或文案正文。每条 prompt 必须以“文案： ”结束，且其后不得再有任何内容。"
         )
-    else:
+    elif not v8:
         dynamic_parts.append(
             "动作自动匹配已关闭：motion_selection 只返回 MANUAL/空选择，不重新选择人物动作。"
             "为每个 id 生成一条动态提示词，严格一一对应。只写本片段需要 GPT 判断的动态信息："
@@ -651,10 +662,11 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
             "【注意】你必须从 camera_catalog 中选择合适的镜头，只在 camera_id 返回其 ID，绝对不要在 prompt 中把镜头预设英文抄写出来。"
             "不要复述共享固定规则，不要输出文案正文。每条 prompt 必须以“文案： ”结束，且其后不得再有任何内容。对于不同 performance_mode 的片段，请严格遵守其对应模式的基础模板和设定（例如TALKING遵守睁眼正常交流，PRAYING遵守闭眼祈祷），绝不混淆！"
         )
-    dynamic_parts.append(camera_motion.INSTRUCTIONS + " Auxiliary images are DISABLED for this group.")
-    if any_praying:
-        dynamic_parts.append(camera_motion.PRAYING_INSTRUCTIONS)
-    dynamic_text = "\n\n".join(dynamic_parts)
+    if not v8:
+        dynamic_parts.append(camera_motion.INSTRUCTIONS + " Auxiliary images are DISABLED for this group.")
+        if any_praying:
+            dynamic_parts.append(camera_motion.PRAYING_INSTRUCTIONS)
+        dynamic_text = "\n\n".join(dynamic_parts)
 
     # Put the stable instruction in a developer message, dynamic task + image in user.
     # The image is sent once for the whole group.
@@ -673,7 +685,7 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
     ).hexdigest()[:32]
 
     allowed_action_ids = [str(x["id"]) for x in action_catalog]
-    if SAFE_STATIC_ACTION_ID not in allowed_action_ids:
+    if not v8 and SAFE_STATIC_ACTION_ID not in allowed_action_ids:
         allowed_action_ids.append(SAFE_STATIC_ACTION_ID)
     schema = {
         "type": "object",
@@ -714,6 +726,24 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
         "required": ["motion_selection", "results"],
         "additionalProperties": False,
     }
+    if v8:
+        motion_props = schema["properties"]["motion_selection"]["properties"]
+        motion_props["voice_age_band"] = {"type": "string", "enum": list(flow_master_v8.VOICE_BANDS)}
+        motion_props["mic_visible"] = {"type": "boolean"}
+        motion_props["device_visible"] = {"type": "boolean"}
+        schema["properties"]["motion_selection"]["required"].extend(
+            ["voice_age_band", "mic_visible", "device_visible"]
+        )
+        schema["properties"]["results"]["items"] = {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "prompt": {"type": "string"},
+                "camera_id": {"type": "string", "enum": [item["id"] for item in flow_master_v8.CAMERA_CATALOG]},
+            },
+            "required": ["id", "prompt", "camera_id"],
+            "additionalProperties": False,
+        }
 
     # Complete per-segment prompts now explicitly restate all execution-critical
     # constraints. Allow enough room so the model never has to compress them away.
@@ -799,69 +829,81 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
     except Exception as exc:
         raise RuntimeError("API 返回内容不是可解析的结构化批量结果。") from exc
 
-    motion_selection = _sanitize_motion_selection(
-        parsed.get("motion_selection") or {}, action_catalog, auto_enabled=auto_action_match
-    )
-
-    dynamic_map = {}
-    camera_plans = {}
-    cam_map = {}
-    cam_dict = {str(c['id']): str(c.get('prompt', '')) for c in camera_catalog}
-    for row in result_rows:
-        sid = str(row.get("id") or "")
-        prompt = str(row.get("prompt") or "")
-        cam_id = str(row.get("camera_id") or "")
-        cp = camera_motion.normalize(row.get("camera_motion"))
-        camera_plans[sid] = cp
-        
-        if sid and prompt.strip():
-            dynamic_map[sid] = prompt
-            if cam_id and cam_id in cam_dict:
-                cam_map[sid] = cam_dict[cam_id]
-
-    missing = [
-        str(seg["segment_id"]) for seg in segments
-        if str(seg["segment_id"]) not in dynamic_map
-    ]
-    if missing:
-        raise RuntimeError("批量结果缺少片段：" + ", ".join(missing[:20]))
-
-    # GPT returns only dynamic decisions.  Studio inserts the exact dialogue and
-    # appends all deterministic rules locally, so output tokens are not wasted
-    # repeating the same constraints dozens of times.
-    base_template = str(group.get("template_snapshot") or "").strip()
-    result_map = {}
-    normalized_dynamic_map = {}
-    segment_by_id = {str(seg["segment_id"]): seg for seg in segments}
-    for sid, raw_prompt in dynamic_map.items():
-        seg = segment_by_id[sid]
-        dialogue = str(seg.get("foreign_text") or "").strip()
-        normalized_dynamic = _normalize_dynamic_prompt(raw_prompt, dialogue)
-        normalized_dynamic_map[sid] = normalized_dynamic
-        seg_praying = _is_praying(seg)
-        if seg_praying:
-            camera_plans[sid], front_reason = camera_motion.enforce_praying(camera_plans[sid])
-            if front_reason:
-                try:
-                    from app.services.runtime_log import log as _rlog
-                    _rlog("praying_front_camera_corrected", level="WARNING", segment_id=sid, reason=front_reason)
-                except Exception:
-                    pass
-        result_map[sid] = assemble_final_flow_prompt(
-            dynamic_prompt=normalized_dynamic,
-            dialogue=dialogue,
-            base_template=base_template,
-            host_rule=host_rule,
-            image_rule=image_rule,
-            segment_rule=str(seg.get("segment_rule") or "").strip(),
-            motion_rule=motion_selection.get("preset_rule", "") if auto_action_match else "",
-            motion_safety_rule=motion_selection.get("safety_rule", "") if auto_action_match else "",
-            camera_rule=camera_motion.block(camera_plans[sid], praying=seg_praying),
-            praying=seg_praying,
+    if v8:
+        try:
+            built = flow_master_v8.complete_batch(parsed, group, segments)
+        except flow_master_v8.BatchError as exc:
+            raise RuntimeError(str(exc)) from exc
+        result_map = built["prompts"]
+        normalized_dynamic_map = built["ai_prompts"]
+        motion_selection = built["motion_selection"]
+    else:
+        motion_selection = _sanitize_motion_selection(
+            parsed.get("motion_selection") or {}, action_catalog, auto_enabled=auto_action_match
         )
 
-    for sid in result_map:
-        if camera_plans[sid]["enabled"]: result_map[sid] = camera_motion.clean_preserving_dialogue(result_map[sid], str(segment_by_id[sid].get("foreign_text") or "").strip())
+        dynamic_map = {}
+        camera_plans = {}
+        cam_map = {}
+        cam_dict = {str(c['id']): str(c.get('prompt', '')) for c in camera_catalog}
+        for row in result_rows:
+            sid = str(row.get("id") or "")
+            prompt = str(row.get("prompt") or "")
+            cam_id = str(row.get("camera_id") or "")
+            cp = camera_motion.normalize(row.get("camera_motion"))
+            camera_plans[sid] = cp
+
+            if sid and prompt.strip():
+                dynamic_map[sid] = prompt
+                if cam_id and cam_id in cam_dict:
+                    cam_map[sid] = cam_dict[cam_id]
+
+        missing = [
+            str(seg["segment_id"]) for seg in segments
+            if str(seg["segment_id"]) not in dynamic_map
+        ]
+        if missing:
+            raise RuntimeError("批量结果缺少片段：" + ", ".join(missing[:20]))
+
+        # GPT returns only dynamic decisions.  Studio inserts the exact dialogue and
+        # appends all deterministic rules locally, so output tokens are not wasted
+        # repeating the same constraints dozens of times.
+        base_template = str(group.get("template_snapshot") or "").strip()
+        result_map = {}
+        normalized_dynamic_map = {}
+        segment_by_id = {str(seg["segment_id"]): seg for seg in segments}
+        for sid, raw_prompt in dynamic_map.items():
+            seg = segment_by_id[sid]
+            dialogue = str(seg.get("foreign_text") or "").strip()
+            normalized_dynamic = _normalize_dynamic_prompt(raw_prompt, dialogue)
+            normalized_dynamic_map[sid] = normalized_dynamic
+            seg_praying = _is_praying(seg)
+            if seg_praying:
+                camera_plans[sid], front_reason = camera_motion.enforce_praying(camera_plans[sid])
+                if front_reason:
+                    try:
+                        from app.services.runtime_log import log as _rlog
+                        _rlog("praying_front_camera_corrected", level="WARNING", segment_id=sid, reason=front_reason)
+                    except Exception:
+                        pass
+            result_map[sid] = assemble_final_flow_prompt(
+                dynamic_prompt=normalized_dynamic,
+                dialogue=dialogue,
+                base_template=base_template,
+                host_rule=host_rule,
+                image_rule=image_rule,
+                segment_rule=str(seg.get("segment_rule") or "").strip(),
+                motion_rule=motion_selection.get("preset_rule", "") if auto_action_match else "",
+                motion_safety_rule=motion_selection.get("safety_rule", "") if auto_action_match else "",
+                camera_rule=camera_motion.block(camera_plans[sid], praying=seg_praying),
+                praying=seg_praying,
+            )
+
+        for sid in result_map:
+            if camera_plans[sid]["enabled"]:
+                result_map[sid] = camera_motion.clean_preserving_dialogue(
+                    result_map[sid], str(segment_by_id[sid].get("foreign_text") or "").strip()
+                )
 
     try:
         from app.services.runtime_log import log as runtime_log

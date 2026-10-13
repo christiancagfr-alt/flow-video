@@ -1,5 +1,6 @@
 
 from __future__ import annotations
+import threading
 import traceback
 import os
 import time
@@ -29,6 +30,8 @@ from app.ui.flow_task_center import FlowBatchCenterPage
 from app.ui.downstream_pages import VideoQCPage, DaVinciPage, StatisticsPage
 from app.ui.packaging_page import PackagingPage
 from app.ui.task_intake_page import TaskIntakePage
+from app.ui.flow_accounts_page import FlowAccountsPage
+from app.ui.settings_page import SettingsPage
 from app.ui.modern_widgets import ClickableFrame
 from app.services.reflow_rules import prepare_configured_speech as prepare_swahili_speech
 from app.services.local_bridge import get_bridge
@@ -154,221 +157,6 @@ class AddHostDialog(QDialog):
 
     def values(self):
         return self.name.text(), self.count.value()
-
-
-class SettingsDialog(QDialog):
-    def __init__(self, settings, parent=None):
-        super().__init__(parent)
-        self.settings = settings
-        self.setWindowTitle("系统设置")
-        self.resize(920, 860)
-        form = QFormLayout(self)
-
-        self.creator = QLineEdit(repo.default_creator() or str(settings.value("creator", "")))
-        self.default_code = QLineEdit(str(settings.value("default_code", "ZB")))
-        self.default_wrap = QLineEdit(str(settings.value("default_wrap", "18")))
-
-        form.addRow("默认制作人", self.creator)
-        form.addRow("默认固定编号", self.default_code)
-        form.addRow("默认外语断行字符数", self.default_wrap)
-
-        self.task_sheet = QLineEdit(repo.get_setting("task_source_sheet_url", ""))
-        self.task_sheet.setPlaceholderText("每天固定使用的 Google Sheets 链接")
-        form.addRow("任务获取表格链接", self.task_sheet)
-
-        asset_wrap = QWidget(); asset_row = QHBoxLayout(asset_wrap); asset_row.setContentsMargins(0,0,0,0)
-        self.task_asset_root = QLineEdit(repo.get_setting("task_asset_root", ""))
-        self.task_asset_root.setPlaceholderText("主播 Drive 图片下载和任务准备的本地根目录")
-        asset_row.addWidget(self.task_asset_root, 1)
-        asset_pick = QPushButton("浏览…"); asset_pick.clicked.connect(lambda: self.pick_folder_into(self.task_asset_root, "选择任务素材本地根目录")); asset_row.addWidget(asset_pick)
-        form.addRow("任务素材本地根目录", asset_wrap)
-
-        segment_wrap = QWidget(); segment_row = QHBoxLayout(segment_wrap); segment_row.setContentsMargins(0,0,0,0)
-        self.segment_output_root = QLineEdit(repo.get_setting("segment_output_root", ""))
-        self.segment_output_root.setPlaceholderText("各 Flow 通道下载完成后统一回收成品片段的根目录")
-        segment_row.addWidget(self.segment_output_root, 1)
-        segment_pick = QPushButton("浏览…"); segment_pick.clicked.connect(lambda: self.pick_folder_into(self.segment_output_root, "选择成品片段根目录")); segment_row.addWidget(segment_pick)
-        form.addRow("成品片段根目录", segment_wrap)
-
-        self.drive_upload_root_url = QLineEdit(repo.get_setting("drive_upload_root_url", ""), self)
-        self.drive_upload_root_url.setPlaceholderText("最终成品上传到 Google Drive 的根文件夹链接")
-        # form.addRow("Drive 成品上传根目录链接", self.drive_upload_root_url)
-        self.drive_upload_root_url.hide()
-
-        oauth_wrap = QWidget(); oauth_row = QHBoxLayout(oauth_wrap); oauth_row.setContentsMargins(0,0,0,0)
-        self.google_oauth_client_path = QLineEdit(repo.get_setting("google_oauth_client_path", ""))
-        self.google_oauth_client_path.setPlaceholderText("首次连接 Google 所需的 OAuth Desktop Client JSON")
-        oauth_row.addWidget(self.google_oauth_client_path, 1)
-        oauth_pick = QPushButton("选择…"); oauth_pick.clicked.connect(self.pick_oauth_json); oauth_row.addWidget(oauth_pick)
-        form.addRow("Google OAuth 客户端 JSON", oauth_wrap)
-
-        self.drive_desktop_path=QLineEdit(repo.get_setting('drive_desktop_path',''))
-        self.drive_desktop_path.setPlaceholderText('留空自动识别Google Drive桌面版；也可选择我的云端硬盘')
-        sync_wrap=QWidget(self);sync_row=QHBoxLayout(sync_wrap);sync_row.setContentsMargins(0,0,0,0);sync_row.addWidget(self.drive_desktop_path)
-        pick_sync=QPushButton('浏览…');pick_sync.clicked.connect(lambda:self.pick_folder_into(self.drive_desktop_path,'选择Google Drive同步目录'));sync_row.addWidget(pick_sync)
-        # form.addRow('Drive桌面版同步目录',sync_wrap)
-        sync_wrap.hide()
-        self.drive_desktop_folder=QLineEdit(repo.get_setting('drive_desktop_folder','FlowStudio') or 'FlowStudio', self)
-        # form.addRow('Drive归档文件夹',self.drive_desktop_folder)
-        self.drive_desktop_folder.hide()
-
-        edit_wrap = QWidget()
-        edit_row = QHBoxLayout(edit_wrap)
-        edit_row.setContentsMargins(0, 0, 0, 0)
-        self.edit_root = QLineEdit(repo.get_setting("edit_root_path", str(settings.value("edit_root_path", ""))))
-        self.edit_root.setPlaceholderText("例如 /Volumes/LEONARDO/000/Davinci")
-        edit_row.addWidget(self.edit_root, 1)
-        browse = QPushButton("浏览…")
-        browse.clicked.connect(self.pick_edit_root)
-        edit_row.addWidget(browse)
-        form.addRow("剪辑路径根目录", edit_wrap)
-        self.davinci_executable = QLineEdit(repo.get_setting('davinci_executable_path',''))
-        self.davinci_executable.setPlaceholderText('留空自动检测；也可选择 Resolve.exe')
-        if os.name == 'nt':
-            resolve_row=QHBoxLayout();resolve_row.addWidget(self.davinci_executable,1)
-            pick=QPushButton('选择…')
-            def pick_resolve():
-                path,_=QFileDialog.getOpenFileName(self,'选择达芬奇程序',self.davinci_executable.text(),'Resolve (Resolve.exe)')
-                if path:self.davinci_executable.setText(path)
-            pick.clicked.connect(pick_resolve);resolve_row.addWidget(pick);form.addRow('达芬奇程序',resolve_row)
-        else:self.davinci_executable.hide()
-        from app.services.resolve_daily import FPS_VALUES
-        self.timeline_fps = QComboBox()
-        self.timeline_fps.addItems(FPS_VALUES)
-        saved_fps = repo.get_setting('timeline_fps', '25') or '25'
-        self.timeline_fps.setCurrentText(saved_fps)
-        form.addRow('达芬奇时间线帧率', self.timeline_fps)
-        self.whisper_language = QComboBox()
-        self.whisper_language.addItems([
-            "自动识别 (Auto) · auto", "英语 (English) · en", "中文 (Chinese) · zh", "德语 (German) · de",
-            "西班牙语 (Spanish) · es", "俄语 (Russian) · ru", "韩语 (Korean) · ko", "法语 (French) · fr",
-            "日语 (Japanese) · ja", "葡萄牙语 (Portuguese) · pt", "土耳其语 (Turkish) · tr",
-            "波兰语 (Polish) · pl", "加泰罗尼亚语 (Catalan) · ca", "荷兰语 (Dutch) · nl",
-            "阿拉伯语 (Arabic) · ar", "瑞典语 (Swedish) · sv", "意大利语 (Italian) · it",
-            "印尼语 (Indonesian) · id", "印地语 (Hindi) · hi", "芬兰语 (Finnish) · fi",
-            "越南语 (Vietnamese) · vi", "希伯来语 (Hebrew) · he", "乌克兰语 (Ukrainian) · uk",
-            "希腊语 (Greek) · el", "马来语 (Malay) · ms", "捷克语 (Czech) · cs",
-            "罗马尼亚语 (Romanian) · ro", "丹麦语 (Danish) · da", "匈牙利语 (Hungarian) · hu",
-            "泰米尔语 (Tamil) · ta", "挪威语 (Norwegian) · no", "泰语 (Thai) · th",
-            "乌尔都语 (Urdu) · ur", "克罗地亚语 (Croatian) · hr", "保加利亚语 (Bulgarian) · bg",
-            "立陶宛语 (Lithuanian) · lt", "拉丁语 (Latin) · la", "毛利语 (Maori) · mi",
-            "马拉雅拉姆语 (Malayalam) · ml", "威尔士语 (Welsh) · cy", "斯洛伐克语 (Slovak) · sk",
-            "泰卢固语 (Telugu) · te", "波斯语 (Persian) · fa", "拉脱维亚语 (Latvian) · lv",
-            "孟加拉语 (Bengali) · bn", "塞尔维亚语 (Serbian) · sr", "阿塞拜疆语 (Azerbaijani) · az",
-            "斯洛文尼亚语 (Slovenian) · sl", "卡纳达语 (Kannada) · kn", "爱沙尼亚语 (Estonian) · et",
-            "马其顿语 (Macedonian) · mk", "布列塔尼语 (Breton) · br", "巴斯克语 (Basque) · eu",
-            "冰岛语 (Icelandic) · is", "亚美尼亚语 (Armenian) · hy", "尼泊尔语 (Nepali) · ne",
-            "蒙古语 (Mongolian) · mn", "波斯尼亚语 (Bosnian) · bs", "哈萨克语 (Kazakh) · kk",
-            "阿尔巴尼亚语 (Albanian) · sq", "斯瓦西里语 (Swahili) · sw", "加利西亚语 (Galician) · gl",
-            "马拉地语 (Marathi) · mr", "旁遮普语 (Punjabi) · pa", "僧伽罗语 (Sinhala) · si",
-            "高棉语 (Khmer) · km", "修纳语 (Shona) · sn", "约鲁巴语 (Yoruba) · yo",
-            "索马里语 (Somali) · so", "南非荷兰语 (Afrikaans) · af", "奥克语 (Occitan) · oc",
-            "格鲁吉亚语 (Georgian) · ka", "白俄罗斯语 (Belarusian) · be", "塔吉克语 (Tajik) · tg",
-            "信德语 (Sindhi) · sd", "古吉拉特语 (Gujarati) · gu", "阿姆哈拉语 (Amharic) · am",
-            "意第绪语 (Yiddish) · yi", "老挝语 (Lao) · lo", "乌兹别克语 (Uzbek) · uz",
-            "法罗语 (Faroese) · fo", "海地克里奥尔语 (Haitian Creole) · ht", "普什图语 (Pashto) · ps",
-            "土库曼语 (Turkmen) · tk", "尼诺斯克挪威语 (Nynorsk) · nn", "马耳他语 (Maltese) · mt",
-            "梵语 (Sanskrit) · sa", "卢森堡语 (Luxembourgish) · lb", "缅甸语 (Myanmar) · my",
-            "藏语 (Tibetan) · bo", "他加禄语 (Tagalog) · tl", "马达加斯加语 (Malagasy) · mg",
-            "阿萨姆语 (Assamese) · as", "鞑靼语 (Tatar) · tt", "夏威夷语 (Hawaiian) · haw",
-            "林加拉语 (Lingala) · ln", "豪萨语 (Hausa) · ha", "巴什基尔语 (Bashkir) · ba",
-            "爪哇语 (Javanese) · jv", "巽他语 (Sundanese) · su"
-        ])
-        saved_lang = repo.get_setting("whisper_language", "斯瓦西里语 (Swahili) · sw")
-        idx = self.whisper_language.findText(saved_lang)
-        if idx >= 0:
-            self.whisper_language.setCurrentIndex(idx)
-        else:
-            self.whisper_language.setCurrentText("斯瓦西里语 (Swahili) · sw")
-        form.addRow('自动剪辑口播语言', self.whisper_language)
-
-
-        tip = QLabel(
-            "制作者是整台电脑的全局设置。剪辑根目录用于 DaVinci 的项目媒体、ProxyMedia、CacheClip、.gallery、导入素材与最终导出；"
-            "视频质检全部通过后，会自动把源片段从下载目录移动到这个根目录。",
-            objectName="muted"
-        )
-        tip.setWordWrap(True)
-        form.addRow(tip)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.validate_and_accept)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
-
-    def pick_folder_into(self, line_edit, title):
-        start = line_edit.text().strip() or str(Path.home())
-        path = QFileDialog.getExistingDirectory(self, title, start)
-        if path:
-            line_edit.setText(path)
-
-    def pick_oauth_json(self):
-        start = str(Path(self.google_oauth_client_path.text().strip()).expanduser().parent) if self.google_oauth_client_path.text().strip() else str(Path.home())
-        path, _ = QFileDialog.getOpenFileName(self, "选择 Google OAuth Desktop Client JSON", start, "JSON 文件 (*.json)")
-        if path:
-            self.google_oauth_client_path.setText(path)
-
-    def pick_edit_root(self):
-        start = self.edit_root.text().strip() or str(Path.home())
-        path = QFileDialog.getExistingDirectory(self, "选择 DaVinci 剪辑路径根目录", start)
-        if path:
-            self.edit_root.setText(path)
-
-    def validate_and_accept(self):
-        wrap = self.default_wrap.text().strip()
-        if wrap and (not wrap.isdigit() or int(wrap) <= 0):
-            QMessageBox.warning(self, "设置错误", "默认断行字符数必须是大于 0 的整数。")
-            return
-        for label, value in (("任务素材根目录", self.task_asset_root.text().strip()), ("成品片段根目录", self.segment_output_root.text().strip()), ("剪辑路径", self.edit_root.text().strip())):
-            if value:
-                try:
-                    Path(value).expanduser().mkdir(parents=True, exist_ok=True)
-                except Exception as exc:
-                    QMessageBox.warning(self, label, f"无法创建/写入目录：{exc}")
-                    return
-        oauth = self.google_oauth_client_path.text().strip()
-        if oauth and not Path(oauth).expanduser().exists():
-            QMessageBox.warning(self, "Google OAuth", "选择的 OAuth JSON 文件不存在。")
-            return
-        if oauth:
-            from app.services.google_oauth_config import load_desktop_config
-            try:
-                load_desktop_config(oauth)
-            except ValueError as exc:
-                QMessageBox.warning(self, "Google 授权文件类型错误", str(exc))
-                return
-        self.accept()
-
-    def save(self):
-        repo.set_setting('davinci_executable_path',self.davinci_executable.text().strip())
-        creator=self.creator.text().strip()
-        self.settings.setValue("creator", creator)
-        repo.set_default_creator(creator)
-        repo.set_setting("task_source_sheet_url", self.task_sheet.text().strip())
-        repo.set_setting("task_asset_root", self.task_asset_root.text().strip())
-        repo.set_setting("segment_output_root", self.segment_output_root.text().strip())
-        repo.set_setting("flow_download_root", self.segment_output_root.text().strip())
-        repo.set_setting("drive_upload_root_url", self.drive_upload_root_url.text().strip())
-        repo.set_setting("google_oauth_client_path", self.google_oauth_client_path.text().strip())
-        repo.set_setting('timeline_fps', self.timeline_fps.currentText())
-        repo.set_setting("whisper_language", self.whisper_language.currentText())
-
-        repo.set_setting('drive_desktop_path',self.drive_desktop_path.text().strip())
-        repo.set_setting('drive_desktop_folder',self.drive_desktop_folder.text().strip() or 'FlowStudio')
-        self.settings.setValue("default_code", self.default_code.text().strip() or "ZB")
-        repo.set_setting("default_code", self.default_code.text().strip() or "ZB")
-        wrap_value = self.default_wrap.text().strip() or "18"
-        self.settings.setValue("default_wrap", wrap_value)
-        repo.set_setting("default_wrap", wrap_value)
-        root = self.edit_root.text().strip()
-        self.settings.setValue("edit_root_path", root)
-        repo.set_setting("edit_root_path", root)
-        if root:
-            try:
-                from app.services.davinci_workflow import ensure_root_layout
-                ensure_root_layout(Path(root))
-            except Exception:
-                pass
 
 
 class MultilineEditorDialog(QDialog):
@@ -583,6 +371,7 @@ class MainWindow(QMainWindow):
             ("⇩  任务中心", "intake"),
             ("✦  GPT 提示词", "prompt"),
             ("⤨  Flow 生成", "flow"),
+            ("☺  账号管理", "accounts"),
             ("✓  视频质检", "qc"),
             ("✂  自动剪辑", "davinci"),
             ("▣  视频包装", "packaging"),
@@ -601,6 +390,9 @@ class MainWindow(QMainWindow):
             elif action == "flow":
                 b.clicked.connect(self.show_flow_task_center)
                 self.nav_buttons["flow"] = b
+            elif action == "accounts":
+                b.clicked.connect(self.show_accounts_page)
+                self.nav_buttons["accounts"] = b
             elif action == "qc":
                 b.clicked.connect(self.show_qc_page)
                 self.nav_buttons["qc"] = b
@@ -617,7 +409,7 @@ class MainWindow(QMainWindow):
                 b.clicked.connect(self.show_stats_page)
                 self.nav_buttons["stats"] = b
             elif action == "settings":
-                b.clicked.connect(self.open_settings)
+                b.clicked.connect(self.show_settings_page)
                 self.nav_buttons["settings"] = b
             side.addWidget(b)
 
@@ -666,6 +458,7 @@ class MainWindow(QMainWindow):
         self.task_intake_page = TaskIntakePage(self)
         self.prompt_center = PromptCenterPage(self)
         self.flow_task_center = FlowBatchCenterPage(self)
+        self.account_page = FlowAccountsPage(self)
         self.qc_page = VideoQCPage(self)
         self.davinci_page = DaVinciPage(self)
         self.packaging_page = PackagingPage(self)
@@ -676,20 +469,23 @@ class MainWindow(QMainWindow):
         self.packaging_sync_timer.start()
         self.stack.addWidget(self.components_page)
         self.stats_page = StatisticsPage(self)
+        self.settings_page = SettingsPage(self.settings, self)
         self.stack.addWidget(self.dashboard)
         self.stack.addWidget(self.recipient_page)
         self.stack.addWidget(self.host_page)
         self.stack.addWidget(self.task_intake_page)
         self.stack.addWidget(self.prompt_center)
         self.stack.addWidget(self.flow_task_center)
+        self.stack.addWidget(self.account_page)
         self.stack.addWidget(self.qc_page)
         self.stack.addWidget(self.davinci_page)
         self.stack.addWidget(self.packaging_page)
         self.stack.addWidget(self.stats_page)
+        self.stack.addWidget(self.settings_page)
         self.stack.setMinimumWidth(0)
         for page in (self.dashboard, self.recipient_page, self.host_page, self.task_intake_page,
                      self.prompt_center, self.flow_task_center, self.qc_page, self.davinci_page,
-                     self.packaging_page, self.stats_page):
+                     self.packaging_page, self.stats_page, self.settings_page):
             page.setMinimumWidth(0)
             page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
 
@@ -699,8 +495,24 @@ class MainWindow(QMainWindow):
             self.set_work_date(work_dates.LEGACY if dialog.legacy_selected else dialog.selected_date().toString('yyyy-MM-dd'))
 
     def _background_qc_tick(self):
-        from app.services.workflow import run_background_qc_reconcile
-        run_background_qc_reconcile()
+        # This scan used to run on the UI thread and froze menu clicks for about a second.
+        lock = getattr(self, "_qc_reconcile_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._qc_reconcile_lock = lock
+        if not lock.acquire(blocking=False):
+            return
+
+        def work():
+            try:
+                from app.services.workflow import run_background_qc_reconcile
+                run_background_qc_reconcile()
+            except Exception:
+                runtime_log.log("qc_reconcile", level="ERROR", message=traceback.format_exc())
+            finally:
+                lock.release()
+
+        threading.Thread(target=work, name="qc-reconcile", daemon=True).start()
 
     def check_work_day(self):
         current=work_dates.today()
@@ -790,23 +602,11 @@ class MainWindow(QMainWindow):
     def default_wrap(self):
         return str(self.settings.value("default_wrap", "18")).strip() or "18"
 
+    def show_settings_page(self):
+        self._navigate("settings", self.settings_page, self.settings_page.reload, "reload")
+
     def open_settings(self):
-        d = SettingsDialog(self.settings, self)
-        if d.exec():
-            d.save()
-            if self.stack.currentWidget() is self.dashboard:
-                self.show_dashboard()
-            elif self.stack.currentWidget() is self.task_intake_page:
-                self.task_intake_page.refresh()
-            elif self.stack.currentWidget() is self.prompt_center:
-                self.prompt_center.reload_filters()
-            elif self.current_recipient_id and self.stack.currentWidget() is self.recipient_page:
-                self.show_recipient(self.current_recipient_id)
-            elif self.current_host_id and self.stack.currentWidget() is self.host_page:
-                host_id = self.current_host_id
-                self.show_host(host_id)
-                # A changed system default is immediately applied to the visible host copy.
-                QTimer.singleShot(0, lambda: self.auto_wrap_foreign(silent=True))
+        self.show_settings_page()
 
     def change_theme(self, name):
         self.settings.setValue("theme", name)
@@ -815,31 +615,26 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self, name):
         if name == "深色":
-            sheet = DARK
+            dark = True
         elif name == "跟随系统":
             hints = QApplication.styleHints()
             try:
                 dark = hints.colorScheme() == Qt.ColorScheme.Dark
             except Exception:
                 dark = False
-            sheet = DARK if dark else LIGHT
         else:
-            sheet = LIGHT
-
+            dark = False
+        # Clicking the theme that is already on screen should not restyle the tree.
+        if getattr(self, "_applied_theme_name", None) == name and getattr(self, "_applied_theme_dark", None) == dark:
+            return
+        sheet = DARK if dark else LIGHT
         app = QApplication.instance()
         if app:
-            apply_control_palette(app, sheet == DARK)
-            app.setStyleSheet(sheet)
-        self.setStyleSheet("")
-        self.style().unpolish(self)
-        self.style().polish(self)
-        for child in self.findChildren(QWidget):
-            try:
-                child.style().unpolish(child)
-                child.style().polish(child)
-                child.update()
-            except Exception:
-                pass
+            apply_control_palette(app, dark)
+            if app.styleSheet() != sheet:
+                app.setStyleSheet(sheet)
+        self._applied_theme_name = name
+        self._applied_theme_dark = dark
         self.update()
 
     def _clear_layout_recursive(self, layout):
@@ -929,10 +724,12 @@ class MainWindow(QMainWindow):
             getattr(self, "task_intake_page", None): "intake",
             getattr(self, "prompt_center", None): "prompt",
             getattr(self, "flow_task_center", None): "flow",
+            getattr(self, "account_page", None): "accounts",
             getattr(self, "qc_page", None): "qc",
             getattr(self, "davinci_page", None): "davinci",
             getattr(self, "packaging_page", None): "packaging",
             getattr(self, "stats_page", None): "stats",
+            getattr(self, "settings_page", None): "settings",
         }
         return mapping.get(widget, "detail")
 
@@ -1005,6 +802,9 @@ class MainWindow(QMainWindow):
 
     def show_flow_task_center(self):
         self._navigate("flow", self.flow_task_center, self.flow_task_center.reload_filters, "reload_filters")
+
+    def show_accounts_page(self):
+        self._navigate("accounts", self.account_page, self.account_page.refresh, "refresh")
 
     def show_task_intake(self):
         self._navigate("intake", self.task_intake_page, self.task_intake_page.refresh, "refresh")

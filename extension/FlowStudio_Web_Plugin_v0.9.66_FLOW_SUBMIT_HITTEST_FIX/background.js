@@ -1,7 +1,20 @@
 function trustedFlowSender(sender){
  try{return sender.id===chrome.runtime.id && new URL(sender.url||sender.tab?.url||'').origin==='https://flow.google.com';}catch(_){return false;}
 }
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if(msg?.type!=='FS_PAGE_CREDITS' || sender.id!==chrome.runtime.id)return;
+  const tabUrl=String(sender.tab?.url||'');
+  const frameUrl=String(sender.url||'');
+  const onFlow=tabUrl.startsWith('https://flow.google.com/') || frameUrl.startsWith('https://flow.google.com/');
+  const email=String(msg.email||'').trim();
+  const credits=Number(msg.credits);
+  const tabId=sender.tab?.id;
+  if(!onFlow || !email || !Number.isFinite(credits))return;
+  publishSeenAccount(email, credits, tabId).then(ok=>sendResponse({ok})).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));
+  return true;
+});
 importScripts('background-runtime.js');
+importScripts('account-login.js');
 chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
  if(!trustedFlowSender(sender))return;
  if(msg?.type!=='FS_REBALANCE_ACK')return;
@@ -129,7 +142,7 @@ function pluginLog(stage,detail={}){
   const p=runtimeLogSerial.then(async()=>{await runtimeLogLoaded;runtimeLogs.push(row);runtimeLogs=runtimeLogs.slice(-3000);await chrome.storage.local.set({[PLUGIN_LOG_KEY]:runtimeLogs});});
   runtimeLogSerial=p.catch(()=>{});return p;
 }
-async function pluginDiagnostics(){await runtimeLogLoaded;await runtimeLogSerial;return {version:'0.9.66',background_runtime:FlowStudioBackground.diagnostics(),exported_at:new Date().toISOString(),connected:!!token,jobsVersion,job_count:jobs.length,lastSuccessfulContact,lastJobsPollOk,reconnectAttempts,channels:channelConfigs.map(c=>({channel_key:c.channel_key,id:c.id,role:c.role,collection_url:c.collection_url})),jobs:jobs.map(j=>({channel_key:j.channel_key,channel_id:j.channel_id,command_id:j.command_id,collection_url:j.collection_url,task_count:(j.tasks||[]).length,execute_upload:!!j.execute_upload,dispatch_tasks:!!j.dispatch_tasks})),logs:runtimeLogs.slice()};}
+async function pluginDiagnostics(){await runtimeLogLoaded;await runtimeLogSerial;return {version:'0.9.67',background_runtime:FlowStudioBackground.diagnostics(),exported_at:new Date().toISOString(),connected:!!token,jobsVersion,job_count:jobs.length,lastSuccessfulContact,lastJobsPollOk,reconnectAttempts,channels:channelConfigs.map(c=>({channel_key:c.channel_key,id:c.id,role:c.role,collection_url:c.collection_url})),jobs:jobs.map(j=>({channel_key:j.channel_key,channel_id:j.channel_id,command_id:j.command_id,collection_url:j.collection_url,task_count:(j.tasks||[]).length,execute_upload:!!j.execute_upload,dispatch_tasks:!!j.dispatch_tasks})),logs:runtimeLogs.slice()};}
 const tabJobMemo=new Map();
 const tabChannelMemo=new Map();
 
@@ -271,6 +284,25 @@ async function flushEvents() {
   } finally { flushing=false; }
 }
 
+let lastPointReadKey='';
+async function readRequestedPoints(request){
+  const wanted=String(request?.email||'').trim();
+  const key=wanted.toLowerCase()+'|'+String(request?.id||'');
+  if(!wanted || key===lastPointReadKey)return;
+  lastPointReadKey=key;
+  let tabs=[];
+  try{tabs=await chrome.tabs.query({url:['https://flow.google.com/*']});}catch(_){return;}
+  for(const tab of tabs){
+    if(tab.id==null)continue;
+    try{
+      const reply=await chrome.tabs.sendMessage(tab.id,{type:'FS_READ_POINTS',email:wanted});
+      const email=String(reply?.email||'').trim();
+      const credits=Number(reply?.credits);
+      if(!email || email.toLowerCase()!==wanted.toLowerCase() || !Number.isFinite(credits))continue;
+      await publishSeenAccount(email, credits, tab.id);
+    }catch(_){}
+  }
+}
 async function pollJobs() {
   if(pollJobsInFlight)return pollJobsInFlight;
   pollJobsInFlight=(async()=>{
@@ -307,6 +339,8 @@ async function pollJobs() {
       lastConnectionState=true;
       broadcast({type:'FS_STUDIO_CONNECTION', connected:true});
       void reportChannelPresence();
+      void reportOpenFlowAccounts();
+      if(d.read_points)void readRequestedPoints(d.read_points);
       return true;
     } catch (e) {
       token='';
@@ -333,6 +367,12 @@ async function pollGenerationControl() {
     if (d.progress_scan_version !== progressScanVersion) {
       progressScanVersion = d.progress_scan_version;
       broadcast({type:'FS_PROGRESS_SCAN', scanVersion:progressScanVersion});
+    }
+    const accountRequest=d.account_request;
+    if(accountRequest?.id && accountRequest.id!==accountRequestSeen && !accountRequestBusy){
+      accountRequestSeen=accountRequest.id;
+      accountRequestBusy=true;
+      void handleAccountRequest(accountRequest).finally(()=>{accountRequestBusy=false;});
     }
   } catch (e) {
     token='';
@@ -399,6 +439,41 @@ function channelForTab(tab) {
   return ch;
 }
 let lastIdleChannelReport=0;
+let accountRequestSeen='';
+let accountRequestBusy=false;
+let accountSnap={tabId:0,at:0,email:'',credits:null};
+async function accountForTab(tabId){
+  if(accountSnap.tabId===tabId && accountSnap.email && Date.now()-accountSnap.at<15000)return accountSnap;
+  try{
+    const reply=await chrome.tabs.sendMessage(tabId,{type:'FS_READ_ACCOUNT'});
+    const email=String(reply?.email||'').trim();
+    if(reply?.ok && email){
+      accountSnap={tabId,at:Date.now(),email,credits:reply.credits==null?null:Number(reply.credits)};
+      return accountSnap;
+    }
+  }catch(_){}
+  return {tabId,at:0,email:'',credits:null};
+}
+async function publishSeenAccount(email, credits, tabId){
+  email=String(email||'').trim();
+  if(!email)return false;
+  if(!token && !(await heartbeat()))return false;
+  const event={type:'flow_account_seen',host_id:0,recipient_id:0,channel_id:0,channel_key:'account:'+email.toLowerCase(),command_id:'',tab_id:tabId||0,account_email:email,message:'Flow 页面账号'};
+  if(credits!=null && !Number.isNaN(Number(credits)))event.credits_remaining=Number(credits);
+  void pushEvent(event);
+  return true;
+}
+async function handleAccountRequest(request){
+  try{
+    const response=await fsFetch('/flow-account-credential',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:request.id})});
+    const credential=await response.json();
+    if(!credential?.ok)throw Error(credential?.error||'无法读取登录信息');
+    const result=credential.action==='login'?await FlowStudioAccountLogin.login(credential):await FlowStudioAccountLogin.readOpenFlow();
+    await fsFetch('/flow-account-result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:request.id,...result,password:undefined,totp:undefined,totp_secret:undefined})});
+  }catch(error){
+    try{await fsFetch('/flow-account-result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:request.id,ok:false,error:String(error?.message||error)})});}catch(_){}
+  }
+}
 async function reportChannelPresence() {
   if(!token || !channelConfigs.length)return;
   if(Date.now()-lastIdleChannelReport<3500)return;
@@ -427,7 +502,29 @@ async function reportChannelPresence() {
     const actionable=!!(boundJob?.command_id && (boundJob.dispatch_tasks || boundJob.auto_execute || boundJob.execute_upload));
     const idle=!actionable;
     const msg=tab.discarded?'通道标签页被Chrome丢弃，已请求后台恢复':(tab.frozen?'通道标签页被Chrome冻结，正在请求后台解冻':(idle?(tab.active?'通道标签页在线 · 空闲':'通道标签页后台在线 · 空闲'):'通道标签页在线 · 正在执行任务'));
-    void pushEvent({type:'web_plugin_heartbeat',host_id:0,recipient_id:0,channel_id:Number(ch.id)||0,channel_key:String(ch.channel_key||''),channel_role:String(ch.role||'normal'),browser_group:String(ch.browser_group||''),command_id:actionable?String(boundJob.command_id||''):'',collection_url:String(ch.collection_url||tab.url||''),tab_id:tab.id,idle_channel:idle,job_active:actionable,dispatch_tasks:!!boundJob?.dispatch_tasks,execute_upload:!!boundJob?.execute_upload,tab_discarded:!!tab.discarded,tab_frozen:!!tab.frozen,tab_status:pageState,window_id:tab.windowId,message:msg});
+    const account=tab.id==null?null:await accountForTab(tab.id);
+    const heartbeat={type:'web_plugin_heartbeat',host_id:0,recipient_id:0,channel_id:Number(ch.id)||0,channel_key:String(ch.channel_key||''),channel_role:String(ch.role||'normal'),browser_group:String(ch.browser_group||''),command_id:actionable?String(boundJob.command_id||''):'',collection_url:String(ch.collection_url||tab.url||''),tab_id:tab.id,idle_channel:idle,job_active:actionable,dispatch_tasks:!!boundJob?.dispatch_tasks,execute_upload:!!boundJob?.execute_upload,tab_discarded:!!tab.discarded,tab_frozen:!!tab.frozen,tab_status:pageState,window_id:tab.windowId,message:msg};
+    if(account?.email)heartbeat.account_email=account.email;
+    if(account && account.credits!=null && !Number.isNaN(account.credits))heartbeat.credits_remaining=account.credits;
+    void pushEvent(heartbeat);
+  }
+}
+let lastAccountScan=0;
+async function reportOpenFlowAccounts(){
+  // Every open Flow tab can belong to a different Chrome user. This does not submit or download.
+  if(!token || Date.now()-lastAccountScan<12000)return;
+  lastAccountScan=Date.now();
+  let tabs=[];
+  try{tabs=await chrome.tabs.query({url:['https://flow.google.com/*']});}catch(_){return;}
+  const seen=new Set();
+  for(const tab of tabs){
+    if(tab.id==null)continue;
+    const account=await accountForTab(tab.id);
+    const email=String(account?.email||'').trim();
+    const key=email.toLowerCase();
+    if(!key || seen.has(key))continue;
+    seen.add(key);
+    void publishSeenAccount(email, account.credits, tab.id);
   }
 }
 
@@ -505,6 +602,13 @@ async function dispatchNativeClick(tabId, x, y) {
 }
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
  if(!trustedFlowSender(sender))return;
+  if (msg?.type === 'FS_PAGE_ACCOUNT') {
+    const email=String(msg.email||'').trim();
+    const tabId=sender.tab?.id;
+    if(tabId!=null && email)accountSnap={tabId,at:Date.now(),email,credits:msg.credits==null?null:Number(msg.credits)};
+    publishSeenAccount(email, msg.credits, tabId).then(ok=>sendResponse({ok})).catch(e=>sendResponse({ok:false,error:String(e?.message||e)}));
+    return true;
+  }
   if (msg?.type === 'FS_GET_BRIDGE_PORT') {
     sendResponse({ok:true,port:bridgePort,base:BASE});
     return true;
@@ -620,9 +724,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId,changeInfo,tab)=>{
-  if(!changeInfo.url)return;
-  const ch=channelForTab({...tab,id:tabId,url:changeInfo.url});
-  if(ch)void pluginLog('tab_channel_captured',{tab_id:tabId,channel_key:ch.channel_key,url:normFullUrl(changeInfo.url)});
+  if(changeInfo.url){
+    const ch=channelForTab({...tab,id:tabId,url:changeInfo.url});
+    if(ch)void pluginLog('tab_channel_captured',{tab_id:tabId,channel_key:ch.channel_key,url:normFullUrl(changeInfo.url)});
+  }
+  const url=String(tab?.url||changeInfo.url||'');
+  if(changeInfo.status==='complete' && url.startsWith('https://flow.google.com/')){
+    void (async()=>{
+      const account=await accountForTab(tabId);
+      if(account?.email)await publishSeenAccount(account.email, account.credits, tabId);
+    })();
+  }
 });
 chrome.tabs.onRemoved.addListener(tabId=>{tabJobMemo.delete(tabId);tabChannelMemo.delete(tabId);backgroundGuardFailures.delete(tabId);});
 

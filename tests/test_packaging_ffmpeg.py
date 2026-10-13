@@ -37,6 +37,22 @@ class NativePackagingTests(unittest.TestCase):
         self.assertTrue(native.compatibility_reason({'captions':[{'text':'existing'}]}))
         self.assertFalse(native.compatibility_reason({'captions':[{'text':'reels'}],'reelsStyle':{'effect':'plain'}}))
         self.assertTrue(native.compatibility_reason({'reelsStyle':{'free_animation':'持续向上滚动'}}))
+        self.assertTrue(native.compatibility_reason({'reelsStyle':{'free_animation':'中间固定滚动'}}))
+
+    def test_middle_scroll_stays_inside_the_band(self):
+        from app.services.packaging_overlay import paint_at, scroll_band
+        style={'free_animation':'中间固定滚动','font':'Arial','font_size':72,'text':'#FFFFFF','outline':'#111111','outline_width':4,'line_length':10,'line_spacing':110}
+        captions=[{'text':'SCROLL LINE ONE','start':0,'end':4},{'text':'SCROLL LINE TWO','start':0,'end':4},{'text':'SCROLL LINE THREE','start':0,'end':4}]
+        band=scroll_band(style)
+        self.assertLess(band['top'],960)
+        self.assertGreater(band['top']+band['height'],960)
+        self.assertLess(band['top']+band['height'],1900)
+        image=paint_at(captions,style,2.0)
+        def opaque(x,y):
+            return image.pixelColor(x,y).alpha()>0
+        self.assertFalse(any(opaque(540,y) for y in range(0,band['top'])))
+        self.assertFalse(any(opaque(540,y) for y in range(band['top']+band['height'],1920)))
+        self.assertTrue(any(opaque(x,y) for y in range(band['top']+80,band['top']+band['height']-80) for x in range(200,880,40)))
 
     def test_graph_retains_intro_outro_audio_and_input_order(self):
         with tempfile.TemporaryDirectory() as folder:

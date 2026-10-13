@@ -1,6 +1,38 @@
 # Flow Studio 安全审核报告
 
-审核日期：2026-10-10 至 2026-10-12。当前源码版本：1.0.1；随包扩展：0.9.66。2026-10-11 报告中的 0.13.5.106 / 1.8.6 记录仍保留。
+审核日期：2026-10-10 至 2026-10-13。当前源码版本：1.1.0；随包扩展目录名仍为 0.9.66，清单版本 0.9.67。2026-10-12 及更早记录仍保留。
+
+## 2026-10-13 复核
+
+范围：发行锁 `requirements-release.lock`（42 项）、`requirements-macos.lock`、`requirements-linux.lock`、可选 `requirements-asr.txt`；`app/`、`scripts/`、随包扩展、`.github/workflows/installers.yml`、`.gitignore`。未打开 `data/google_token.json`，未读取 Cookie 密文，未把 `build/`、`dist/`、`data/` 当作发行物。pip-audit 2.10.1 对 `requirements-release.lock`、`requirements-linux.lock` 和 `requirements-asr.txt` 的结果都是 “No known vulnerabilities found”。`requirements-macos.lock` 在这台 Windows 上无法安装 PyObjC（构建要求 macOS），因此 pip-audit 没有完成该锁文件；其中与发行锁相同的版本已由发行锁扫描覆盖。macOS 独有的 pyobjc-core 与六个 framework 包均为 12.2.2，向 OSV API 按版本查询的结果是 0 条。公开公告检索与上述结果一致：当前 urllib3 2.8.0、Pillow 12.3.0、cryptography 50.0.2、protobuf 6.33.6、oauthlib 4.0.0、requests 2.34.2 均不低于此前已核对的修复版本。没有编造新的 CVE。Qt、FFmpeg、Chromium 与可选 ASR 原生库映射仍为待确认。PySide6 6.12.0 已发布，6.11.2 未查到可确认的 Python 包公告，本次不升级。
+
+| 编号 | 类别 | 严重级别 | 位置 | 状态 |
+|---|---|---|---|---|
+| C12 | 代码 | High | app/services/flow_accounts.py `credential_for` | 已修复 |
+| C13 | 代码 | Low | app/services/flow_image_cache.py `_save` / `_row` | 已修复 |
+| C14 | 代码 | Low | app/services/redaction.py | 已修复 |
+| K04 | 密钥 | Low | .env.example | 已修复 |
+| R01 | 代码 | Medium | app/services/bridge_security.py 任意扩展来源；local_bridge.py `POST /heartbeat` 返回令牌 | 待开发者决定 |
+| R04 | 代码 | Medium | extension/.../page-engine.js `FLOW_STUDIO_MAIN_COMMAND` | 待开发者决定 |
+| R02 | 依赖 | Low | pywinauto 0.6.9 | 建议关注 |
+| R05 | 代码 | Low | app/services/local_bridge.py 若干 `str(exc)` 响应 | 建议关注 |
+| R06 | 依赖 | Low | PySide6 6.11.2；Qt / FFmpeg / Chromium 原生组件 | 建议关注，待确认 |
+
+C12：登录请求存在时，桥接会解密并返回密码、验证器密钥和当时的动态码。插件的 `login()` 只使用邮箱，不填写密码。能调用该接口的是已经拿到桥接令牌的本机程序。已改为只返回 `ok`、`action`、`email`。
+
+C13：图片缓存更新把字段名拼进 SQL。现有调用方都是代码里的固定列名，没有把用户输入当作列名。已增加列名白名单，未知列直接拒绝。
+
+C14：日志脱敏原先不认识 `totp_secret`。已把 `totp` 和 `totp_secret` 列入敏感键。
+
+K04：源码中未发现新的硬编码密钥、私钥或云访问密钥。`.gitignore` 已忽略 `.env`、令牌、私钥、`/data/` 和 `audit/local-*/`。补了只含变量名的 `.env.example`。OpenAI 与可选语音密钥仍从环境变量或系统凭据库读取。已经提交或泄露过的密钥必须到对应平台作废并重新生成，只删代码不够。本次没有轮换 Google 登录令牌，也没有打开令牌文件。
+
+R01：桥接仍接受任意 `chrome-extension://` 来源，并且未带令牌的 `POST /heartbeat` 会返回本次运行的桥接令牌。这是插件启动时领取令牌的方式。固定扩展 ID 会改变未打包扩展的安装方式，本次未改。
+
+R04：`page-engine.js` 运行在 Flow 页面的主世界，监听自定义事件后可以提交生成、扫描素材。页面里能执行脚本的人可以发出同样的事件。隔离世界无法用 `isTrusted` 区分这个事件。改协议可能让正常提交失效，本次未改。
+
+工作流 `.github/workflows/installers.yml` 只有 `workflow_dispatch`，四个 Action 均固定到提交 SHA，`persist-credentials` 为 false。没有 `pull_request_target`。2026-10-12 报告里“没有可审查工作流”的句子已经过时，以本节为准。
+
+回归：`tests.test_security_boundaries`、`tests.test_flow_accounts`、`tests.test_chrome_profiles`、`tests.test_settings_lifetime`、`tests.test_sheet_columns`、`tests.test_control_guard`、`tests.test_flow_master_v8`，共 49 项通过。数据目录使用临时目录，没有写正在使用的 `studio.db`。
 
 ## 1. 项目概况与范围
 

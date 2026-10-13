@@ -10,6 +10,6 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
  assert.equal(api.diagnostics()[0].focus_emulated,true);
  await api.release(1);assert.equal(detaches,1);assert.equal(updates.at(-1).autoDiscardable,true);
  await api.hold(1,'next');assert.equal(attaches,2,'intentional release must allow next batch');
- listener({tabId:1},'canceled_by_user');await assert.rejects(api.hold(1,'next'),/DISMISSED/);
- assert(updates.every(v=>!('active' in v)));console.log('PASS persistent session, serialized operations, restore, next batch and user dismissal');
+ listener({tabId:1},'canceled_by_user');await api.hold(1,'next');assert.equal(attaches,3,'user detach must allow the next action to reacquire');
+ assert(updates.every(v=>!('active' in v)));console.log('PASS persistent session, serialized operations, restore, next batch and reacquire');
 })().catch(e=>{console.error(e);process.exitCode=1});

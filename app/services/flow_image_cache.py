@@ -213,7 +213,18 @@ def build_flow_upload_cache_path(task, image, con=None) -> Path:
     return path
 
 
+_CACHE_COLUMNS = {
+    'image_id', 'lookup_key', 'original_filename', 'original_source_path', 'source_size',
+    'source_mtime_ns', 'cache_path', 'cache_initialized', 'cache_revision', 'cache_source',
+    'work_date', 'receiver_name', 'host_name', 'recipient_id', 'host_id', 'source_changed',
+    'updated_at',
+}
+
+
 def _save(con, row_id, **fields):
+    unknown = set(fields) - _CACHE_COLUMNS
+    if unknown:
+        raise FlowImageCacheError('CACHE_FIELD', '未知缓存字段')
     fields['updated_at'] = time.time()
     con.execute('UPDATE flow_image_cache SET ' + ','.join(f'{k}=?' for k in fields) + ' WHERE image_id=?',
                 (*fields.values(), row_id))
@@ -222,6 +233,8 @@ def _save(con, row_id, **fields):
 
 def _row(con, **where):
     k, v = next(iter(where.items()))
+    if k not in _CACHE_COLUMNS:
+        raise FlowImageCacheError('CACHE_FIELD', '未知缓存字段')
     r = con.execute(f'SELECT * FROM flow_image_cache WHERE {k}=?', (v,)).fetchone()
     return dict(r) if r else None
 

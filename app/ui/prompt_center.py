@@ -5,7 +5,7 @@ import copy
 import uuid
 
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QRect, QPoint, QTimer
-from PySide6.QtGui import QPixmap, QIcon
+from PySide6.QtGui import QPixmap, QIcon, QFont
 from app.ui.image_preview import set_image, load_pixmap
 from app.ui.confirmation import confirm_clear
 from app.services.image_assets import resolve_path, ImageAssetError
@@ -1103,7 +1103,10 @@ class GenerateWorker(QThread):
         def prepare_group(group):
             import json
             from app.core.persona import active_camera_catalog, active_camera_pool, rule_text, active_action_presets, normalize
-            
+            from app.services import flow_master_v8
+            if (repo.get_setting(flow_master_v8.SETTING_KEY, flow_master_v8.SOURCE_PERSONA) or "") == flow_master_v8.SOURCE:
+                return flow_master_v8.configure_group(group)
+
             segments = group.get("segments", [])
             modes_present = set(str(s.get("performance_mode") or "").upper() == "PRAYING" and "PRAYING" or "TALKING" for s in segments)
             
@@ -1173,8 +1176,9 @@ class GenerateWorker(QThread):
                     self.attempted_requests += 1
 
                 from app.services import broll_presets
+                from app.services import flow_master_v8
                 config=broll_presets.get_video_enhancement(int(group.get('video_id') or 0)) or {}
-                if config.get('camera_enabled') and int(config.get('camera_limit') or 0)>0:
+                if group.get("instruction_source") != flow_master_v8.SOURCE and config.get('camera_enabled') and int(config.get('camera_limit') or 0)>0:
                     result=openai_service.generate_enhanced_prompts(model=self.model,core_prompt=effective_core,group=group,
                         config=config,preset_snapshot={},image_detail=self.image_detail,timeout=request_timeout,on_request=note_request)
                     plan=result['data']
@@ -1406,6 +1410,7 @@ class PromptCenterPage(QWidget):
         self.host_scroll.setFixedHeight(112)
         self.host_card_content=QWidget(objectName="scrollContent"); self.host_card_content.setMinimumHeight(92); self.host_card_content.setMaximumHeight(92)
         self.host_cards=QHBoxLayout(self.host_card_content); self.host_cards.setContentsMargins(0,0,0,0); self.host_cards.setSpacing(9); self.host_cards.setAlignment(Qt.AlignLeft | Qt.AlignTop); self.host_scroll.setWidget(self.host_card_content); layout.addWidget(self.host_scroll)
+        self._build_prompt_source_bar(layout)
 
         filters = QFrame(objectName="card")
         f = QHBoxLayout(filters)
@@ -1536,7 +1541,9 @@ class PromptCenterPage(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(True)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(82)
+        # The copy column keeps the sheet's color and weight, but Sheets often stores
+        # a 10pt body size that is too small to read in this list.
+        self.table.verticalHeader().setDefaultSectionSize(128)
         self.table.setMinimumWidth(0)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
 
@@ -1993,7 +2000,7 @@ class PromptCenterPage(QWidget):
         from app.services.sheet_style import segment_snapshots
         from app.ui.sheet_rich_text import SheetTextDelegate, attach
         if not hasattr(self, '_sheet_delegate'):
-            self._sheet_delegate = SheetTextDelegate(self.table)
+            self._sheet_delegate = SheetTextDelegate(self.table, min_point_size=18)
             self.table.setItemDelegateForColumn(4, self._sheet_delegate)
         self._segment_styles = {}
         for vid in {t['video_id'] for t in self.task_rows}:
@@ -2034,6 +2041,9 @@ class PromptCenterPage(QWidget):
 
             content = ((task["foreign_text"] or "") + "\n" + (task["prompt"] or "待填写图片提示词")) if is_image else (task["foreign_text"] or "")
             foreign = QTableWidgetItem(content)
+            copy_font = QFont(self.table.font())
+            copy_font.setPointSize(18)
+            foreign.setFont(copy_font)
             foreign.setToolTip(content)
             if is_image: foreign.setFlags(foreign.flags() & ~Qt.ItemIsEditable)
             attach(foreign, self._segment_styles.get(sid))
@@ -2383,6 +2393,93 @@ class PromptCenterPage(QWidget):
             QMessageBox.information(self,'保存完成',f'已保存 {dialog.saved_count} 条提示词，可检查后提交到 Flow。本次未调用 GPT API。')
 
 
+    def _build_prompt_source_bar(self, layout):
+        from app.services import flow_master_v8
+        card = QFrame(objectName="card")
+        box = QHBoxLayout(card)
+        box.setContentsMargins(8, 4, 8, 4)
+        box.setSpacing(8)
+        label = QLabel("提示词来源")
+        label.setStyleSheet("font-weight:700;")
+        box.addWidget(label)
+        self.source_persona = QPushButton("人物设置")
+        self.source_v8 = QPushButton("防穿帮指令")
+        for button, checked in (
+            (self.source_persona, "#2C2C2A"),
+            (self.source_v8, "#1F6B4A"),
+        ):
+            button.setCheckable(True)
+            button.setFixedHeight(28)
+            button.setStyleSheet(
+                "QPushButton{padding:2px 12px;border-radius:8px;border:1px solid #C9C9C4;background:#F4F4F1;color:#222;}"
+                f"QPushButton:checked{{background:{checked};color:white;border:1px solid {checked};font-weight:700;}}"
+            )
+        self.source_persona.setToolTip("生成时使用当前主播的人物设置：表演、动作和镜头。")
+        self.source_v8.setToolTip("生成时不读取人物设置。按参考图自动匹配防穿帮指令。")
+        self._source_group = QButtonGroup(self)
+        self._source_group.setExclusive(True)
+        self._source_group.addButton(self.source_persona)
+        self._source_group.addButton(self.source_v8)
+        saved = repo.get_setting(flow_master_v8.SETTING_KEY, flow_master_v8.SOURCE_PERSONA) or flow_master_v8.SOURCE_PERSONA
+        self.source_v8.setChecked(saved == flow_master_v8.SOURCE)
+        self.source_persona.setChecked(saved != flow_master_v8.SOURCE)
+        self._source_group.buttonClicked.connect(self._prompt_source_clicked)
+        box.addWidget(self.source_persona)
+        box.addWidget(self.source_v8)
+        self.source_hint = QLabel(objectName="muted")
+        self.source_hint.setWordWrap(True)
+        box.addWidget(self.source_hint, 1)
+        self.v8_open_file = QPushButton("打开指令文件", objectName="softBtn")
+        self.v8_open_file.setFixedHeight(28)
+        self.v8_open_file.setToolTip("用记事本修改防穿帮指令。保存后，下一次生成会读取这个文件。")
+        self.v8_open_file.clicked.connect(self._open_v8_file)
+        box.addWidget(self.v8_open_file)
+        self.v8_clear_voice = QPushButton("清除当前主播声纹", objectName="softBtn")
+        self.v8_clear_voice.setFixedHeight(28)
+        self.v8_clear_voice.setToolTip("清除后，下次用防穿帮指令生成时会按参考图重新锁定这个主播的声纹。")
+        self.v8_clear_voice.clicked.connect(self._clear_v8_voice)
+        box.addWidget(self.v8_clear_voice)
+        self._sync_prompt_source_hint()
+        layout.addWidget(card)
+
+    def _prompt_source_clicked(self, button):
+        from app.services import flow_master_v8
+        source = flow_master_v8.SOURCE if button is self.source_v8 else flow_master_v8.SOURCE_PERSONA
+        repo.set_setting(flow_master_v8.SETTING_KEY, source)
+        self._sync_prompt_source_hint()
+
+    def _sync_prompt_source_hint(self):
+        from app.services import flow_master_v8
+        if self.source_v8.isChecked():
+            path = flow_master_v8.ensure_instruction_file()
+            self.source_hint.setText(f"已分开：本次不读人物设置。修改后保存，下次生成会读取：{path}")
+            self.source_hint.setToolTip(str(path))
+            self.v8_clear_voice.setVisible(True)
+            self.v8_open_file.setVisible(True)
+        else:
+            self.source_hint.setText("当前使用人物设置里的表演、动作和镜头。")
+            self.v8_clear_voice.setVisible(False)
+            self.v8_open_file.setVisible(False)
+
+    def _open_v8_file(self):
+        from app.services import flow_master_v8
+        try:
+            path = flow_master_v8.open_instruction_file()
+        except OSError as exc:
+            QMessageBox.warning(self, "指令文件", f"没有打开指令文件：{exc}")
+            return
+        self.source_hint.setText(f"已分开：本次不读人物设置。修改后保存，下次生成会读取：{path}")
+        self.source_hint.setToolTip(str(path))
+
+    def _clear_v8_voice(self):
+        from app.services import flow_master_v8
+        hid = self.host.currentData()
+        if not hid:
+            QMessageBox.information(self, "声纹", "请先选择一个主播。")
+            return
+        flow_master_v8.clear_voice(hid)
+        QMessageBox.information(self, "声纹", "已清除当前主播的声纹锁。下次生成会按参考图重新判断。")
+
     def start_generation(self, mode):
         if self.worker and self.worker.isRunning():
             QMessageBox.information(self, "正在生成", "当前批量任务还没有结束。")
@@ -2415,14 +2512,16 @@ class PromptCenterPage(QWidget):
             return
 
         selected_tasks = [repo.get_prompt_task(sid) for sid in ids]
+        from app.services import flow_master_v8
+        use_v8 = (repo.get_setting(flow_master_v8.SETTING_KEY, flow_master_v8.SOURCE_PERSONA) or "") == flow_master_v8.SOURCE
         modes = {
             "PRAYING" if str(t["performance_mode"] or "").upper() == "PRAYING" else "TALKING"
             for t in selected_tasks if t
         }
         missing = []
-        if "TALKING" in modes and not (repo.get_setting("talking_base_prompt", "") or "").strip():
+        if not use_v8 and "TALKING" in modes and not (repo.get_setting("talking_base_prompt", "") or "").strip():
             missing.append("TALKING｜睁眼说话基础模板")
-        if "PRAYING" in modes and not (repo.get_setting("praying_base_prompt", "") or "").strip():
+        if not use_v8 and "PRAYING" in modes and not (repo.get_setting("praying_base_prompt", "") or "").strip():
             missing.append("PRAYING｜闭眼祷告基础模板")
         if missing:
             box = QMessageBox(self)
@@ -2455,9 +2554,14 @@ class PromptCenterPage(QWidget):
             f"图像精度：{image_detail}\n"
             f"按参考图合并后只需要 {image_requests} 次 API 请求。\n\n"
             "同一张图片的多个 Flow 片段会一次发送并一次返回。\n"
-            "GPT 只生成每段动态动作/镜头，并保留‘文案： ’占位；真实文案、基础模板、人物设置和固定底层限制由 Studio 本地拼接。\n"
-            "这样最终 Flow 提示词仍然完整，但不会让 GPT 为每个片段重复输出相同规则。\n"
-            "固定前缀仍会使用 Prompt Cache。\n\n开始吗？"
+            + (
+                "本次使用防穿帮指令，不读取人物设置、基础模板和核心提示词。\n"
+                "GPT 按参考图自动匹配外观、手部、眼睛、声纹和上下条接缝；真实文案仍由软件接上。\n\n开始吗？"
+                if use_v8 else
+                "GPT 只生成每段动态动作/镜头，并保留‘文案： ’占位；真实文案、基础模板、人物设置和固定底层限制由 Studio 本地拼接。\n"
+                "这样最终 Flow 提示词仍然完整，但不会让 GPT 为每个片段重复输出相同规则。\n"
+                "固定前缀仍会使用 Prompt Cache。\n\n开始吗？"
+            )
         )
         if answer != QMessageBox.Yes:
             return

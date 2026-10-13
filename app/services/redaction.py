@@ -1,5 +1,5 @@
 import re
-SENSITIVE={'authorization','api_key','access_token','refresh_token','client_secret','private_key','password','token'}
+SENSITIVE={'authorization','api_key','access_token','refresh_token','client_secret','private_key','password','token','totp','totp_secret'}
 def redact(value):
     if isinstance(value,dict):return {k:('[REDACTED]' if str(k).lower() in SENSITIVE else redact(v)) for k,v in value.items()}
     if isinstance(value,(list,tuple)):return [redact(v) for v in value]

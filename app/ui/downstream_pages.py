@@ -1807,7 +1807,6 @@ class DaVinciPage(BaseWorkflowPage):
         owner = self.parent()
         if owner and hasattr(owner, 'open_settings'):
             owner.open_settings()
-            self.reload()
 
     def selected_ids(self):
         rows = sorted({x.row() for x in self.table.selectionModel().selectedRows()})

@@ -238,6 +238,8 @@ class ProductionWorker:
             self.auto_production_state.setText(f'⚠ {len(image_errors)} 条图片待修复')
             self.auto_production_state.setToolTip('\n'.join(image_errors[:10]))
         if not tasks:return 0
+        tasks, account_id = self._limit_tasks_for_account(tasks)
+        if not tasks:return 0
 
         # Only configured normal channels participate in unattended dispatch.
         # Unconfigured slots (for example CH4-CH7 when the user only uses three
@@ -312,8 +314,11 @@ class ProductionWorker:
         for job in jobs:
             repo.set_dispatch_release_for_command(job['command_id'],job.get('release_at') or 0)
         self.bridge.publish_host_jobs(jobs)
+        sent=sum(len(j['tasks']) for j in jobs)
+        self._commit_account_use(account_id, sent)
         if hasattr(self,'auto_production_state'):
-            self.auto_production_state.setText(f"已发送 {sum(len(j['tasks']) for j in jobs)} 条到插件队列（每通道最多5条），剩余 {len(tasks)-sum(len(j['tasks']) for j in jobs)} 条等待空闲通道"+(f' · {len(image_errors)} 条图片异常' if image_errors else ''))
+            account_note=getattr(self,'_account_gate_note','')
+            self.auto_production_state.setText(f"已发送 {sent} 条到插件队列（每通道最多5条），剩余 {len(tasks)-sent} 条等待空闲通道"+(f' · {len(image_errors)} 条图片异常' if image_errors else '')+(f' · {account_note}' if account_note else ''))
             self.auto_production_state.setToolTip('\n'.join(image_errors[:10]) if image_errors else '等待网页插件领取；运行中任务与历史记录保留。')
         runtime_log.log('auto_flow_dispatch',jobs=len(jobs),segments=sum(len(j['tasks']) for j in jobs))
         self.dirty = True
@@ -413,6 +418,29 @@ class ProductionWorker:
             "capturePosition": float(repo.get_setting("flow_plugin_capture", "0.95") or 0.95),
         }
 
+    def _limit_tasks_for_account(self, tasks, rounds=None):
+        from app.services import flow_accounts
+        if rounds is None:
+            try: rounds=max(1,min(4,int(self.rounds or 1)))
+            except Exception: rounds=1
+        decision=flow_accounts.apply_account_gate(tasks, rounds)
+        self._account_gate_note=decision.get('message') or ''
+        self._account_gate_rounds=max(1,int(rounds or 1))
+        if not decision.get('apply'):
+            return list(tasks or []), None
+        if decision.get('hold'):
+            if hasattr(self,'auto_production_state'):
+                self.auto_production_state.setText(decision.get('message') or '正在切换 Flow 账号')
+                self.auto_production_state.setToolTip(decision.get('detail') or '')
+            return [], None
+        return list(decision.get('tasks') or []), decision.get('account_id')
+
+    def _commit_account_use(self, account_id, task_count):
+        if not account_id or not task_count:return
+        from app.services import flow_accounts
+        rounds=max(1,int(getattr(self,'_account_gate_rounds',1) or 1))
+        flow_accounts.commit_use(account_id, int(task_count)*rounds)
+
     def _dispatch_redo_ready_tasks(self):
         if bool(self.bridge.generation_control().get('paused')):
             return
@@ -435,6 +463,8 @@ class ProductionWorker:
                     memo[task['segment_id']]=now_t
                     runtime_log.log('rework_image_blocked',level='ERROR',segment_id=task['segment_id'],error=str(exc))
         pending=readable
+        if not pending:return
+        pending, account_id = self._limit_tasks_for_account(pending, 1)
         if not pending:return
         # Rework has priority over new work. Only channels that are alive AND idle take part;
         # offline channels are ignored; each wave uses the same bounded capacity.
@@ -476,6 +506,19 @@ class ProductionWorker:
                         v.append(t);used.add(t['segment_id'])
             except Exception as exc:
                 runtime_log.log('rework_fill_failed',level='WARNING',error=str(exc))
+        if account_id:
+            allowed={int(t['segment_id']) for t in pending}
+            extra=len(pending)-sum(1 for tasks in plan.values() for t in tasks if int(t['segment_id']) in allowed)
+            for key, tasks in list(plan.items()):
+                kept=[]
+                for task in tasks:
+                    if int(task['segment_id']) in allowed:
+                        kept.append(task)
+                        continue
+                    if extra>0:
+                        kept.append(task)
+                        extra-=1
+                plan[key]=kept
         fast=list(chosen.values())
         if not fast:return
         jobs=[];stamp=str(time.time_ns())
@@ -499,6 +542,7 @@ class ProductionWorker:
                             tasks=[channel_pool.task_stem(t,1) for t in ctasks],upload=need_upload)
         if jobs:
             self.bridge.publish_host_jobs(jobs)
+            self._commit_account_use(account_id, sum(len(j['tasks']) for j in jobs))
             self.dirty = True
 
     def notify_blocked_tasks(self):

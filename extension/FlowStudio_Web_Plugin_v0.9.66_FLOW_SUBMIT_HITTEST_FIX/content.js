@@ -150,11 +150,161 @@
       chrome.runtime.sendMessage({type:'FS_NATIVE_CLICK',x,y},result=>{
         clearTimeout(safetyTimer);restore();
         const err=chrome.runtime.lastError?.message;
-        if(err)return reply({ok:false,error:err,overlay_bypassed:overlayBypassed,hit:hitInfo});
-        reply({...((result&&typeof result==='object')?result:{ok:false,error:'native click 无响应'}),overlay_bypassed:overlayBypassed,hit:hitInfo});
+        if(!err && result?.ok)return reply({...result,overlay_bypassed:overlayBypassed,hit:hitInfo});
+        // Firefox has no chrome.debugger. Click the Generate control that was already hit-tested.
+        try{
+          if(hit && typeof hit.click==='function'){
+            const opts={bubbles:true,cancelable:true,composed:true,clientX:x,clientY:y,view:window,button:0};
+            hit.dispatchEvent(new PointerEvent('pointerdown',{...opts,buttons:1,pointerId:1,pointerType:'mouse',isPrimary:true}));
+            hit.dispatchEvent(new MouseEvent('mousedown',{...opts,buttons:1}));
+            hit.dispatchEvent(new PointerEvent('pointerup',{...opts,buttons:0,pointerId:1,pointerType:'mouse',isPrimary:true}));
+            hit.dispatchEvent(new MouseEvent('mouseup',{...opts,buttons:0}));
+            hit.click();
+            return reply({ok:true,method:'dom_click_fallback',overlay_bypassed:overlayBypassed,hit:hitInfo,debugger_error:err||result?.error||''});
+          }
+        }catch(e){return reply({ok:false,error:String(e?.message||e),overlay_bypassed:overlayBypassed,hit:hitInfo});}
+        reply({ok:false,error:err||result?.error||'native click 无响应',overlay_bypassed:overlayBypassed,hit:hitInfo});
       });
     }catch(error){clearTimeout(safetyTimer);restore();reply({ok:false,error:String(error?.message||error),overlay_bypassed:overlayBypassed});}
   });
+
+  function readSignedInAccount(){
+    // The signed-in account on THIS window. Never the first email in the page,
+    // because an account switcher lists every login and the first one is not this user.
+    const emailRe=/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig;
+    const scored=[];
+    for(const el of document.querySelectorAll('button,[role="button"],[aria-label],[data-email]')){
+      const label=[el.getAttribute('aria-label')||'', el.getAttribute('data-email')||'', el.getAttribute('alt')||''].join(' ');
+      const found=label.match(emailRe)||[];
+      if(!found.length)continue;
+      const text=label.toLowerCase();
+      let score=0;
+      if(/google account|google 账号|google 账户|google 帳戶/.test(text))score+=100;
+      if(el.hasAttribute('data-email'))score+=40;
+      if(el.closest('header,[role="banner"]'))score+=30;
+      if(/当前|current account|signed in|已登录/.test(text))score+=25;
+      if(el.closest('[role="menu"],[role="listbox"]'))score-=50;
+      if(score>0)scored.push({email:found[0],score,button:el});
+    }
+    scored.sort((a,b)=>b.score-a.score);
+    const best=scored[0];
+    return {email:(best?.email||'').trim(),button:best?.button||null};
+  }
+  function readSignedInEmail(){
+    return readSignedInAccount().email;
+  }
+  function readFlowAccount(){
+    const email=readSignedInEmail();
+    const raw=[document.body?.innerText||'', deepFlowText(document.documentElement)].join('\n');
+    return {ok:true,email,credits:flowCreditCount(raw)};
+  }
+  function flowCreditCount(text){
+    const raw=String(text||'');
+    const patterns=[
+      /(\d[\d,]*)\s*个\s*Google\s*Flow\s*点数/i,
+      /(\d[\d,]*)\s*个\s*点数/,
+      /(\d[\d,]*)\s*(?:Google\s*Flow\s*)?credits?/i,
+      /(\d[\d,]*)\s*积分/,
+      /(?:积分|剩余|余额)\s*[:：]?\s*(\d[\d,]*)/i
+    ];
+    for(const pattern of patterns){
+      const found=raw.match(pattern);
+      if(found){
+        const value=Number(String(found[1]).replace(/,/g,''));
+        if(Number.isFinite(value))return value;
+      }
+    }
+    return null;
+  }
+  function deepFlowText(root){
+    const parts=[];
+    const seen=new Set();
+    function visit(node, depth){
+      if(!node || depth>8 || seen.has(node))return;
+      seen.add(node);
+      if(node.shadowRoot){
+        parts.push(node.shadowRoot.textContent||'');
+        visit(node.shadowRoot, depth+1);
+      }
+      const children=node.querySelectorAll?node.querySelectorAll('*'):[];
+      for(const el of children){
+        if(el.shadowRoot)visit(el, depth+1);
+      }
+    }
+    try{visit(root, 0);}catch(_){}
+    return parts.join('\n');
+  }
+  chrome.runtime.onMessage.addListener((msg,_sender,sendResponse)=>{
+    if(msg?.type!=='FS_READ_ACCOUNT')return;
+    try{sendResponse(readFlowAccount());}catch(error){sendResponse({ok:false,error:String(error?.message||error)});}
+    return false;
+  });
+  function visiblePointCount(){
+    return flowCreditCount([document.body?.innerText||'', deepFlowText(document.documentElement)].join('\n'));
+  }
+  async function readPointsNow(wanted){
+    const wantedEmail=String(wanted||'').trim().toLowerCase();
+    let account=readSignedInAccount();
+    let email=account.email;
+    if(wantedEmail && email && email.toLowerCase()!==wantedEmail){
+      return {ok:true,email,credits:null,skipped:true};
+    }
+    let credits=visiblePointCount();
+    if(credits==null && account.button && (!wantedEmail || !email || email.toLowerCase()===wantedEmail)){
+      try{account.button.click();}catch(_){}
+      for(let attempt=0; attempt<6 && credits==null; attempt++){
+        await new Promise(resolve=>setTimeout(resolve, 400));
+        account=readSignedInAccount();
+        email=account.email||email;
+        if(wantedEmail && email && email.toLowerCase()!==wantedEmail)break;
+        credits=visiblePointCount();
+      }
+      try{document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true}));}catch(_){}
+    }
+    if(credits!=null){pageCredits=credits;pageCreditAt=Date.now();}
+    return {ok:true,email,credits};
+  }
+  chrome.runtime.onMessage.addListener((msg,_sender,sendResponse)=>{
+    if(msg?.type!=='FS_READ_POINTS')return;
+    readPointsNow(msg.email).then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));
+    return true;
+  });
+  let lastAccountPublish='';
+  let accountPublishTimer=0;
+  let pageCredits=null;
+  let pageCreditAt=0;
+  function cachedPageCredits(email){
+    const previous=lastAccountPublish.split('|')[0]||'';
+    if(previous && previous!==email.toLowerCase()){pageCredits=null;pageCreditAt=0;}
+    const now=Date.now();
+    const wait=pageCredits==null?4000:60000;
+    if(pageCreditAt && now-pageCreditAt<wait)return pageCredits;
+    pageCreditAt=now;
+    const raw=[document.body?.innerText||'', deepFlowText(document.documentElement)].join('\n');
+    const found=flowCreditCount(raw);
+    if(found!=null)pageCredits=found;
+    return pageCredits;
+  }
+  function publishThisWindowAccount(){
+    let email='';
+    try{email=readSignedInEmail();}catch(_){return;}
+    email=String(email||'').trim();
+    if(!email)return;
+    let credits=pageCredits;
+    try{credits=cachedPageCredits(email);}catch(_){}
+    const key=email.toLowerCase()+'|'+(credits==null?'':credits);
+    if(key===lastAccountPublish)return;
+    lastAccountPublish=key;
+    try{chrome.runtime.sendMessage({type:'FS_PAGE_ACCOUNT',email,credits});}catch(_){}
+  }
+  function scheduleAccountPublish(){
+    clearTimeout(accountPublishTimer);
+    accountPublishTimer=setTimeout(publishThisWindowAccount,700);
+  }
+  scheduleAccountPublish();
+  if(document.documentElement){
+    new MutationObserver(()=>scheduleAccountPublish()).observe(document.documentElement,{subtree:true,childList:true});
+  }
 
   chrome.runtime.onMessage.addListener(msg=>{
     if(msg?.type==='FS_BACKGROUND_WAKE' && (!state.job || String(msg.command_id||'')===String(state.job.command_id||''))){
@@ -873,7 +1023,7 @@
       state.generationCommand = '';
       if (incoming) {
         state.message = `已从 Studio 接收 ${state.tasks.length} 个任务，正在检查集合并准备自动上传…`;
-        emit('web_plugin_bound',{task_count:state.tasks.length,image_total:getExpectedNames(incoming).length,plugin_version:'0.9.66'});
+        emit('web_plugin_bound',{task_count:state.tasks.length,image_total:getExpectedNames(incoming).length,plugin_version:'0.9.67'});
         emit('web_plugin_tasks_received',{task_count:state.tasks.length,image_total:getExpectedNames(incoming).length});
         state.lastBoundEmit=Date.now();
         startScanner();
@@ -890,7 +1040,7 @@
         task_total:state.tasks.length,
         image_recognized:recognizedMediaCount(),
         image_total:expectedMediaTotal(),
-        plugin_version:'0.9.66'
+        plugin_version:'0.9.67'
       });
       state.lastBoundEmit=Date.now();
     }
@@ -1835,10 +1985,11 @@
     const dc=state.downloadCounts;
     const generatedSuccess=(dc.ready||0)+(dc.downloading||0)+(dc.complete||0);
     const waitingGeneration=Math.max(0,planned-(state.generationSubmitted+state.generationFailed));
+    const pluginLogo=chrome.runtime.getURL('icons/icon128.png');
     const html = `
-      <button id="fs-launcher" title="打开 Flow Studio 插件">F</button>
+      <button id="fs-launcher" title="Flow Studio 0.9.67"><img src="${pluginLogo}" alt="Flow Studio"></button>
       <section id="fs-panel" class="${state.open?'':'fs-hidden'}">
-        <header><div class="fs-brand"><span>F</span><div><b>Flow Studio 网页插件</b><small>v0.9.66 · Flow 提交命中检测修复 · 素材固定8秒</small></div></div><div class="fs-head-state ${state.connected?'on':'off'}">● ${state.connected?'本地 Studio 已连接':'本地 Studio 未连接'}</div><button id="fs-close">×</button></header>
+        <header><div class="fs-brand"><img src="${pluginLogo}" alt=""><div><b>Flow Studio 网页插件</b><small>v0.9.67 · 读取 Flow 点数</small></div></div><div class="fs-head-state ${state.connected?'on':'off'}">● ${state.connected?'本地 Studio 已连接':'本地 Studio 未连接'}</div><button id="fs-close">×</button></header>
         <div class="fs-bridge-config"><span>本地连接</span><code>127.0.0.1:</code><input id="fs-bridge-port" type="number" min="1024" max="65535" value="${esc(state.bridgePort)}"><button id="fs-save-port">保存端口并重连</button><small>需与 Flow Studio → Flow设置 → 本地 Bridge 端口一致</small></div>
         <div class="fs-summary">
           <div><span>AI 主播</span><b>${esc(j.host_name||'—')}</b></div>

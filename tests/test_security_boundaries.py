@@ -18,9 +18,18 @@ class SecurityTests(unittest.TestCase):
             image=Path(folder)/'a.png';image.write_bytes(b'image');secret=Path(folder)/'secret.json';secret.write_text('{}')
             self.assertFalse(published_file(str(image),[]));self.assertTrue(published_file(str(image),[{'image_files':[{'path':str(image)}]}]))
             self.assertFalse(published_file(str(secret),[{'path':str(secret)}]))
+    def test_image_cache_rejects_unknown_column(self):
+        import sqlite3
+        from app.services import flow_image_cache as cache
+        con = sqlite3.connect(':memory:')
+        con.execute('CREATE TABLE flow_image_cache(image_id TEXT, cache_path TEXT, updated_at REAL)')
+        with self.assertRaises(cache.FlowImageCacheError):
+            cache._save(con, 'x', not_a_column='y')
+        with self.assertRaises(cache.FlowImageCacheError):
+            cache._row(con, not_a_column='y')
     def test_redact_nested_secrets(self):
-        v=redact({'refresh_token':'private','nested':[{'message':'Bearer abc.def-secret'}]})
-        self.assertNotIn('private',str(v));self.assertNotIn('abc.def-secret',str(v))
+        v=redact({'refresh_token':'private','totp_secret':'JBSWY3DPEHPK3PXP','nested':[{'message':'Bearer abc.def-secret'}]})
+        self.assertNotIn('private',str(v));self.assertNotIn('abc.def-secret',str(v));self.assertNotIn('JBSWY3DPEHPK3PXP',str(v))
     def test_real_bridge_rejects_cross_origin_and_private_file(self):
         import socket,http.client
         from unittest.mock import patch
@@ -45,6 +54,21 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(code,403)
             code,_,_=request('POST','/event','[]',{'X-FlowStudio-Token':bridge.token,'Content-Type':'application/json'})
             self.assertEqual(code,400)
+            from app.services import flow_accounts
+            with flow_accounts._LOCK:
+                previous=flow_accounts._REQUEST
+                flow_accounts._REQUEST={'id':'req-secret','account_id':1,'email':'a@example.com','action':'login','done':False}
+            try:
+                code,body,_=request('POST','/flow-account-credential',json.dumps({'id':'req-secret'}),{'X-FlowStudio-Token':bridge.token,'Content-Type':'application/json'})
+            finally:
+                with flow_accounts._LOCK:
+                    flow_accounts._REQUEST=previous
+            self.assertEqual(code,200)
+            payload=json.loads(body)
+            self.assertEqual(payload,{'ok':True,'action':'login','email':'a@example.com'})
+            self.assertNotIn('password',payload)
+            self.assertNotIn('totp',payload)
+            self.assertNotIn('totp_secret',payload)
             bridge.stop()
 
     def test_public_download_blocks_private_and_mixed_dns(self):
@@ -149,7 +173,7 @@ class SecurityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             copied=module.copy_plugin(script.parents[1],folder)
             manifest=json.loads((Path(folder)/module.PLUGIN_REL/'manifest.json').read_text(encoding='utf-8'))
-            self.assertEqual(manifest['version'],'0.9.66')
+            self.assertEqual(manifest['version'],'0.9.67')
             self.assertTrue(copied)
             self.assertFalse((Path(folder)/module.PLUGIN_REL/'tests').exists())
 if __name__=='__main__':unittest.main()

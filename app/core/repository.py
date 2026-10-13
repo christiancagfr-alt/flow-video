@@ -690,6 +690,22 @@ def list_flow_tasks(recipient_id=None, host_id=None, status_filter="全部", *, 
         return apply_choices(con, con.execute(sql, args).fetchall())
 
 
+def count_waiting_flow_submissions(work_date=None):
+    """Count videos waiting to be submitted. Same filter as the account-page plan, without loading every row."""
+    sql = """
+        SELECT COUNT(*) AS c
+        FROM flow_segments fs
+        JOIN videos v ON v.id = fs.video_id
+        WHERE TRIM(COALESCE(fs.prompt,'')) <> ''
+          AND COALESCE(fs.prompt_review_status,'待检查') = '已提交'
+          AND COALESCE(fs.generation_command,'') = ''
+          AND COALESCE(NULLIF(fs.flow_status,''),'待生成') IN ('待生成', '已准备')
+    """
+    with read_connection(work_date) as con:
+        row = con.execute(sql).fetchone()
+    return int(row["c"] or 0) if row else 0
+
+
 
 def set_flow_task_status(segment_id, status, error=""):
     with connect() as con:

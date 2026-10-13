@@ -26,6 +26,14 @@ PRESETS = {
         "position": "画面中间", "caption_mode": "自由文案动画（不对口型）",
         "free_animation": "持续向上滚动", "animation_speed": 120,
     },
+    # 字幕只在画面中部的固定窗口里上移，到窗口边缘淡出，不漂出画面顶部
+    "滚动字幕 · 中间固定": {
+        "text": "#FFFFFF", "outline": "#1C1917", "highlight": "#FACC15", "outline_width": 4,
+        "effect": "outline", "font": "Arial", "font_size": 72, "line_length": 18,
+        "letter_spacing": 0, "line_spacing": 110, "margin_v": 520, "max_words": 12, "max_lines": 8,
+        "position": "画面中间", "caption_mode": "自由文案动画（不对口型）",
+        "free_animation": "中间固定滚动", "animation_speed": 120,
+    },
     "双眼皮 经典红黄黑": {"text": "#FF0000", "outline": "#FFFF00", "highlight": "#111111", "outline_width": 3,
                            "effect": "double_outline", "font": "Arial", "font_size": 90, "line_length": 26,
                            "letter_spacing": -4, "line_spacing": 100, "margin_v": 500,

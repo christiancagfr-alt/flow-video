@@ -176,7 +176,15 @@ def classify_requirement(req):
     return "PRAYING" if "闭眼" in str(req or "") else "TALKING"
 
 
-def parse_sheet_rows(rows):
+def parse_sheet_rows(rows, spec=None):
+    from app.services.sheet_columns import MODE_CUSTOM, load_spec
+    spec = spec or load_spec()
+    if spec.get('mode') == MODE_CUSTOM:
+        return _parse_custom_rows(rows, spec)
+    return _parse_template_rows(rows)
+
+
+def _parse_template_rows(rows):
     hidx = find_header(rows)
     hmap = header_map(rows[hidx])
     # Task source contract: anchor material links always come from column J.
@@ -229,6 +237,60 @@ def parse_sheet_rows(rows):
         "tasks": tasks,
         "header_map": {h: hmap[norm(h)] for h in READ_HEADERS},
         "write_header_map": opt_map,
+    }
+
+
+def _cell(row, index, keep_spacing):
+    if index is None or index >= len(row):
+        return ''
+    value = row[index]
+    return value if keep_spacing else str(value).strip()
+
+
+def _parse_custom_rows(rows, spec):
+    """Read the task block from the columns the user picked. Header names are optional."""
+    from app.services.sheet_columns import custom_problem, normalize_date, resolve_columns
+    problem = custom_problem(rows, spec)
+    if problem:
+        raise ValueError(problem)
+    resolved = resolve_columns(rows, spec)
+    start = None
+    end = None
+    for ri, row in enumerate(rows):
+        exact = {norm(c) for c in row if norm(c)}
+        if start is None:
+            if norm(START_MARKER) in exact:
+                start = ri
+                log.info("命中起始标记 %s：第 %d 行", START_MARKER, ri + 1)
+            continue
+        if norm(END_MARKER) in exact:
+            end = ri
+            log.info("命中结束标记 %s：第 %d 行；停止继续读取", END_MARKER, ri + 1)
+            break
+    if start is None:
+        raise ValueError(f"未找到“{START_MARKER}”")
+    if end is None:
+        raise ValueError(f"找到“{START_MARKER}”后未找到“{END_MARKER}”")
+
+    tasks = []
+    for ri in range(start + 1, end):
+        row = rows[ri]
+        task = {"表格行号": ri + 1}
+        for header in READ_HEADERS:
+            task[header] = _cell(row, resolved.get(header), header in ("中文内容", "外文内容"))
+        task["日期"] = normalize_date(_cell(row, resolved.get("日期"), False))
+        task["模式"] = classify_requirement(task.get("需求说明"))
+        if any(norm(task.get(key, "")) for key in ("需求人员", "主播名称", "中文内容", "外文内容", "主播图片链接")):
+            tasks.append(task)
+    header = {key: resolved[key] for key in READ_HEADERS if resolved.get(key) is not None}
+    write_map = {key: resolved[key] for key in WRITE_HEADERS if resolved.get(key) is not None}
+    return {
+        "header_row": start + 1,
+        "start_row": start + 1,
+        "end_row": end + 1,
+        "tasks": tasks,
+        "header_map": header,
+        "write_header_map": write_map,
     }
 
 
@@ -293,6 +355,8 @@ def init_db():
     cols={r[1] for r in con.execute("PRAGMA table_info(tasks)").fetchall()}
     if "content_key" not in cols:
         con.execute("ALTER TABLE tasks ADD COLUMN content_key TEXT NOT NULL DEFAULT ''")
+    if "sheet_date" not in cols:
+        con.execute("ALTER TABLE tasks ADD COLUMN sheet_date TEXT NOT NULL DEFAULT ''")
     con.execute("CREATE INDEX IF NOT EXISTS idx_tasks_content_key ON tasks(spreadsheet_id,gid,content_key)")
     con.commit()
     return con
@@ -425,6 +489,10 @@ def import_tasks(parsed, sid, gid):
                     (sid, gid, sheet_row) + signature + (content_key, now, now),
                 )
                 imported += 1
+            con.execute(
+                "UPDATE tasks SET sheet_date=? WHERE spreadsheet_id=? AND gid=? AND sheet_row=?",
+                (str(t.get("日期") or ""), sid, gid, sheet_row),
+            )
     
             if '_source_styles' in t:
                 task_id = con.execute('SELECT id FROM tasks WHERE spreadsheet_id=? AND gid=? AND sheet_row=?', (sid,gid,sheet_row)).fetchone()[0]
@@ -1072,16 +1140,24 @@ def sync_sheet(progress_callback=None):
         raise PermissionError("Google Sheet CSV 返回登录页面。请确认表格当前可由该链接读取；后续可扩展为 OAuth 读取。")
     _report_progress(progress_callback, 16, "解析任务表", f"已读取 {len(raw)} 字节，正在解析任务区间…")
     rows = list(csv.reader(io.StringIO(txt)))
+    from app.services.sheet_columns import MODE_CUSTOM, load_spec, resolve_columns
     from app.services.sheet_links import overlay_sheet_links
+    spec = load_spec()
     sheets = None
+    title = ''
     try:
         _, sheets = google_services(interactive=False)
         title = resolve_sheet_title(sheets, sid, gid) if sheets else ''
-        rows = overlay_sheet_links(rows, find_header(rows), sheets, sid, title)
+        if spec.get('mode') == MODE_CUSTOM:
+            image_column = resolve_columns(rows, spec).get('主播图片链接')
+            link_columns = [] if image_column is None else [image_column]
+            rows = overlay_sheet_links(rows, -1, sheets, sid, title, link_columns=link_columns)
+        else:
+            rows = overlay_sheet_links(rows, find_header(rows), sheets, sid, title)
     except Exception:
         log.exception('[SHEET_LINK_ERROR] 超链接元数据读取失败；保留原始 CSV，纯 URL 可继续使用')
         sheets = None
-    parsed = parse_sheet_rows(rows)
+    parsed = parse_sheet_rows(rows, spec)
     from app.services.sheet_style import enrich
     enrich(sheets, sid, title if sheets else '', parsed)
     share_group_links(parsed['tasks'])
@@ -1143,7 +1219,7 @@ def promote_ready_to_studio(task_ids=None) -> dict:
         con.execute("BEGIN IMMEDIATE")
         rows = con.execute(
             """SELECT id,spreadsheet_id,gid,sheet_row,recipient,anchor_name,chinese_text,foreign_text,
-                      mode,drive_url,matched_asset_path,status,content_key,created_at
+                      mode,drive_url,matched_asset_path,status,content_key,created_at,sheet_date
                  FROM tasks WHERE status='READY_FOR_GPT' AND sheet_row>0 ORDER BY recipient,anchor_name,sheet_row"""
         ).fetchall()
         if task_ids is not None:
@@ -1154,7 +1230,7 @@ def promote_ready_to_studio(task_ids=None) -> dict:
         fixed_code = studio_repo.get_setting("default_code", "ZB") or "ZB"
         creator = studio_repo.default_creator()
         for r in rows:
-            task_id, sid, gid, sheet_row, recipient, anchor, chinese, foreign, mode, drive_url, asset_path, status, content_key, created_at = r
+            task_id, sid, gid, sheet_row, recipient, anchor, chinese, foreign, mode, drive_url, asset_path, status, content_key, created_at, sheet_date = r
             source_task_id = _source_task_key(sid, gid, content_key)
             link = con.execute("SELECT video_id FROM production_links WHERE task_id=?", (task_id,)).fetchone()
             with studio_connect() as scon:
@@ -1208,7 +1284,8 @@ def promote_ready_to_studio(task_ids=None) -> dict:
                     else:skipped += 1
                     continue
             from app.core import work_dates
-            original_day=work_dates.canonical(created_at)
+            from app.services.sheet_columns import task_work_day
+            original_day=task_work_day(sheet_date, created_at)
             task_date=original_day.replace("-", "") if original_day else work_dates.LEGACY
             rid = studio_repo.find_or_create_recipient(recipient or "未命名接收人", fixed_code, creator, task_date)
             hid = studio_repo.find_or_create_host(rid, anchor or "未命名主播")

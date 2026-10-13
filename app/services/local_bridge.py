@@ -355,12 +355,19 @@ class FlowStudioBridge:
                         } for c in repo.list_channel_pool(enabled_only=True) if str(c['collection_url'] or '').strip()]
                     except Exception as exc:
                         runtime_log.log('bridge_channel_config_read_failed',level='ERROR',error=str(exc))
+                    read_points = None
+                    try:
+                        from app.services import flow_accounts
+                        read_points = flow_accounts.pending_point_read()
+                    except Exception:
+                        read_points = None
                     return self._json(200, {
                         "ok": True,
                         "version": version,
                         "jobs": jobs,
                         "channels": channels,
                         "focus_requests": bridge.focus_requests(),
+                        "read_points": read_points,
                         "scheduled_total": len(all_jobs),
                         "released_total": len(jobs),
                         "server_time": now,
@@ -380,7 +387,15 @@ class FlowStudioBridge:
                     return self._json(200, {"ok": True, "hosts": bridge.web_plugin_state()})
 
                 if self.path.startswith("/generation-control"):
-                    return self._json(200, bridge.generation_control())
+                    payload = bridge.generation_control()
+                    try:
+                        from app.services import flow_accounts
+                        request = flow_accounts.public_request().get('account_request')
+                        if request:
+                            payload['account_request'] = request
+                    except Exception:
+                        pass
+                    return self._json(200, payload)
 
                 if self.path.startswith("/status"):
                     return self._json(200, bridge.status())
@@ -444,6 +459,23 @@ class FlowStudioBridge:
                     if data.get("request_scan"):
                         bridge.request_progress_scan()
                     return self._json(200, bridge.generation_control())
+
+                if self.path.startswith("/flow-account-credential"):
+                    try:
+                        from app.services import flow_accounts
+                        return self._json(200, flow_accounts.credential_for(str(data.get("id") or "")))
+                    except ValueError as exc:
+                        return self._json(400, {"ok": False, "error": str(exc)})
+                    except Exception:
+                        return self._json(500, {"ok": False, "error": "登录信息读取失败"})
+
+                if self.path.startswith("/flow-account-result"):
+                    try:
+                        from app.services import flow_accounts
+                        flow_accounts.finish_request(data)
+                        return self._json(200, {"ok": True})
+                    except ValueError as exc:
+                        return self._json(400, {"ok": False, "error": str(exc)})
 
                 if self.path.startswith("/source-result"):
                     job_id=str(data.get('job_id') or '')
@@ -644,6 +676,14 @@ class FlowStudioBridge:
                     self._event_ids = {k:v for k,v in self._event_ids.items() if v >= cutoff}
             row["_received_at"] = now
             runtime_log.log('bridge_event', type=row.get('type',''), channel=row.get('channel_key',''), channel_id=row.get('channel_id',0), host_id=row.get('host_id',0), segment_id=row.get('segment_id'), command_id=row.get('command_id',''), message=row.get('message',''), error=row.get('error',''), pending=row.get('pending'), submitted=row.get('submitted'), generating=row.get('generating'), failed=row.get('failed'), downloaded=row.get('downloaded'), generation_ids=row.get('generation_ids'))
+            # Account scans have no channel id, so the task-center telemetry path drops them.
+            try:
+                from app.services.flow_accounts import observe_page, plugin_account_report
+                report = plugin_account_report(row)
+                if report:
+                    observe_page(report[0], report[1])
+            except Exception as exc:
+                runtime_log.log('flow_account_observe_failed', level='WARNING', error=str(exc)[:180])
             # Any authenticated event is proof that the browser extension is alive.
             self._last_heartbeat = now
             if row.get('type')=='generation_paused':

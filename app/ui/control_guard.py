@@ -4,7 +4,17 @@ from PySide6.QtWidgets import QApplication, QAbstractSpinBox, QComboBox, QSlider
 
 
 class ControlGuard(QObject):
+    # Theme changes and page paints emit thousands of these. Walking parents for each one froze the window.
+    _INTERESTING = frozenset((
+        QEvent.Type.Show,
+        QEvent.Type.MouseButtonPress,
+        QEvent.Type.FocusOut,
+        QEvent.Type.Wheel,
+    ))
+
     def eventFilter(self, obj, event):
+        if event.type() not in self._INTERESTING:
+            return False
         control = obj
         while isinstance(control, QWidget) and not isinstance(control, (QAbstractSpinBox, QComboBox, QSlider)):
             control = control.parentWidget()

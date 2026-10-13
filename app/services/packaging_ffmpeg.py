@@ -26,7 +26,7 @@ def compatibility_reason(payload):
     # Do not silently approximate legacy CSS animation/typography with ASS.
     if payload.get('captions') and not payload.get('reelsStyle'):
         return '原有 CSS 字幕样式；选择 Reels 字幕样式后可使用快速渲染'
-    if (payload.get('reelsStyle') or {}).get('free_animation')=='持续向上滚动':
+    if (payload.get('reelsStyle') or {}).get('free_animation') in ('持续向上滚动', '中间固定滚动'):
         return '连续滚动字幕'
     if (payload.get('watermark') or {}).get('enabled'):
         return '旧版水印'

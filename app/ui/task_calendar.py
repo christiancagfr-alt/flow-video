@@ -1,6 +1,7 @@
 from PySide6.QtCore import Qt,QDate,QTimer
 from PySide6.QtGui import QColor,QPen
 from PySide6.QtWidgets import QCalendarWidget
+from shiboken6 import isValid
 from app.core import work_dates
 from app.ui import workspace_intake
 
@@ -10,9 +11,17 @@ class TaskCalendar(QCalendarWidget):
         self.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
         self.refresh_marks()
         self.mark_timer=QTimer(self);self.mark_timer.timeout.connect(self.refresh_marks);self.mark_timer.start(3000)
+    def _stop_marks(self):
+        timer=getattr(self,'mark_timer',None)
+        if timer is not None and isValid(timer):timer.stop()
+    def hideEvent(self,event):
+        # Closing the date dialog deletes this widget. A queued timeout must not redraw it.
+        self._stop_marks();super().hideEvent(event)
     def refresh_marks(self):
+        if not isValid(self):
+            self._stop_marks();return
         self.task_days=work_dates.task_dates() | workspace_intake.task_dates()
-        self.updateCells()
+        if isValid(self):self.updateCells()
     def paintCell(self,painter,rect,day):
         super().paintCell(painter,rect,day)
         selected=day==self.selectedDate();has_task=day.toString('yyyy-MM-dd') in self.task_days

@@ -93,6 +93,16 @@ function dlEvent(e,type,extra={}){return Promise.resolve().then(()=>pushEvent({.
 function dlVideoURL(value){
  try{const u=new URL(value);return u.protocol==='https:'&& /(^|\.)(flow-content\.google|googleusercontent\.com|googleapis\.com|googlevideo\.com|google\.com)$/.test(u.hostname)?u.href:null}catch(_){return null}
 }
+async function dlStartDownload(entry){
+  const filename=String(entry.filename||'');
+  const options={url:entry.url,filename,saveAs:false,conflictAction:'overwrite'};
+  try{return await chrome.downloads.download(options);}
+  catch(error){
+    const message=String(error?.message||error);
+    if(!/conflictAction|illegal|filename|invalid/i.test(message))throw error;
+    return await chrome.downloads.download({url:entry.url,filename:filename.split(/[\\/]/).pop()||filename,saveAs:false});
+  }
+}
 async function dlPump(){
  if(dlPumping)return;dlPumping=true;
  try{
@@ -112,7 +122,7 @@ async function dlPump(){
    await dlMutate(()=>{first.status='starting';first.attempts++;});
    try{
     await dlLog('chrome_download_call',dlEntry(first));
-    const id=await dlBounded(chrome.downloads.download({url:first.url,filename:first.filename,saveAs:false,conflictAction:'overwrite'}).then(async id=>{
+    const id=await dlBounded(dlStartDownload(first).then(async id=>{
       await dlMutate(()=>{first.download_id=id;first.status='downloading';});return id;
     }),'DOWNLOAD_START');
     await dlLog('chrome_download_accepted',dlEntry(first));
@@ -144,7 +154,7 @@ async function dlProbeWaiting(){ return; }
 function dlSummary(group, entries) {
  const counts={};for(const e of entries)counts[e.status]=(counts[e.status]||0)+1;
  const d=dlDiagnostics.get(group);
- const parts=['v0.9.66', '已登记 '+entries.length, '待绑定 '+(counts.reserved||0), '待下载 '+(counts.ready||0), '下载完成 '+(counts.complete||0)];
+ const parts=['v0.9.67', '已登记 '+entries.length, '待绑定 '+(counts.reserved||0), '待下载 '+(counts.ready||0), '下载完成 '+(counts.complete||0)];
  if(d)parts.push('集合视频 '+d.videos,'ID匹配 '+d.boundMatches,'结果已识别 '+d.recognized);
  const error=entries.find(e=>e.error && e.status!=='complete');
  if(error)parts.push(error.error);

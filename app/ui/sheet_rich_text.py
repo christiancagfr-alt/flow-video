@@ -12,13 +12,14 @@ def color(value):
     return QColor.fromRgbF(*(max(0.0, min(1.0, float(value.get(k, 0)))) for k in ('red', 'green', 'blue')), float(value.get('alpha', 1)))
 
 
-def apply(document, snapshot):
+def apply(document, snapshot, min_point_size=0):
     cell_format = dict(snapshot.get('defaults', {}))
     cell_format.update(snapshot.get('cell', {}).get('effectiveFormat', snapshot.get('cell', {}).get('userEnteredFormat', {})))
     alignments = {'LEFT':Qt.AlignLeft, 'CENTER':Qt.AlignHCenter, 'RIGHT':Qt.AlignRight}
     if cell_format.get('horizontalAlignment') in alignments:
         cursor=QTextCursor(document);cursor.select(QTextCursor.Document)
         block=QTextBlockFormat();block.setAlignment(alignments[cell_format['horizontalAlignment']]);cursor.mergeBlockFormat(block)
+    floor = float(min_point_size or 0)
     # QTextCursor positions, like Sheets textFormatRuns, count UTF-16 code units.
     for start, end, fmt in runs(snapshot):
         cursor = QTextCursor(document)
@@ -32,7 +33,11 @@ def apply(document, snapshot):
         style.setFontUnderline(bool(fmt.get('underline')))
         style.setFontStrikeOut(bool(fmt.get('strikethrough')))
         if fmt.get('fontFamily'): style.setFontFamilies([fmt['fontFamily']])
-        if fmt.get('fontSize'): style.setFontPointSize(float(fmt['fontSize']))
+        size = float(fmt['fontSize']) if fmt.get('fontSize') else 0
+        if floor:
+            size = max(size, floor)
+        if size:
+            style.setFontPointSize(size)
         cursor.setCharFormat(style)
 
 
@@ -43,16 +48,34 @@ def attach(item, snapshot):
 
 
 class SheetTextDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None, min_point_size=0):
+        super().__init__(parent)
+        self.min_point_size = float(min_point_size or 0)
+
+    def _readable_font(self, font):
+        if self.min_point_size <= 0:
+            return font
+        sized = QFont(font)
+        current = sized.pointSizeF()
+        if current <= 0 and sized.pixelSize() > 0:
+            current = sized.pixelSize() * 72 / 96
+        if current < self.min_point_size:
+            sized.setPointSizeF(self.min_point_size)
+        return sized
+
     def _snapshot(self, index):
         value = index.data(STYLE_ROLE)
         return value if value and value.get('text') == index.data(Qt.DisplayRole) else None
 
     def _document(self, index, font, width):
         doc = QTextDocument()
+        font = self._readable_font(font)
         doc.setDefaultFont(font)
         doc.setDocumentMargin(4)
         doc.setPlainText(index.data(Qt.DisplayRole) or '')
-        apply(doc, self._snapshot(index))
+        snapshot = self._snapshot(index)
+        if snapshot:
+            apply(doc, snapshot, self.min_point_size)
         doc.setTextWidth(max(20, width))
         return doc
 
@@ -93,12 +116,13 @@ class SheetTextDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         editor = QTextEdit(parent)
         editor.setAcceptRichText(False)
+        editor.setFont(self._readable_font(option.font))
         return editor
 
     def setEditorData(self, editor, index):
         editor.setPlainText(index.data(Qt.EditRole) or '')
         snapshot = self._snapshot(index)
-        if snapshot: apply(editor.document(), snapshot)
+        if snapshot: apply(editor.document(), snapshot, self.min_point_size)
 
     def setModelData(self, editor, model, index):
         text = editor.toPlainText()

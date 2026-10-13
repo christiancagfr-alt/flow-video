@@ -213,12 +213,16 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         head = QHBoxLayout(); head.addWidget(QLabel("任务列表", objectName="sectionTitle")); head.addStretch(1)
         self.material_count = QLabel("0 个视频", objectName="muted"); head.addWidget(self.material_count)
         box.addLayout(head)
-        self.search = QLineEdit(); self.search.setPlaceholderText("搜索接收人 / 主播 / 文件名…")
+        self.search = QLineEdit(); self.search.setPlaceholderText("搜索文件名…")
         self.search.textChanged.connect(self._filter_tree)
         box.addWidget(self.search)
         self.task_tree = QTreeWidget()
         self.task_tree.setObjectName("packagingTaskList")
         self.task_tree.setHeaderHidden(True)
+        self.task_tree.setIndentation(0)
+        self.task_tree.setRootIsDecorated(False)
+        self.task_tree.setItemsExpandable(False)
+        self.task_tree.setTextElideMode(Qt.ElideRight)
         self.task_tree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.task_tree.itemSelectionChanged.connect(self._tree_selected)
         box.addWidget(self.task_tree, 1)
@@ -701,40 +705,40 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         parent = p.parent.name or "本地视频"; grand = p.parent.parent.name if p.parent.parent != p.parent else "本地任务"
         return grand or "本地任务", parent
 
+    def _video_item(self, path, state):
+        status = state.get("status", "未包装")
+        icon = "✓" if status == "已完成" else ("⚠" if status == "失败" else "•")
+        name = Path(path).name
+        item = QTreeWidgetItem([f"{icon}  {name}"])
+        item.setData(0, Qt.UserRole, path)
+        item.setTextAlignment(0, Qt.AlignLeft | Qt.AlignVCenter)
+        item.setToolTip(0, name)
+        return item
+
     def _rebuild_tree(self, select_first=False):
-        keep = self._current_path; self.task_tree.blockSignals(True); self.task_tree.clear(); self._tree_items = {}; groups = {}; chosen = None
+        keep = self._current_path; self.task_tree.blockSignals(True); self.task_tree.clear(); self._tree_items = {}; chosen = None
         for path in self._project.get("order", []):
             state = self._project["videos"].get(path)
             if not state: continue
-            recipient, host = self._group_for_path(path)
-            ritem = groups.get((recipient,))
-            if not ritem:
-                ritem = QTreeWidgetItem([f"👤 {recipient}"]); groups[(recipient,)] = ritem; self.task_tree.addTopLevelItem(ritem)
-            hitem = groups.get((recipient, host))
-            if not hitem:
-                hitem = QTreeWidgetItem([f"▶ {host}"]); groups[(recipient, host)] = hitem; ritem.addChild(hitem)
-            status = state.get("status", "未包装")
-            icon = "✓" if status == "已完成" else ("⚠" if status == "失败" else "•")
-            v = QTreeWidgetItem([f"{icon}  {Path(path).name}"]); v.setData(0, Qt.UserRole, path); hitem.addChild(v); self._tree_items[path] = v
-            if path == keep: chosen = v
-        self.task_tree.expandAll(); self.task_tree.blockSignals(False)
+            item = self._video_item(path, state)
+            self.task_tree.addTopLevelItem(item); self._tree_items[path] = item
+            if path == keep: chosen = item
+        self.task_tree.blockSignals(False)
         self.material_count.setText(f"{len(self._project.get('order', []))} 个视频")
         if chosen: self.task_tree.setCurrentItem(chosen)
-        elif select_first:
-            for i in range(self.task_tree.topLevelItemCount()):
-                r = self.task_tree.topLevelItem(i)
-                if r.childCount() and r.child(0).childCount(): self.task_tree.setCurrentItem(r.child(0).child(0)); break
+        elif select_first and self.task_tree.topLevelItemCount():
+            self.task_tree.setCurrentItem(self.task_tree.topLevelItem(0))
+        if self.search.text().strip(): self._filter_tree(self.search.text())
 
     def _filter_tree(self, text):
         needle = str(text or "").strip().lower()
         for i in range(self.task_tree.topLevelItemCount()):
-            r = self.task_tree.topLevelItem(i); any_r = False
-            for j in range(r.childCount()):
-                h = r.child(j); any_h = False
-                for k in range(h.childCount()):
-                    v = h.child(k); hit = not needle or needle in (r.text(0)+" "+h.text(0)+" "+v.text(0)).lower(); v.setHidden(not hit); any_h |= hit
-                h.setHidden(not any_h); any_r |= any_h
-            r.setHidden(not any_r)
+            item = self.task_tree.topLevelItem(i)
+            path = str(item.data(0, Qt.UserRole) or "")
+            name = Path(path).name.lower() if path else item.text(0).lower()
+            recipient, host = self._group_for_path(path) if path else ("", "")
+            hay = " ".join((name, recipient, host)).lower()
+            item.setHidden(bool(needle) and needle not in hay)
 
     def _tree_selected(self):
         items = self.task_tree.selectedItems();
@@ -759,8 +763,10 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         if not item or not state: return
         status = state.get("status", "未包装")
         icon = "✓" if status == "已完成" else ("⚠" if status == "失败" else "•")
-        item.setText(0, f"{icon}  {Path(path).name}")
-        item.setToolTip(0, status)
+        name = Path(path).name
+        item.setText(0, f"{icon}  {name}")
+        item.setTextAlignment(0, Qt.AlignLeft | Qt.AlignVCenter)
+        item.setToolTip(0, name)
 
     # -------------------------------------------------------------- preview
     def _player_position(self, value):

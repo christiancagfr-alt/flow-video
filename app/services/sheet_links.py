@@ -25,12 +25,18 @@ def extract_sheet_url(cell):
     return resolved
 
 
-def overlay_sheet_links(rows, header_index, sheets, spreadsheet_id, title):
-    columns = [i for i, h in enumerate(rows[header_index])
-               if str(h).strip().lower() in {x.lower() for x in URL_HEADERS}
-               or str(h).strip().endswith('链接')]
-    # J is authoritative even when its header is empty or uses another name.
-    columns = sorted(set(columns + [9]))
+def overlay_sheet_links(rows, header_index, sheets, spreadsheet_id, title, link_columns=None):
+    if link_columns is None:
+        header = rows[header_index] if 0 <= header_index < len(rows) else []
+        columns = [i for i, h in enumerate(header)
+                   if str(h).strip().lower() in {x.lower() for x in URL_HEADERS}
+                   or str(h).strip().endswith('链接')]
+        # J is authoritative even when its header is empty or uses another name.
+        columns = sorted(set(columns + [9]))
+    else:
+        columns = sorted({int(i) for i in link_columns if i is not None and int(i) >= 0})
+    if not columns:
+        return [list(row) for row in rows]
     def letter(i):
         result = ''
         i += 1
@@ -50,7 +56,8 @@ def overlay_sheet_links(rows, header_index, sheets, spreadsheet_id, title):
                     for ci, cell in enumerate(row.get('values', []), grid.get('startColumn', 0)):
                         metadata[ri, ci] = cell
     result = [list(row) for row in rows]
-    for ri in range(header_index + 1, len(result)):
+    start = 0 if header_index < 0 else header_index + 1
+    for ri in range(start, len(result)):
         for ci in columns:
             if ci >= len(result[ri]) and (ri, ci) not in metadata: continue
             while len(result[ri]) <= ci: result[ri].append('')

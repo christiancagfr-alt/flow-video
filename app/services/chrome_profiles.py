@@ -4,6 +4,8 @@ from pathlib import Path
 import json
 from app.services import quiet_process as subprocess
 import os
+import re
+import sqlite3
 import sys
 
 CHROME_APP = "/Applications/Google Chrome.app"
@@ -141,3 +143,101 @@ def launch_flow_window(profile_directory: str, url: str, window_name: str = ""):
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+
+
+_AUTH_COOKIES = ('SID', 'HSID', 'SSID', 'APISID', 'SAPISID', '__Secure-1PSID', '__Secure-3PSID')
+
+
+def classify_session(email, flow_cookie, google_cookie):
+    """A Flow cookie means already logged in. A Google account means Flow can open."""
+    if flow_cookie:
+        return '已登录 Flow'
+    if google_cookie or '@' in str(email or ''):
+        return '可打开 Flow'
+    return '未登录'
+
+
+def valid_profile_directory(directory):
+    text = str(directory or '')
+    if '..' in text or '/' in text or '\\' in text:
+        return False
+    return bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}', text))
+
+
+def chrome_open_command(exe, directory):
+    if not valid_profile_directory(directory):
+        raise ValueError('Chrome 用户目录无效')
+    return [str(exe), f'--profile-directory={directory}', 'https://flow.google.com/']
+
+
+_SESSION_CACHE = {}
+
+
+def session_flags(folder):
+    """Look only at cookie host and name. Never read the encrypted cookie value."""
+    flow_cookie = False
+    google_cookie = False
+    folder = Path(folder)
+    for relative in ('Network/Cookies', 'Cookies'):
+        path = folder / relative
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            continue
+        key = str(path)
+        cached = _SESSION_CACHE.get(key)
+        if cached and cached[0] == stamp:
+            flow_cookie, google_cookie = cached[1], cached[2]
+        else:
+            try:
+                uri = path.resolve().as_uri() + '?mode=ro&immutable=1'
+                connection = sqlite3.connect(uri, uri=True)
+                try:
+                    flow_cookie = connection.execute(
+                        "SELECT 1 FROM cookies WHERE host_key LIKE '%flow.google.com%' LIMIT 1"
+                    ).fetchone() is not None
+                    placeholders = ','.join('?' for _ in _AUTH_COOKIES)
+                    google_cookie = connection.execute(
+                        f"SELECT 1 FROM cookies WHERE name IN ({placeholders}) AND host_key LIKE '%google.com%' LIMIT 1",
+                        _AUTH_COOKIES,
+                    ).fetchone() is not None
+                finally:
+                    connection.close()
+            except (sqlite3.Error, OSError):
+                continue
+            _SESSION_CACHE[key] = (stamp, flow_cookie, google_cookie)
+        if flow_cookie or google_cookie:
+            break
+    return flow_cookie, google_cookie
+
+
+_AVATAR_NAMES = (
+    'Google Profile Picture.png',
+    'Google Profile Picture.jpg',
+    'Google Profile.ico',
+)
+
+
+def profile_avatar_file(directory_or_path):
+    """Local Chrome profile picture. Never downloads one and never reads cookies."""
+    raw = str(directory_or_path or '').strip()
+    if not raw:
+        return ''
+    path = Path(raw)
+    if path.is_absolute():
+        folder = path
+    else:
+        if not valid_profile_directory(raw):
+            return ''
+        folder = CHROME_DATA / raw
+    for name in _AVATAR_NAMES:
+        candidate = folder / name
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            return ''
+    return ''

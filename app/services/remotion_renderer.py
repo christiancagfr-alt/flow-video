@@ -338,7 +338,7 @@ type Props = {
   source?: string;
   width?: number; height?: number; fps?: number; fit?: string;
   watermarks?: any[];
-  captionOverlays?: {path: string; start: number; duration: number; scroll?: boolean; imageHeight?: number}[];
+  captionOverlays?: {path: string; start: number; duration: number; scroll?: boolean; imageHeight?: number; scrollBand?: {top: number; height: number; fade?: number}}[];
   mainDuration?: number;
   totalDuration?: number;
   ratio?: string;
@@ -377,6 +377,26 @@ const Media = ({src, muted = false, fit = 'cover'}: {src: string; muted?: boolea
   if (!src) return null;
   if (isImage(src)) return <Img src={asset(src)} style={{width:'100%',height:'100%',objectFit:fit as any}}/>;
   return <OffthreadVideo src={asset(src)} muted={muted} style={{width:'100%',height:'100%',objectFit:fit as any}}/>;
+};
+
+const ScrollFrame = ({c, relFrame, width, height, captionScale}: {c: NonNullable<Props['captionOverlays']>[number]; relFrame: number; width: number; height: number; captionScale: number}) => {
+  const progress = Math.max(0, Math.min(1, (relFrame - c.start) / Math.max(1, c.duration)));
+  const iw = 1080 * captionScale;
+  const ih = Number(c.imageHeight) * captionScale;
+  const left = (width - iw) / 2;
+  if (c.scrollBand && Number(c.scrollBand.height) > 0) {
+    const top = Number(c.scrollBand.top) * captionScale;
+    const bh = Number(c.scrollBand.height) * captionScale;
+    const fade = Math.max(8, Number(c.scrollBand.fade || 48) * captionScale);
+    const y = bh - (bh + ih) * progress;
+    const mask = `linear-gradient(to bottom, transparent 0px, #000 ${fade}px, #000 ${Math.max(fade, bh - fade)}px, transparent ${bh}px)`;
+    return (
+      <div style={{position:'absolute', left, top, width: iw, height: bh, overflow:'hidden', maskImage: mask, WebkitMaskImage: mask}}>
+        <Img src={asset(c.path)} style={{position:'absolute', width: iw, height: ih, left: 0, top: y}} />
+      </div>
+    );
+  }
+  return <Img src={asset(c.path)} style={{position:'absolute', width: iw, height: ih, left, top: height - (height + ih) * progress}} />;
 };
 
 const Packaging: React.FC<Props> = (p) => {
@@ -493,7 +513,7 @@ const Packaging: React.FC<Props> = (p) => {
         const scale = active ? Math.max(1, Number(cap.karaokeActiveScale || 110) / 100) : 1;
         return <React.Fragment key={`${i}-${word.text}`}><span style={{display:'inline-block', color:wordColor, transform:`scale(${scale})`, transformOrigin:'50% 75%', transition:'none'}}>{word.text}</span>{i < wordItems.length-1 ? ' ' : ''}</React.Fragment>;
       }) : currentCaption.text}</div>}
-      {(p.captionOverlays || []).map((c,i)=><Sequence key={i} from={c.start} durationInFrames={c.duration}><Img src={asset(c.path)} style={c.scroll?{position:'absolute',width:1080*captionScale,height:Number(c.imageHeight)*captionScale,left:(width-1080*captionScale)/2,top:height-(height+Number(c.imageHeight)*captionScale)*(relFrame-c.start)/c.duration}:{position:'absolute',width:1080*captionScale,height:1920*captionScale,left:(width-1080*captionScale)/2,top:(height-1920*captionScale)/2}}/></Sequence>)}
+      {(p.captionOverlays || []).map((c,i)=><Sequence key={i} from={c.start} durationInFrames={c.duration}>{c.scroll ? <ScrollFrame c={c} relFrame={relFrame} width={width} height={height} captionScale={captionScale}/> : <Img src={asset(c.path)} style={{position:'absolute',width:1080*captionScale,height:1920*captionScale,left:(width-1080*captionScale)/2,top:(height-1920*captionScale)/2}}/>}</Sequence>)}
     </Sequence>
     {outroF > 0 && <Sequence from={introF + mainF} durationInFrames={outroF}><Media src={p.outro?.path || ''}/></Sequence>}
   </AbsoluteFill>;

@@ -141,6 +141,11 @@ QComboBox:focus { border:1px solid #2F6FED; }
 QComboBox::drop-down { width:0px; border:none; }
 QComboBox::down-arrow { image:none; width:0px; height:0px; }
 QLabel#comboArrow { color:#778398; font-size:18px; background:transparent; }
+QWidget#sheetColumnCell { background:transparent; }
+QComboBox#sheetColumnCombo {
+    min-height:26px; max-height:28px;
+    padding:0 20px 0 8px; border-radius:6px;
+}
 QWidget#checkCell { background:transparent; }
 QCheckBox#largeCheck::indicator {
     width:18px; height:18px;
@@ -310,6 +315,11 @@ QComboBox:focus { border:1px solid #4B82F1; }
 QComboBox::drop-down { width:0px; border:none; }
 QComboBox::down-arrow { image:none; width:0px; height:0px; }
 QLabel#comboArrow { color:#9AA7BA; font-size:18px; background:transparent; }
+QWidget#sheetColumnCell { background:transparent; }
+QComboBox#sheetColumnCombo {
+    min-height:26px; max-height:28px;
+    padding:0 20px 0 8px; border-radius:6px;
+}
 QWidget#checkCell { background:transparent; }
 QCheckBox#largeCheck::indicator {
     width:18px; height:18px;
@@ -1363,11 +1373,26 @@ for _dark in (False, True):
     if _dark: DARK += _extra
     else: LIGHT += _extra
 
+def _base_style_is_fusion(app):
+    style = app.style()
+    seen = set()
+    while style is not None and id(style) not in seen:
+        seen.add(id(style))
+        name = f"{style.objectName()} {style.metaObject().className()}".lower()
+        if "fusion" in name:
+            return True
+        base = style.baseStyle() if hasattr(style, "baseStyle") else None
+        style = base
+    return False
+
+
 def apply_control_palette(app, dark):
     from app.ui.control_guard import install_control_guard
     install_control_guard(app)
     from PySide6.QtGui import QPalette, QColor
-    app.setStyle('Fusion')
+    # setStyle('Fusion') restyles every widget. The app already uses Fusion after startup.
+    if not _base_style_is_fusion(app):
+        app.setStyle('Fusion')
     palette=QPalette()
     colors={'Window':'#171E29','Base':'#232D3C','AlternateBase':'#1D2633','Text':'#EEF3FC','WindowText':'#EEF3FC','Button':'#232D3C','ButtonText':'#EEF3FC','PlaceholderText':'#B6C4D8'} if dark else {'Window':'#F6F8FC','Base':'#FFFFFF','AlternateBase':'#EFF3F9','Text':'#182235','WindowText':'#182235','Button':'#FFFFFF','ButtonText':'#182235','PlaceholderText':'#526176'}
     colors.update(Highlight='#2867D5',HighlightedText='#FFFFFF',Link='#72A5FF' if dark else '#245ECB')

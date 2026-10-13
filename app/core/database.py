@@ -474,4 +474,27 @@ def init_db():
         # V0.13.5.97: B-roll 预设和视频增强表。
         from app.services.broll_presets import ensure_tables as _ensure_broll_tables
         _ensure_broll_tables(con)
+        con.executescript("""
+            CREATE TABLE IF NOT EXISTS flow_login_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT '未登录',
+                credits_remaining INTEGER,
+                credits_checked_at TEXT NOT NULL DEFAULT '',
+                daily_quota INTEGER NOT NULL DEFAULT 50,
+                last_error TEXT NOT NULL DEFAULT '',
+                last_attempt REAL NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 0,
+                chrome_profile TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        account_columns = {row[1] for row in con.execute('PRAGMA table_info(flow_login_accounts)')}
+        if 'chrome_profile' not in account_columns:
+            con.execute("ALTER TABLE flow_login_accounts ADD COLUMN chrome_profile TEXT NOT NULL DEFAULT ''")
+        con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('flow_account_credit_cost','10')")
+        con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('flow_account_rotation','1')")
+        con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('flow_account_sheet_url','')")
         

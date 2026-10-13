@@ -281,6 +281,12 @@ def record_event(event):
     if typ=='generation_task_status':
         friendly={'preparing':'准备提交 · 校验图片','running':'正在提交','success':'生成中','uncertain':'🟡 提交确认中','failed':'🔴 生成失败'}.get(state,'任务状态更新')
     repo.set_channel_pool_runtime(key,status=friendly,error=err,seen=True)
+    if typ in ('web_plugin_heartbeat', 'flow_account_seen') and (event.get('account_email') or event.get('credits_remaining') not in (None,'')):
+        try:
+            from app.services import flow_accounts
+            flow_accounts.observe_page(event.get('account_email'), event.get('credits_remaining'))
+        except Exception as exc:
+            runtime_log.log('flow_account_observe_failed',level='WARNING',error=str(exc))
     if typ in {'web_plugin_heartbeat','web_plugin_bound','generation_batch_finished','video_download_completed'}:
         repo.set_channel_health(key,health='healthy',reset_failures=True,success=True,page_status=str(event.get('page_status') or event.get('tab_status') or ''))
     elif typ in {'web_plugin_runtime_error','generation_task_failed','video_download_failed','flow_page_unhealthy','generation_button_missing'}:
