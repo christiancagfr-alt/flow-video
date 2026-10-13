@@ -17,11 +17,11 @@ def enrich(sheets, spreadsheet_id, title, parsed):
     tasks = parsed['tasks']
     if not tasks:
         return
+    if sheets is None:
+        raise RuntimeError('无法读取表格原始样式，请先连接 Google 账号后重新同步；本次未写入任务。')
     columns = {key: parsed['header_map'][key] for key in ('中文内容', '外文内容') if parsed.get('header_map', {}).get(key) is not None}
     if not columns:
         return
-    if sheets is None:
-        raise RuntimeError('无法读取表格原始样式，请先连接 Google 账号后重新同步；本次未写入任务。')
     start, end = min(t['表格行号'] for t in tasks), max(t['表格行号'] for t in tasks)
     quoted = title.replace("'", "''")
     ranges = [f"'{quoted}'!{letter(c)}{start}:{letter(c)}{end}" for c in columns.values()]
