@@ -168,15 +168,41 @@ def menu_attempt_due(clicked_at, now, offline):
     return now - clicked_at >= 8
 
 
+def menu_failure_text(detail):
+    """Turn a menu-helper failure into a short status line.
+
+    The macOS helper reports ``output`` (for example ``ERR:not_found:undefined``)
+    rather than ``error``. Showing that JSON makes the wake button look stuck.
+    """
+    raw = str(detail or '').strip()
+    low = raw.lower()
+    if any(token in low for token in ('-1719', '-1743', 'assistive', 'not authorized', 'not allowed', '辅助', '不允许')):
+        return raw
+    if 'err:not_found:undefined' in low or 'err:missing_target' in low:
+        return '唤醒没有拿到要运行的达芬奇脚本名称。请更新 Flow Studio 后再唤醒。'
+    if 'err:not_found:' in low:
+        return '达芬奇的「工作区 → 脚本」里没有找到 Bridge。请让达芬奇主窗口显示在前台；首次安装后重新打开达芬奇，让脚本菜单刷新后再唤醒。'
+    if 'err:no_process' in low:
+        return '没有找到正在运行的达芬奇。请先打开 DaVinci Resolve，再点唤醒。'
+    if 'workspace_not_found' in low or 'no_menu_bar' in low:
+        return '达芬奇菜单栏还没准备好。请让达芬奇主窗口显示在前台，然后重试。'
+    if raw.startswith('ERR:'):
+        return '唤醒达芬奇失败：' + raw[4:]
+    return raw
+
+
 def interpret_menu_output(stdout, stderr):
     text = ((stdout or '') + ('\n' + stderr if stderr else '')).strip()
     try:
         payload = json.loads(text.splitlines()[-1])
     except (ValueError, IndexError, AttributeError):
-        return False, text[-180:]
+        return False, menu_failure_text(text)[-180:]
     if payload.get('ok'):
         return True, ''
-    return False, str(payload.get('error') or text)[-180:]
+    detail = payload.get('error')
+    if not detail:
+        detail = payload.get('output') or text
+    return False, menu_failure_text(str(detail))[-180:]
 
 
 def connection_status_text(state, wake_error=''):

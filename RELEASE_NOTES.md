@@ -1,4 +1,13 @@
-Flow Studio 1.1.1
+Flow Studio 1.1.2
+
+安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
+
+- macOS 唤醒达芬奇时，脚本名称直接交给菜单脚本。macOS 27 上不再把名称读成 undefined，因此不再出现 ERR:not_found:undefined，也不再停在「正在唤醒达芬奇」。
+- 菜单点不到时，自动剪辑页显示中文原因，不再显示一整段 JSON。
+- Windows 仍只点菜单栏和当前子菜单。Linux 仍需在达芬奇「工作区 → 脚本」中手动运行 Bridge。
+- 升级后请先停止正在运行的旧 Bridge，关闭并重新打开达芬奇，再在 Flow Studio 中重新唤醒。Mac 上若系统询问，请允许 Flow Studio 控制达芬奇。
+
+此前 1.1.1：
 
 安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
 

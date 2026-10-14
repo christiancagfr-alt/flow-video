@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
+"""Click a DaVinci Resolve Workspace script.
+
+Windows uses the menu bar directly and receives the script name as a Python
+argument. macOS used to read the name with JXA ``$.getenv(...).js``. On
+macOS 27 that ``.js`` read is undefined, so the menu search looks for an item
+named "undefined" and exits 3 with ``ERR:not_found:undefined``. The name is
+now embedded as a JSON string in the script itself. Linux has no auto-click.
+"""
 from __future__ import annotations
 import argparse
 import json
+import re
 import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from app.services import quiet_process as subprocess
 
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--script-name', required=True)
-    args = ap.parse_args()
-    if sys.platform.startswith('linux'):
-        print(json.dumps({'ok':False,'error':'Linux 请在达芬奇 工作区 → 脚本 菜单手动运行对应脚本。'},ensure_ascii=False));return 1
-    target = args.script_name.rsplit('.', 1)[0]
-    # JXA recursively searches the Workspace/工作区 -> Scripts/脚本 menu tree.
-    js = r'''
-ObjC.import('stdlib');
-var target = $.getenv('FLOWSTUDIO_SCRIPT_TARGET').js;
+_TARGET_RE = re.compile(r'^[A-Za-z0-9_.-]{1,80}$')
+_MENU_JS = r'''
+var target = __FLOWSTUDIO_TARGET__;
+if (!target) { console.log('ERR:missing_target'); $.exit(5); }
 var se = Application('System Events');
 var p;
 try { p = se.processes.byName('DaVinci Resolve'); } catch(e) { console.log('ERR:no_process'); $.exit(2); }
@@ -59,8 +60,33 @@ try {
   $.exit(3);
 } catch(e) { console.log('ERR:' + String(e)); $.exit(4); }
 '''
-    env = dict(__import__('os').environ)
-    env['FLOWSTUDIO_SCRIPT_TARGET'] = target
+
+
+def script_basename(script_name):
+    name = str(script_name or '').strip()
+    if name.lower().endswith('.lua'):
+        name = name[:-4]
+    return name
+
+
+def macos_menu_source(script_name):
+    """JXA source that searches Workspace for this script. The name is a JSON literal."""
+    target = script_basename(script_name)
+    if not _TARGET_RE.fullmatch(target):
+        raise ValueError('达芬奇脚本名称无效。')
+    return _MENU_JS.replace('__FLOWSTUDIO_TARGET__', json.dumps(target))
+
+
+def macos_osascript_command(script_name):
+    return ['/usr/bin/osascript', '-l', 'JavaScript', '-e', macos_menu_source(script_name)]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--script-name', required=True)
+    args = ap.parse_args()
+    if sys.platform.startswith('linux'):
+        print(json.dumps({'ok':False,'error':'Linux 请在达芬奇 工作区 → 脚本 菜单手动运行对应脚本。'},ensure_ascii=False));return 1
     if sys.platform == 'win32':
         try:
             from windows_resolve_runtime import invoke_menu
@@ -70,7 +96,12 @@ try {
         except Exception as exc:
             print(json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=True))
             return 1
-    p = subprocess.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', js], env=env, capture_output=True, text=True)
+    try:
+        command = macos_osascript_command(args.script_name)
+    except ValueError as exc:
+        print(json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False))
+        return 1
+    p = subprocess.run(command, capture_output=True, text=True)
     out = ((p.stdout or '') + ('\n' + p.stderr if p.stderr else '')).strip()
     print(json.dumps({'ok': p.returncode == 0, 'output': out, 'returncode': p.returncode}, ensure_ascii=False))
     return p.returncode

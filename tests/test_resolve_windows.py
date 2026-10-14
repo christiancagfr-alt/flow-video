@@ -254,5 +254,40 @@ class WakeStatusTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('超时', message)
 
+    def test_macos_undefined_target_is_chinese_not_raw_json(self):
+        from app.services import resolve_daily as daily
+        raw = '{"ok": false, "output": "ERR:not_found:undefined", "returncode": 3}'
+        ok, message = daily.interpret_menu_output(raw, '')
+        self.assertFalse(ok)
+        self.assertNotIn('undefined', message)
+        self.assertNotIn('{', message)
+        self.assertIn('脚本名称', message)
+        ok, message = daily.interpret_menu_output('{"ok": false, "output": "ERR:no_process", "returncode": 2}', '')
+        self.assertIn('没有找到正在运行的达芬奇', message)
+        ok, message = daily.interpret_menu_output('{"ok": false, "output": "ERR:not_found:FlowStudio_Resolve_Bridge_v0.5.0", "returncode": 3}', '')
+        self.assertIn('没有找到 Bridge', message)
+        self.assertNotIn('undefined', message)
+
+
+class MacMenuCommandTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('davinci_run_menu_under_test', BASE / 'scripts' / 'davinci_run_menu.py')
+        self.menu = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.menu)
+
+    def test_macos_command_embeds_script_name_without_getenv(self):
+        command = self.menu.macos_osascript_command('FlowStudio_Resolve_Bridge_v0.5.0.lua')
+        self.assertEqual(command[:4], ['/usr/bin/osascript', '-l', 'JavaScript', '-e'])
+        source = command[4]
+        self.assertIn('"FlowStudio_Resolve_Bridge_v0.5.0"', source)
+        self.assertNotIn('getenv', source)
+        self.assertNotIn('FLOWSTUDIO_SCRIPT_TARGET', source)
+        self.assertNotIn('.js', source)
+        self.assertNotIn('__FLOWSTUDIO_TARGET__', source)
+
+    def test_macos_command_rejects_a_name_that_could_break_the_script(self):
+        with self.assertRaises(ValueError):
+            self.menu.macos_osascript_command('bad"; $.exit(0);//.lua')
+
 
 if __name__=='__main__':unittest.main()
