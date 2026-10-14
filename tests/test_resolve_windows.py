@@ -267,6 +267,9 @@ class WakeStatusTests(unittest.TestCase):
         ok, message = daily.interpret_menu_output('{"ok": false, "output": "ERR:not_found:FlowStudio_Resolve_Bridge_v0.5.0", "returncode": 3}', '')
         self.assertIn('没有找到 Bridge', message)
         self.assertNotIn('undefined', message)
+        ok, message = daily.interpret_menu_output('{"ok": false, "output": "ERR:not_found:Scripts|saw:文件,编辑,工作区", "returncode": 0}', '')
+        self.assertIn('没有「脚本」', message)
+        self.assertIn('文件', message)
         raw_exit = '{"ok": false, "output": "ERR:Error: 不能获取对象。\\nexecution error: Error: TypeError: $.exit is not a function. (In \'$.exit(4)\', \'$.exit\' is undefined) (-2700)", "returncode": 1}'
         ok, message = daily.interpret_menu_output(raw_exit, '')
         self.assertFalse(ok)
@@ -283,23 +286,26 @@ class MacMenuCommandTests(unittest.TestCase):
 
     def test_macos_command_embeds_script_name_without_getenv(self):
         command = self.menu.macos_osascript_command('FlowStudio_Resolve_Bridge_v0.5.0.lua')
-        self.assertEqual(command[:4], ['/usr/bin/osascript', '-l', 'JavaScript', '-e'])
-        source = command[4]
+        self.assertEqual(command[:2], ['/usr/bin/osascript', '-e'])
+        source = command[2]
         self.assertIn('"FlowStudio_Resolve_Bridge_v0.5.0"', source)
+        self.assertIn('ignoring application responses', source)
+        self.assertIn('name of menu items', source)
+        self.assertIn('FlowStudioAuto', source)
         self.assertNotIn('getenv', source)
         self.assertNotIn('FLOWSTUDIO_SCRIPT_TARGET', source)
         self.assertNotIn('.js', source)
         self.assertNotIn('__FLOWSTUDIO_TARGET__', source)
         self.assertNotIn('$.exit', source)
-        self.assertNotIn('menuItems()', source)
-        self.assertNotIn('menuBars()', source)
-        self.assertIn('byName', source)
-        self.assertIn('FlowStudioAuto', source)
+        self.assertNotIn('byName', source)
 
     def test_macos_result_uses_ok_line_instead_of_exit_code(self):
         failed = self.menu.macos_result('ERR:not_found:FlowStudio_Resolve_Bridge_v0.5.0\n', '', 0)
         self.assertFalse(failed['ok'])
         self.assertEqual(failed['output'], 'ERR:not_found:FlowStudio_Resolve_Bridge_v0.5.0')
+        wrapped = self.menu.macos_result('', 'execution error: ERR:not_found:Scripts|saw:文件 (-2700)', 1)
+        self.assertFalse(wrapped['ok'])
+        self.assertEqual(wrapped['output'], 'ERR:not_found:Scripts|saw:文件')
         clicked = self.menu.macos_result('OK:FlowStudio_Resolve_Bridge_v0.5.0\n', '', 0)
         self.assertTrue(clicked['ok'])
 

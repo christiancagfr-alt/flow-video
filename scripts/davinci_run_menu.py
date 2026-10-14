@@ -2,10 +2,10 @@
 """Click a DaVinci Resolve Workspace script.
 
 Windows receives the script name as a Python argument and walks the menu bar.
-macOS embeds that name as a JSON string and clicks one menu level at a time.
-JXA on macOS 27 has no $.exit, and calling menuItems() or menuBars() realizes
-every item, including separators, which throws "不能获取对象". Success is an
-OK: line. Linux has no auto-click.
+macOS asks System Events for menu names in AppleScript. JXA byName on macOS 27
+could not see 脚本, so wake reported that Bridge was missing. The Bridge script
+runs until Resolve quits; its menu click uses "ignoring application responses"
+so osascript returns as soon as the script starts. Linux has no auto-click.
 """
 from __future__ import annotations
 import argparse
@@ -16,88 +16,123 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]
 from app.services import quiet_process as subprocess
 
 _TARGET_RE = re.compile(r'^[A-Za-z0-9_.-]{1,80}$')
-_MENU_JS = r'''
-var target = __FLOWSTUDIO_TARGET__;
-function pick(elements, alternatives) {
-  for (var a = 0; a < alternatives.length; a++) {
-    try {
-      var item = elements.byName(alternatives[a]);
-      if (String(item.name())) return item;
-    } catch (e) {}
-  }
-  return null;
-}
-function pickScript(elements) {
-  var exact = pick(elements, [target, target + '.lua']);
-  if (exact) return exact;
-  var misses = 0;
-  for (var i = 0; i < 80; i++) {
-    var item;
-    try { item = elements[i]; }
-    catch (e) { misses += 1; if (misses > 2) break; continue; }
-    misses = 0;
-    var name = '';
-    try { name = String(item.name()); } catch (e2) { continue; }
-    if (name && name.indexOf(target) >= 0) return item;
-  }
-  return null;
-}
-function clickDown(item, label) {
-  try { item.click(); }
-  catch (e) { return 'ERR:click:' + label + ':' + e; }
-  delay(0.25);
-  try { return item.menus[0].menuItems; }
-  catch (e2) { return 'ERR:no_submenu:' + label + ':' + e2; }
-}
-function run() {
-  if (!target) return 'ERR:missing_target';
-  var se = Application('System Events');
-  var p = null;
-  var processNames = ['DaVinci Resolve', 'Resolve'];
-  for (var i = 0; i < processNames.length; i++) {
-    try {
-      var candidate = se.processes.byName(processNames[i]);
-      if (String(candidate.name())) { p = candidate; break; }
-    } catch (e) {}
-  }
-  if (!p) return 'ERR:no_process';
-  try { p.frontmost = true; } catch (e) {}
-  delay(0.4);
-  var elements;
-  try { elements = p.menuBars[0].menuBarItems; }
-  catch (e) { return 'ERR:no_menu_bar:' + e; }
-  var workspace = pick(elements, ['Workspace', '工作区']);
-  if (!workspace) return 'ERR:workspace_not_found';
-  var opened = clickDown(workspace, 'Workspace');
-  if (typeof opened === 'string') return opened;
-  elements = opened;
-  var folders = [
-    ['Scripts', '脚本'],
-    ['Utility', '实用工具', '实用程序'],
-    ['FlowStudioAuto']
-  ];
-  for (var f = 0; f < folders.length; f++) {
-    var found = pickScript(elements);
-    if (found) {
-      try { found.click(); return 'OK:' + String(found.name()); }
-      catch (e) { return 'ERR:click:' + target + ':' + e; }
-    }
-    var folder = pick(elements, folders[f]);
-    if (!folder) {
-      if (f === 0) return 'ERR:not_found:' + folders[f].join('/');
-      return 'ERR:not_found:' + target;
-    }
-    opened = clickDown(folder, folders[f][0]);
-    if (typeof opened === 'string') return opened;
-    elements = opened;
-  }
-  found = pickScript(elements);
-  if (!found) return 'ERR:not_found:' + target;
-  try { found.click(); return 'OK:' + String(found.name()); }
-  catch (e3) { return 'ERR:click:' + target + ':' + e3; }
-}
-try { console.log(run()); }
-catch (e) { console.log('ERR:' + String(e)); }
+_MARKER = re.compile(r'OK:[^\r\n]*|ERR:[^\r\n]*')
+_MENU_APPLESCRIPT = r'''
+property targetName : __FLOWSTUDIO_TARGET__
+on asNameList(value)
+  if value is missing value then return {}
+  if class of value is list then return value
+  return {value as text}
+end asNameList
+on indexOfName(nameList, wanted)
+  set namesFound to my asNameList(nameList)
+  set i to 1
+  repeat with n in namesFound
+    set label to n as text
+    repeat with w in wanted
+      if label is equal to (contents of w as text) then return i
+    end repeat
+    set i to i + 1
+  end repeat
+  return 0
+end indexOfName
+on indexOfScript(nameList, scriptName)
+  set namesFound to my asNameList(nameList)
+  set i to 1
+  repeat with n in namesFound
+    set label to n as text
+    if label is equal to scriptName or label is equal to scriptName & ".lua" or scriptName is not "" and label contains scriptName then return i
+    set i to i + 1
+  end repeat
+  return 0
+end indexOfScript
+on previewNames(nameList)
+  set namesFound to my asNameList(nameList)
+  set seen to ""
+  set i to 0
+  repeat with n in namesFound
+    set i to i + 1
+    if i > 8 then exit repeat
+    if seen is not "" then set seen to seen & ","
+    set seen to seen & (n as text)
+  end repeat
+  return seen
+end previewNames
+on runClick()
+  tell application "System Events"
+    set proc to missing value
+    if exists process "DaVinci Resolve" then set proc to process "DaVinci Resolve"
+    if proc is missing value then
+      if exists process "Resolve" then set proc to process "Resolve"
+    end if
+    if proc is missing value then return "ERR:no_process"
+    tell proc
+      try
+        set frontmost to true
+      end try
+      delay 0.4
+      try
+        set barNames to name of menu bar items of menu bar 1
+      on error errMsg
+        return "ERR:no_menu_bar:" & errMsg
+      end try
+      set wsIndex to my indexOfName(barNames, {"Workspace", "工作区"})
+      if wsIndex is 0 then return "ERR:workspace_not_found"
+      set parentItem to menu bar item wsIndex of menu bar 1
+      try
+        click parentItem
+      end try
+      delay 0.25
+      set folderQueue to {{"Scripts", "脚本"}, {"Utility", "实用工具", "实用程序"}, {"FlowStudioAuto"}}
+      repeat while true
+        try
+          set namesNow to name of menu items of menu 1 of parentItem
+        on error errMsg
+          return "ERR:unreadable:" & errMsg
+        end try
+        set scriptIndex to my indexOfScript(namesNow, targetName)
+        if scriptIndex > 0 then
+          set chosen to name of menu item scriptIndex of menu 1 of parentItem as text
+          ignoring application responses
+            click menu item scriptIndex of menu 1 of parentItem
+          end ignoring
+          delay 0.3
+          return "OK:" & chosen
+        end if
+        if (count of folderQueue) is 0 then return "ERR:not_found:" & targetName & "|saw:" & my previewNames(namesNow)
+        set wanted to contents of item 1 of folderQueue
+        set folderQueue to rest of folderQueue
+        set folderIndex to my indexOfName(namesNow, wanted)
+        if folderIndex is 0 then
+          set childNamesList to my asNameList(namesNow)
+          set childMax to count of childNamesList
+          if childMax > 25 then set childMax to 25
+          repeat with childIndex from 1 to childMax
+            try
+              set deepNames to name of menu items of menu 1 of menu item childIndex of menu 1 of parentItem
+              set deepIndex to my indexOfScript(deepNames, targetName)
+              if deepIndex > 0 then
+                set chosen to name of menu item deepIndex of menu 1 of menu item childIndex of menu 1 of parentItem as text
+                ignoring application responses
+                  click menu item deepIndex of menu 1 of menu item childIndex of menu 1 of parentItem
+                end ignoring
+                delay 0.3
+                return "OK:" & chosen
+              end if
+            end try
+          end repeat
+          return "ERR:not_found:" & (item 1 of wanted as text) & "|saw:" & my previewNames(namesNow)
+        end if
+        set parentItem to menu item folderIndex of menu 1 of parentItem
+        try
+          click parentItem
+        end try
+        delay 0.25
+      end repeat
+    end tell
+  end tell
+end runClick
+return runClick()
 '''
 
 
@@ -108,29 +143,33 @@ def script_basename(script_name):
     return name
 
 
+def _applescript_string(value):
+    return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
 def macos_menu_source(script_name):
-    """JXA source that clicks Workspace → Scripts down to this script."""
+    """AppleScript that reads Workspace menu names and starts this script."""
     target = script_basename(script_name)
     if not _TARGET_RE.fullmatch(target):
         raise ValueError('达芬奇脚本名称无效。')
-    return _MENU_JS.replace('__FLOWSTUDIO_TARGET__', json.dumps(target))
+    return _MENU_APPLESCRIPT.replace('__FLOWSTUDIO_TARGET__', _applescript_string(target))
 
 
 def macos_osascript_command(script_name):
-    return ['/usr/bin/osascript', '-l', 'JavaScript', '-e', macos_menu_source(script_name)]
+    return ['/usr/bin/osascript', '-e', macos_menu_source(script_name)]
 
 
 def macos_menu_status(stdout, stderr):
-    """Success is an OK: line. macOS 27 has no $.exit, so the exit code is not enough."""
+    """Success is an OK: line. A click that starts Bridge returns before the script ends."""
     text = ((stdout or '') + ('\n' + stderr if stderr else '')).strip()
     ok_line = ''
     err_line = ''
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith('OK:'):
-            ok_line = stripped
-        elif stripped.startswith('ERR:'):
-            err_line = stripped
+    for match in _MARKER.finditer(text):
+        token = re.sub(r'\s*\(-?\d+\)\s*$', '', match.group(0)).strip()
+        if token.startswith('OK:'):
+            ok_line = token
+        elif token.startswith('ERR:'):
+            err_line = token
     if ok_line:
         return True, ok_line
     if err_line:

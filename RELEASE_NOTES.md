@@ -1,4 +1,13 @@
-Flow Studio 1.1.3
+Flow Studio 1.1.4
+
+安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
+
+- macOS 唤醒达芬奇改为直接读取「工作区」菜单里的名称，再逐级进入「脚本」。不再因为读不到菜单项而提示没有找到 Bridge。
+- 点到 Bridge 后立即返回，不等待脚本结束。达芬奇里 Bridge 会保持运行，这是正常状态。
+- 若菜单里确实没有该项，状态行会写明缺的是哪一级，并带上实际看到的菜单名。
+- 升级后请先停止正在运行的旧 Bridge，关闭并重新打开达芬奇，再在 Flow Studio 中重新唤醒。
+
+此前 1.1.3：
 
 安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 import shutil
 from app.services import quiet_process as subprocess
 import sys
@@ -168,26 +169,45 @@ def menu_attempt_due(clicked_at, now, offline):
     return now - clicked_at >= 8
 
 
+def _not_found_message(raw):
+    """Explain which menu level was missing. Include names System Events actually saw."""
+    body = raw[raw.lower().find('err:not_found:') + len('err:not_found:'):].splitlines()[0].strip()
+    body = re.sub(r'\s*\(-?\d+\)\s*$', '', body).strip()
+    missing, _, saw = body.partition('|saw:')
+    missing = missing.strip()
+    saw = saw.strip()
+    missing_low = missing.lower()
+    if 'flowstudio_resolve_bridge' in missing_low:
+        text = '达芬奇的「工作区 → 脚本」里没有找到 Bridge。请重新打开达芬奇，让脚本菜单刷新后再唤醒。'
+    elif 'script' in missing_low or '脚本' in missing:
+        text = '达芬奇的「工作区」菜单里没有「脚本」。请让达芬奇主窗口显示在前台后再唤醒。'
+    elif missing:
+        text = f'达芬奇菜单里没有找到「{missing}」。请重新打开达芬奇后再唤醒。'
+    else:
+        text = '达芬奇的「工作区 → 脚本」里没有找到 Bridge。请重新打开达芬奇后再唤醒。'
+    if saw:
+        text += '当前菜单有：' + saw
+    return text
+
+
 def menu_failure_text(detail):
     """Turn a menu-helper failure into a short status line.
 
-    The macOS helper reports ``output`` (for example ``ERR:not_found:undefined``)
+    The macOS helper reports ``output`` (for example ``ERR:not_found:Scripts|saw:File``)
     rather than ``error``. Showing that JSON makes the wake button look stuck.
     """
     raw = str(detail or '').strip()
     low = raw.lower()
     if any(token in low for token in ('-1719', '-1743', 'assistive', 'not authorized', 'not allowed', '辅助', '不允许')):
         return raw
-    if '不能获取对象' in raw or '-1728' in low or '$.exit' in raw or '-2700' in low:
-        return '达芬奇菜单暂时读不到。请让达芬奇主窗口显示在前台，并在系统设置 → 隐私与安全性 → 辅助功能中允许 Flow Studio。'
     if 'err:not_found:undefined' in low or 'err:missing_target' in low:
         return '唤醒没有拿到要运行的达芬奇脚本名称。请更新 Flow Studio 后再唤醒。'
     if 'err:not_found:' in low:
-        return '达芬奇的「工作区 → 脚本」里没有找到 Bridge。请让达芬奇主窗口显示在前台；首次安装后重新打开达芬奇，让脚本菜单刷新后再唤醒。'
+        return _not_found_message(raw)
     if 'err:no_process' in low:
         return '没有找到正在运行的达芬奇。请先打开 DaVinci Resolve，再点唤醒。'
-    if 'workspace_not_found' in low or 'no_menu_bar' in low:
-        return '达芬奇菜单栏还没准备好。请让达芬奇主窗口显示在前台，然后重试。'
+    if 'workspace_not_found' in low or 'no_menu_bar' in low or 'err:unreadable' in low or '不能获取对象' in raw or '-1728' in low or '$.exit' in raw:
+        return '达芬奇菜单暂时读不到。请让达芬奇主窗口显示在前台，并在系统设置 → 隐私与安全性 → 辅助功能中允许 Flow Studio。'
     if raw.startswith('ERR:'):
         return '唤醒达芬奇失败：' + raw[4:]
     return raw
@@ -292,7 +312,7 @@ class DailyWake:
                 if menu_attempt_due(clicked_at, time.monotonic(), observed.get('stage') == 'OFFLINE'):
                     grant_foreground()
                     ok, message = self._invoke_bridge_menu()
-                    clicked_at = time.monotonic() if ok else None
+                    clicked_at = time.monotonic()
                     permission = menu_error(message)
                     if permission:
                         raise RuntimeError(permission)
