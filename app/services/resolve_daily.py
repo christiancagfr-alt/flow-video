@@ -100,13 +100,18 @@ def bridge_wait_reason(root):
     last_log = _tail_line(root / 'logs' / 'bridge.log')
     if last_log:
         bits.append(last_log)
+    boot = _tail_line(script_dir() / 'flowstudio-bridge-boot.txt')
+    if boot:
+        bits.append('脚本已启动 ' + boot)
     if sys.platform == 'darwin':
         error = _tail_line('/tmp/flowstudio-bridge-error.txt')
-        if error:
+        if error and error not in boot:
             bits.append(error)
         click = _tail_line('/tmp/flowstudio-menu-click.log', 60)
         if click:
             bits.append('点击 ' + click)
+        if not boot and click.startswith('CLICK'):
+            bits.append('达芬奇没有执行脚本')
     bits.append(str(root))
     return '；'.join(bits)[:300]
 
@@ -114,9 +119,13 @@ def bridge_wait_reason(root):
 def clear_mac_wake_traces():
     if sys.platform != 'darwin':
         return
-    for path in (Path('/tmp/flowstudio-menu-click.log'), Path('/tmp/flowstudio-bridge-error.txt')):
+    paths = [Path('/tmp/flowstudio-menu-click.log'), Path('/tmp/flowstudio-bridge-error.txt'), script_dir() / 'flowstudio-bridge-boot.txt']
+    for path in paths:
         try:
-            path.write_text('', encoding='utf-8')
+            if path.name.endswith('.txt'):
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text('', encoding='utf-8')
         except OSError:
             return
 
@@ -445,6 +454,8 @@ class DailyWake:
                         retried = True
                     if ok:
                         started = True
+                        if '不再重复点击' in message:
+                            retried = True
                         message = message or '已启动 Bridge。达芬奇里显示「正在执行脚本」是正常状态，请等待上线。'
                     permission = menu_error(message)
                     if permission:

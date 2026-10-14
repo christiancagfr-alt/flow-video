@@ -135,9 +135,15 @@ end
 if FLOWSTUDIO_DAILY_TEST then return prepareDaily, acquireResolve end
 
 local function noteFailure(msg)
+    local text = os.date('%Y-%m-%d %H:%M:%S ') .. tostring(msg)
     pcall(function()
         local f = io.open('/tmp/flowstudio-bridge-error.txt', 'w')
-        if f then f:write(os.date('%Y-%m-%d %H:%M:%S ') .. tostring(msg)); f:close() end
+        if f then f:write(text); f:close() end
+    end)
+    -- The script folder already exists. This remains visible when /tmp is not.
+    pcall(function()
+        local f = io.open(tostring(platform.directory) .. '/flowstudio-bridge-boot.txt', 'w')
+        if f then f:write(text); f:close() end
     end)
 end
 -- Written before any shell call. A shell call inside Resolve can sit forever and leave no files.

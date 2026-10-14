@@ -2,10 +2,9 @@
 """Click a DaVinci Resolve Workspace script.
 
 Windows receives the script name as a Python argument and walks the menu bar.
-macOS uses one AppleScript. That script already has permission to read the
-menus, and it also clicks Bridge. A second, detached osascript loses that
-permission on macOS 27, so the click never reaches DaVinci. Linux has no
-auto-click.
+macOS uses one AppleScript. The Bridge click waits for DaVinci to accept it.
+Ending the script immediately after an ignored click drops the event, so
+DaVinci never runs the Lua file. Linux has no auto-click.
 """
 from __future__ import annotations
 import argparse
@@ -103,10 +102,8 @@ on runClick()
         if scriptIndex > 0 then
           set chosen to name of menu item scriptIndex of menu 1 of parentItem as text
           my trace("CLICKING " & chosen)
-          ignoring application responses
-            click menu item scriptIndex of menu 1 of parentItem
-          end ignoring
-          delay 0.5
+          delay 0.3
+          click menu item scriptIndex of menu 1 of parentItem
           my trace("CLICKED " & chosen)
           return "OK:" & chosen
         end if
@@ -125,10 +122,8 @@ on runClick()
               if deepIndex > 0 then
                 set chosen to name of menu item deepIndex of menu 1 of menu item childIndex of menu 1 of parentItem as text
                 my trace("CLICKING " & chosen)
-                ignoring application responses
-                  click menu item deepIndex of menu 1 of menu item childIndex of menu 1 of parentItem
-                end ignoring
-                delay 0.5
+                delay 0.3
+                click menu item deepIndex of menu 1 of menu item childIndex of menu 1 of parentItem
                 my trace("CLICKED " & chosen)
                 return "OK:" & chosen
               end if

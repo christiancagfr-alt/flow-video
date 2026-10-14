@@ -296,6 +296,15 @@ class WakeStatusTests(unittest.TestCase):
             self.assertIn('OFFLINE', reason)
             self.assertIn('HOME unavailable', reason)
             self.assertIn('START home=/Users/test', reason)
+            folder = Path(tempfile.mkdtemp(prefix='flow-boot-'))
+            (folder / 'flowstudio-bridge-boot.txt').write_text('BOOT /Users/hauhua/Library\n', encoding='utf-8')
+            try:
+                with patch.object(daily, 'script_dir', return_value=folder):
+                    booted = daily.bridge_wait_reason(root)
+                self.assertIn('脚本已启动', booted)
+                self.assertIn('BOOT /Users/hauhua/Library', booted)
+            finally:
+                shutil.rmtree(folder)
         finally:
             shutil.rmtree(root)
 
@@ -355,10 +364,10 @@ class MacMenuCommandTests(unittest.TestCase):
         self.assertEqual(command[:2], ['/usr/bin/osascript', '-e'])
         source = command[2]
         self.assertIn('"FlowStudio_Resolve_Bridge_v0.5.0"', source)
-        self.assertIn('ignoring application responses', source)
+        self.assertNotIn('ignoring application responses', source)
         self.assertIn('/tmp/flowstudio-menu-click.log', source)
         self.assertIn('CLICKING', source)
-        self.assertLess(source.index('CLICKING'), source.index('ignoring application responses'))
+        self.assertLess(source.index('CLICKING'), source.index('click menu item scriptIndex'))
         self.assertIn('name of menu items', source)
         self.assertIn('FlowStudioAuto', source)
         self.assertNotIn('start_new_session', source)
