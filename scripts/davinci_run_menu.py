@@ -1,162 +1,110 @@
 #!/usr/bin/env python3
-"""Click a DaVinci Resolve Workspace script.
+"""Start a DaVinci Resolve Workspace script.
 
 Windows receives the script name as a Python argument and walks the menu bar.
-macOS uses one AppleScript. The Bridge click waits for DaVinci to accept it.
-Ending the script immediately after an ignored click drops the event, so
-DaVinci never runs the Lua file. Linux has no auto-click.
+macOS pastes dofile into the Resolve console. A menu click reports success
+without running the Lua file on Resolve 21. Linux has no auto-start.
 """
 from __future__ import annotations
 import argparse
 import json
 import re
 import sys
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+from pathlib import Path
+_HERE = Path(__file__).resolve().parent
+_ROOT = _HERE.parent
+sys.path.insert(0, str(_ROOT))
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
 from app.services import quiet_process as subprocess
 
 _TARGET_RE = re.compile(r'^[A-Za-z0-9_.-]{1,80}$')
 _MARKER = re.compile(r'OK:[^\r\n]*|ERR:[^\r\n]*')
-_MENU_APPLESCRIPT = r'''
-property targetName : __FLOWSTUDIO_TARGET__
-on asNameList(value)
-  if value is missing value then return {}
-  if class of value is list then return value
-  return {value as text}
-end asNameList
-on indexOfName(nameList, wanted)
-  set namesFound to my asNameList(nameList)
-  set i to 1
-  repeat with n in namesFound
-    set label to n as text
-    repeat with w in wanted
-      if label is equal to (contents of w as text) then return i
-    end repeat
-    set i to i + 1
-  end repeat
-  return 0
-end indexOfName
-on indexOfScript(nameList, scriptName)
-  set namesFound to my asNameList(nameList)
-  set i to 1
-  repeat with n in namesFound
-    set label to n as text
-    if label is equal to scriptName or label is equal to scriptName & ".lua" or scriptName is not "" and label contains scriptName then return i
-    set i to i + 1
-  end repeat
-  return 0
-end indexOfScript
-on previewNames(nameList)
-  set namesFound to my asNameList(nameList)
-  set seen to ""
-  set i to 0
-  repeat with n in namesFound
-    set i to i + 1
-    if i > 8 then exit repeat
-    if seen is not "" then set seen to seen & ","
-    set seen to seen & (n as text)
-  end repeat
-  return seen
-end previewNames
+_CONSOLE_APPLESCRIPT = r'''
+property luaLine : __FLOWSTUDIO_LINE__
 on trace(message)
   try
     do shell script "printf %s " & quoted form of ((message as text) & linefeed) & " >> /tmp/flowstudio-menu-click.log"
   end try
 end trace
-on runClick()
+on isConsole(windowName)
+  set label to windowName as text
+  if label contains "Console" or label contains "console" or label contains "控制台" then return true
+  return false
+end isConsole
+on findConsole(proc)
   tell application "System Events"
-    set proc to missing value
-    if exists process "DaVinci Resolve" then set proc to process "DaVinci Resolve"
-    if proc is missing value then
-      if exists process "Resolve" then set proc to process "Resolve"
-    end if
-    if proc is missing value then
-      my trace("NO_PROCESS")
-      return "ERR:no_process"
-    end if
-    my trace("START")
     tell proc
-      try
-        set frontmost to true
-      end try
-      delay 0.4
-      try
-        set barNames to name of menu bar items of menu bar 1
-      on error errMsg
-        return "ERR:no_menu_bar:" & errMsg
-      end try
-      set wsIndex to my indexOfName(barNames, {"Workspace", "工作区"})
-      if wsIndex is 0 then return "ERR:workspace_not_found"
-      set parentItem to menu bar item wsIndex of menu bar 1
-      try
-        click parentItem
-      end try
-      delay 0.25
-      set folderQueue to {{"Scripts", "脚本"}, {"Utility", "实用工具", "实用程序"}, {"FlowStudioAuto"}}
-      repeat while true
+      repeat with w in windows
         try
-          set namesNow to name of menu items of menu 1 of parentItem
-        on error errMsg
-          return "ERR:unreadable:" & errMsg
+          if my isConsole(name of w) then return w
         end try
-        set scriptIndex to my indexOfScript(namesNow, targetName)
-        if scriptIndex > 0 then
-          set chosen to name of menu item scriptIndex of menu 1 of parentItem as text
-          my trace("CLICKING " & chosen)
-          delay 0.3
-          set targetItem to menu item scriptIndex of menu 1 of parentItem
-          try
-            set itemPosition to position of targetItem
-            set itemSize to size of targetItem
-            click at {(item 1 of itemPosition) + (item 1 of itemSize) div 2, (item 2 of itemPosition) + (item 2 of itemSize) div 2}
-          on error errMsg
-            my trace("PRESS_FAIL " & errMsg)
-            click targetItem
-          end try
-          my trace("CLICKED " & chosen)
-          return "OK:" & chosen
-        end if
-        if (count of folderQueue) is 0 then return "ERR:not_found:" & targetName & "|saw:" & my previewNames(namesNow)
-        set wanted to contents of item 1 of folderQueue
-        set folderQueue to rest of folderQueue
-        set folderIndex to my indexOfName(namesNow, wanted)
-        if folderIndex is 0 then
-          set childNamesList to my asNameList(namesNow)
-          set childMax to count of childNamesList
-          if childMax > 25 then set childMax to 25
-          repeat with childIndex from 1 to childMax
-            try
-              set deepNames to name of menu items of menu 1 of menu item childIndex of menu 1 of parentItem
-              set deepIndex to my indexOfScript(deepNames, targetName)
-              if deepIndex > 0 then
-                set chosen to name of menu item deepIndex of menu 1 of menu item childIndex of menu 1 of parentItem as text
-                my trace("CLICKING " & chosen)
-                delay 0.3
-                set targetItem to menu item deepIndex of menu 1 of menu item childIndex of menu 1 of parentItem
-                try
-                  set itemPosition to position of targetItem
-                  set itemSize to size of targetItem
-                  click at {(item 1 of itemPosition) + (item 1 of itemSize) div 2, (item 2 of itemPosition) + (item 2 of itemSize) div 2}
-                on error errMsg
-                  my trace("PRESS_FAIL " & errMsg)
-                  click targetItem
-                end try
-                my trace("CLICKED " & chosen)
-                return "OK:" & chosen
-              end if
-            end try
-          end repeat
-          return "ERR:not_found:" & (item 1 of wanted as text) & "|saw:" & my previewNames(namesNow)
-        end if
-        set parentItem to menu item folderIndex of menu 1 of parentItem
-        try
-          click parentItem
-        end try
-        delay 0.25
       end repeat
     end tell
   end tell
-end runClick
-return runClick()
+  return missing value
+end findConsole
+tell application "System Events"
+  set procName to "DaVinci Resolve"
+  if not (exists process procName) then set procName to "Resolve"
+  if not (exists process procName) then
+    my trace("NO_PROCESS")
+    return "ERR:no_process"
+  end if
+  tell process procName
+    set frontmost to true
+    delay 0.4
+    set consoleWindow to my findConsole(process procName)
+    if consoleWindow is missing value then
+      my trace("OPEN_CONSOLE")
+      set opened to false
+      repeat with barName in {"工作区", "Workspace"}
+        repeat with itemName in {"控制台", "Console"}
+          try
+            click menu item itemName of menu 1 of menu bar item barName of menu bar 1
+            set opened to true
+            exit repeat
+          end try
+        end repeat
+        if opened then exit repeat
+      end repeat
+      delay 0.8
+      set consoleWindow to my findConsole(process procName)
+    end if
+    if consoleWindow is missing value then
+      my trace("NO_CONSOLE")
+      return "ERR:no_console"
+    end if
+    try
+      perform action "AXRaise" of consoleWindow
+    end try
+    click consoleWindow
+    delay 0.3
+    set frontName to ""
+    try
+      set frontName to name of window 1 as text
+    end try
+    if my isConsole(frontName) is false then
+      my trace("FOCUS_FAIL " & frontName)
+      return "ERR:console_not_focused:" & frontName
+    end if
+    my trace("TYPE_DOFILE")
+    try
+      set previousClip to the clipboard
+    end try
+    set the clipboard to luaLine
+    delay 0.2
+    keystroke "v" using command down
+    delay 0.35
+    keystroke return
+    delay 0.15
+    try
+      set the clipboard to previousClip
+    end try
+    my trace("DOFILE_SENT")
+    return "OK:console"
+  end tell
+end tell
 '''
 
 
@@ -171,19 +119,25 @@ def _applescript_string(value):
     return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
-def macos_menu_source(script_name):
-    """AppleScript that reads the Workspace menu and clicks this script."""
-    target = script_basename(script_name)
-    if not _TARGET_RE.fullmatch(target):
-        raise ValueError('达芬奇脚本名称无效。')
-    source = _MENU_APPLESCRIPT.replace('__FLOWSTUDIO_TARGET__', _applescript_string(target))
-    if '__FLOWSTUDIO_TARGET__' in source:
-        raise ValueError('达芬奇脚本名称无效。')
+def macos_console_source(script_path):
+    """AppleScript that types dofile of this installed script into the Resolve console."""
+    path = str(script_path).replace('\\', '/')
+    name = path.rsplit('/', 1)[-1]
+    stem = name[:-4] if name.endswith('.lua') else name
+    if not path.startswith('/') or not path.endswith('.lua') or "'" in path or '\n' in path or not _TARGET_RE.fullmatch(stem):
+        raise ValueError('达芬奇脚本路径无效。')
+    line = "dofile('" + path + "')"
+    source = _CONSOLE_APPLESCRIPT.replace('__FLOWSTUDIO_LINE__', _applescript_string(line))
+    if '__FLOWSTUDIO_LINE__' in source:
+        raise ValueError('达芬奇脚本路径无效。')
     return source
 
 
-def macos_osascript_command(script_name):
-    return ['/usr/bin/osascript', '-e', macos_menu_source(script_name)]
+def macos_osascript_command(script_name, script_path=None):
+    if script_path is None:
+        from app.services.resolve_daily import script_dir
+        script_path = script_dir() / str(script_name)
+    return ['/usr/bin/osascript', '-e', macos_console_source(script_path)]
 
 
 def macos_menu_status(stdout, stderr):
@@ -209,6 +163,25 @@ def macos_result(stdout, stderr, returncode):
     return {'ok': ok, 'output': detail, 'returncode': returncode}
 
 
+def load_windows_menu():
+    """Load the helper beside this file.
+
+    The packaged Python keeps a ._pth file, so it never adds the script folder
+    to sys.path. A bare import then fails after every restart.
+    """
+    from importlib.util import module_from_spec, spec_from_file_location
+    helper = _HERE / 'windows_resolve_runtime.py'
+    if not helper.is_file():
+        raise RuntimeError('找不到唤醒达芬奇所需的组件 windows_resolve_runtime.py')
+    spec = spec_from_file_location('flowstudio_windows_resolve_runtime', helper)
+    if spec is None or spec.loader is None:
+        raise RuntimeError('找不到唤醒达芬奇所需的组件 windows_resolve_runtime.py')
+    module = module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.invoke_menu
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--script-name', required=True)
@@ -217,8 +190,7 @@ def main():
         print(json.dumps({'ok':False,'error':'Linux 请在达芬奇 工作区 → 脚本 菜单手动运行对应脚本。'},ensure_ascii=False));return 1
     if sys.platform == 'win32':
         try:
-            from windows_resolve_runtime import invoke_menu
-            output = invoke_menu(args.script_name)
+            output = load_windows_menu()(args.script_name)
             print(json.dumps({'ok': True, 'output': output}))
             return 0
         except Exception as exc:

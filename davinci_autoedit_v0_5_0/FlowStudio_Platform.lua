@@ -1,10 +1,16 @@
 -- Platform-local OS facade. Never changes Resolve's global os/io tables.
 if _G.__FLOWSTUDIO_PLATFORM then return _G.__FLOWSTUDIO_PLATFORM end
 local nativeOS, nativeIO = os, io
-local P = {windows=package.config:sub(1,1)=='\\', os=os, io=io, loadfile=loadfile}
+local windows = type(package) == 'table' and type(package.config) == 'string' and package.config:sub(1, 1) == '\\'
+local P = {windows=windows, os=os, io=io, loadfile=loadfile}
 function P.path(s) return P.windows and tostring(s):gsub('\\','/') or s end
-local source=debug.getinfo(1,'S').source:sub(2)
-P.directory=P.path(source):match('^(.*)/[^/]+$')
+local source = ''
+if type(debug) == 'table' and type(debug.getinfo) == 'function' then
+    local info = debug.getinfo(1, 'S')
+    source = info and info.source or ''
+end
+source = tostring(source):sub(2)
+P.directory=P.path(source):match('^(.*)/[^/]+$') or ''
 if not P.windows then return P end
 local ffi=assert(require('ffi'),'Windows bridge requires LuaJIT FFI')
 ffi.cdef[[

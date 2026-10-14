@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -58,6 +59,17 @@ class WindowsLuaTests(unittest.TestCase):
         self.lua.globals().FLOWSTUDIO_DAILY_TEST=True
         for name in ('FlowStudio_Resolve_Bridge_v0.5.0.lua','FlowStudio_Import_Batch.lua','Autoediting_V1.7_FlowStudio.lua','FlowStudio_Finish_Batch.lua'):
             self.lua.execute((self.root/name).read_text(encoding='utf-8'), name='@'+(self.root/name).as_posix())
+
+    def test_bridge_loads_when_resolve_hides_debug_and_package(self):
+        from lupa.luajit21 import LuaRuntime
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        lua.execute('debug = nil; package = nil')
+        platform = lua.execute((self.root / 'FlowStudio_Platform.lua').read_text(encoding='utf-8'), name='@' + (self.root / 'FlowStudio_Platform.lua').as_posix())
+        self.assertEqual(platform.windows, False)
+        lua.globals().FLOWSTUDIO_DAILY_TEST = True
+        script = self.root / 'FlowStudio_Resolve_Bridge_v0.5.0.lua'
+        prepare, _acquire = lua.execute(script.read_text(encoding='utf-8'), name='@' + script.as_posix())
+        self.assertIsNotNone(prepare)
 
     def test_windows_bridge_processes_daily_job_and_keeps_heartbeating(self):
         bridge=self.root/'Documents/FlowStudioResolveBridge'
@@ -273,12 +285,41 @@ class WakeStatusTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn('不再重复点击', message)
 
+    def test_empty_state_file_is_described_as_unreadable(self):
+        from app.services import resolve_daily as daily
+        root = Path(tempfile.mkdtemp(prefix='flow-state-'))
+        try:
+            (root / 'bridge_state.ini').write_text('', encoding='utf-8')
+            (root / 'bridge_heartbeat.txt').write_text('1', encoding='utf-8')
+            reason = daily.bridge_wait_reason(root)
+            self.assertIn('状态文件无法读取', reason)
+            self.assertNotIn('达芬奇没有执行脚本', reason)
+        finally:
+            shutil.rmtree(root)
+
+    def test_wake_creates_the_bridge_folders_before_the_script_runs(self):
+        from app.services import resolve_daily as daily
+        root = Path(tempfile.mkdtemp(prefix='flow-bridge-dirs-'))
+        try:
+            daily.ensure_bridge_dirs(root)
+            self.assertTrue((root / 'v0_5_0' / 'commands').is_dir())
+            self.assertTrue((root / 'logs').is_dir())
+            daily.ensure_bridge_dirs(root)
+        finally:
+            shutil.rmtree(root)
+
     def test_bridge_startup_does_not_shell_out_on_macos(self):
         text = (BASE / 'davinci_autoedit_v0_5_0' / 'FlowStudio_Resolve_Bridge_v0.5.0.lua').read_text(encoding='utf-8')
         self.assertNotIn('osascript', text)
         self.assertNotIn('id -P', text)
         self.assertIn('posixMkdir', text)
         self.assertIn("bootWrite('ENTER')", text)
+        self.assertIn("rawget(_G, 'ffi')", text)
+        self.assertIn('installSandboxIo', text)
+        self.assertIn('io-from-ffi', text)
+        self.assertIn('fchmod', text)
+        self.assertIn('lib.cdef(line)', text)
+        self.assertNotIn('cdef[[', text)
         self.assertIn("noteFailure('BOOT '", text)
 
     def test_wait_reason_names_the_missing_heartbeat(self):
@@ -352,6 +393,15 @@ class WakeStatusTests(unittest.TestCase):
         self.assertIn('辅助功能', message)
         self.assertNotIn('$.exit', message)
         self.assertNotIn('TypeError', message)
+        ok, message = daily.interpret_menu_output('{"ok": false, "output": "ERR:no_console", "returncode": 1}', '')
+        self.assertFalse(ok)
+        self.assertIn('控制台', message)
+        self.assertNotIn('no_console', message)
+        ok, message = daily.interpret_menu_output('{"ok": false, "output": "ERR:console_not_focused:Edit", "returncode": 1}', '')
+        self.assertIn('避免打到时间线', message)
+        ok, message = daily.interpret_menu_output('{"ok": false, "error": "No module named \'windows_resolve_runtime\'"}', '')
+        self.assertIn('唤醒组件', message)
+        self.assertNotIn('No module named', message)
 
 
 class MacMenuCommandTests(unittest.TestCase):
@@ -360,26 +410,53 @@ class MacMenuCommandTests(unittest.TestCase):
         self.menu = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.menu)
 
-    def test_macos_command_embeds_script_name_without_getenv(self):
-        command = self.menu.macos_osascript_command('FlowStudio_Resolve_Bridge_v0.5.0.lua')
+    def test_macos_command_types_dofile_into_the_console(self):
+        path = '/Users/hauhua/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/FlowStudioAuto/FlowStudio_Resolve_Bridge_v1.1.11.lua'
+        command = self.menu.macos_osascript_command('FlowStudio_Resolve_Bridge_v1.1.11.lua', path)
         self.assertEqual(command[:2], ['/usr/bin/osascript', '-e'])
         source = command[2]
-        self.assertIn('"FlowStudio_Resolve_Bridge_v0.5.0"', source)
-        self.assertNotIn('ignoring application responses', source)
+        self.assertIn('dofile(\'' + path + '\')', source)
+        self.assertIn('set the clipboard to luaLine', source)
+        self.assertIn('keystroke "v" using command down', source)
+        self.assertIn('keystroke return', source)
+        self.assertIn('控制台', source)
+        self.assertIn('TYPE_DOFILE', source)
+        self.assertLess(source.index('TYPE_DOFILE'), source.index('keystroke return'))
+        self.assertIn('console_not_focused', source)
         self.assertIn('/tmp/flowstudio-menu-click.log', source)
-        self.assertIn('click at', source)
-        self.assertIn('CLICKING', source)
-        self.assertLess(source.index('CLICKING'), source.index('click at'))
-        self.assertIn('name of menu items', source)
-        self.assertIn('FlowStudioAuto', source)
+        self.assertNotIn('ignoring application responses', source)
+        self.assertNotIn('click at', source)
+        self.assertFalse(hasattr(self.menu, '_MENU_APPLESCRIPT'))
         self.assertNotIn('start_new_session', source)
-        self.assertNotIn('READY:', source)
         self.assertNotIn('getenv', source)
-        self.assertNotIn('FLOWSTUDIO_SCRIPT_TARGET', source)
-        self.assertNotIn('.js', source)
-        self.assertNotIn('__FLOWSTUDIO_TARGET__', source)
+        self.assertNotIn('__FLOWSTUDIO_LINE__', source)
         self.assertNotIn('$.exit', source)
-        self.assertNotIn('byName', source)
+
+    def test_windows_helper_loads_when_python_omits_the_script_directory(self):
+        source = (BASE / 'scripts' / 'davinci_run_menu.py').read_text(encoding='utf-8')
+        self.assertNotIn('from windows_resolve_runtime import', source)
+        folder = Path(tempfile.mkdtemp(prefix='flow-menu-import-'))
+        env = os.environ.copy()
+        env['PYTHONSAFEPATH'] = '1'
+        env.pop('PYTHONPATH', None)
+        env['FLOWSTUDIO_DATA_DIR'] = str(folder)
+        probe = '\n'.join([
+            'import importlib.util, json, sys',
+            'from pathlib import Path',
+            'script = Path(sys.argv[1])',
+            'sys.path = [item for item in sys.path if Path(item or ".").resolve() != script.parent.resolve()]',
+            'spec = importlib.util.spec_from_file_location("menu_isolated", script)',
+            'module = importlib.util.module_from_spec(spec)',
+            'spec.loader.exec_module(module)',
+            'print(json.dumps({"ok": callable(module.load_windows_menu())}))',
+        ])
+        import subprocess
+        completed = subprocess.run(
+            [sys.executable, '-c', probe, str(BASE / 'scripts' / 'davinci_run_menu.py')],
+            capture_output=True, text=True, env=env, cwd=folder,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout.strip().splitlines()[-1])['ok'], True)
 
     def test_macos_result_uses_ok_line_instead_of_exit_code(self):
         failed = self.menu.macos_result('ERR:not_found:FlowStudio_Resolve_Bridge_v0.5.0\n', '', 0)

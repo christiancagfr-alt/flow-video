@@ -1,33 +1,64 @@
+-- Resolve 21.1 menu scripts set debug, package and sometimes io to nil. Indexing them stops the file on line 2.
 local rawIo = io
-local chunkInfo = debug.getinfo(1, 'S')
+local chunkInfo = nil
+if type(debug) == 'table' and type(debug.getinfo) == 'function' then
+    chunkInfo = debug.getinfo(1, 'S')
+end
 local function bootWrite(msg)
     -- Before platform load. A bad script path used to stop the file here, with no record left behind.
+    local text = tostring(msg)
+    pcall(function() text = os.date('%Y-%m-%d %H:%M:%S ') .. tostring(msg) end)
+    pcall(print, '[FlowStudio] ' .. text)
     pcall(function()
-        local f = rawIo.open('/tmp/flowstudio-bridge-boot.txt', 'w')
-        if f then f:write(os.date('%Y-%m-%d %H:%M:%S ') .. tostring(msg)); f:close() end
+        local writer = rawIo
+        if type(writer) ~= 'table' or type(writer.open) ~= 'function' then writer = rawget(_G, 'io') end
+        if type(writer) ~= 'table' or type(writer.open) ~= 'function' then return end
+        local f = writer.open('/tmp/flowstudio-bridge-boot.txt', 'w')
+        if f then f:write(text); f:close() end
     end)
 end
 bootWrite('ENTER')
+local function homeDir()
+    if type(os) ~= 'table' or type(os.getenv) ~= 'function' then return '' end
+    local ok, value = pcall(os.getenv, 'HOME')
+    if ok and type(value) == 'string' and value ~= '' then return value:gsub('\\', '/') end
+    ok, value = pcall(os.getenv, 'USERPROFILE')
+    if ok and type(value) == 'string' and value ~= '' then return value:gsub('\\', '/') end
+    return ''
+end
 local function scriptFile()
     local src = chunkInfo and chunkInfo.source or ''
     src = tostring(src):gsub('^@', ''):gsub('\\', '/')
     if src:find('/', 1, true) then return src end
+    local home = homeDir()
+    if home ~= '' then
+        local dir = home .. '/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/FlowStudioAuto'
+        if home:sub(1, 1) ~= '/' then
+            dir = home .. '/AppData/Roaming/Blackmagic Design/DaVinci Resolve/Support/Fusion/Scripts/Utility/FlowStudioAuto'
+        end
+        bootWrite('source-from-home ' .. dir)
+        return dir .. '/FlowStudio_Resolve_Bridge.lua'
+    end
     bootWrite('source-has-no-path ' .. tostring(chunkInfo and chunkInfo.source))
     return ''
 end
 local function loadPlatform()
     local dir = scriptFile():match('^(.*)/[^/]+$') or ''
-    if dir ~= '' then
+    if dir ~= '' and type(loadfile) == 'function' then
         local chunk, err = loadfile(dir .. '/FlowStudio_Platform.lua')
         if chunk then
             local ok, result = pcall(chunk)
-            if ok and type(result) == 'table' then return result end
+            if ok and type(result) == 'table' then
+                if type(result.directory) ~= 'string' or result.directory == '' then result.directory = dir end
+                return result
+            end
             bootWrite('platform-call ' .. tostring(result))
         else
             bootWrite('platform-load ' .. tostring(err))
         end
     end
-    return {windows = package.config:sub(1, 1) == '\\', os = os, io = io, loadfile = loadfile, directory = dir}
+    local windows = type(package) == 'table' and type(package.config) == 'string' and package.config:sub(1, 1) == '\\'
+    return {windows = windows, os = os, io = io, loadfile = loadfile, directory = dir}
 end
 local platform = loadPlatform()
 local os, io, loadfile = platform.os, platform.io, platform.loadfile
@@ -202,19 +233,128 @@ local _posix
 local function posixLib()
     if _posix ~= nil then return _posix or nil end
     if platform.windows then _posix=false; return nil end
-    local ok, ffi = pcall(require, 'ffi')
-    if not ok or not ffi then _posix=false; return nil end
-    local defined = pcall(function()
-        ffi.cdef[[
-            int mkdir(const char *path, int mode);
-            int rmdir(const char *path);
-            typedef struct { long tv_sec; long tv_nsec; } FS_TIMESPEC;
-            int nanosleep(const FS_TIMESPEC *req, const FS_TIMESPEC *rem);
-        ]]
-    end)
-    if not defined then _posix=false; return nil end
-    _posix = ffi
-    return ffi
+    -- Resolve 21.1 keeps the ffi library loaded but removes require, so require('ffi') never runs.
+    local lib = rawget(_G, 'ffi')
+    if type(lib) ~= 'table' and type(require) == 'function' then
+        local ok, loaded = pcall(require, 'ffi')
+        if ok and type(loaded) == 'table' then lib = loaded end
+    end
+    if type(lib) ~= 'table' then _posix=false; return nil end
+    -- A cdef block is all-or-nothing. One symbol already declared in this Resolve
+    -- session drops the rest of the block, including fchmod, and new files stay unreadable.
+    local lines = {
+        'int mkdir(const char *path, int mode);',
+        'int rmdir(const char *path);',
+        'int open(const char *path, int flags, int mode);',
+        'long read(int fd, void *buf, unsigned long count);',
+        'long write(int fd, const void *buf, unsigned long count);',
+        'int close(int fd);',
+        'int rename(const char *oldpath, const char *newpath);',
+        'int unlink(const char *path);',
+        'int fchmod(int fd, int mode);',
+        'int chmod(const char *path, int mode);',
+        'typedef struct { long tv_sec; long tv_nsec; } FS_TIMESPEC;',
+        'int nanosleep(const FS_TIMESPEC *req, const FS_TIMESPEC *rem);',
+    }
+    for _, line in ipairs(lines) do
+        pcall(function() lib.cdef(line) end)
+    end
+    local ready = pcall(function() return lib.C.mkdir end)
+    local canChmod = pcall(function() return lib.C.fchmod end)
+    if not ready or not canChmod then _posix=false; return nil end
+    _posix = lib
+    return lib
+end
+local function installSandboxIo()
+    -- Resolve 21.1 leaves ffi in place and removes io. Heartbeat files go through POSIX open.
+    local needIo = not (type(io) == 'table' and type(io.open) == 'function')
+    local needRename = not (type(os) == 'table' and type(os.rename) == 'function')
+    local needRemove = not (type(os) == 'table' and type(os.remove) == 'function')
+    if not needIo and not needRename and not needRemove then return end
+    local lib = posixLib()
+    if not lib then
+        bootWrite('SANDBOX io-missing ffi-missing')
+        error('SANDBOX: 达芬奇 21.1 禁止脚本读写文件，而且没有 ffi')
+    end
+    local O_RDONLY, O_WRONLY, O_APPEND, O_CREAT, O_TRUNC = 0, 1, 8, 512, 1024
+    local function openFile(path, mode)
+        mode = tostring(mode or 'r')
+        local flags = O_RDONLY
+        if mode:find('w', 1, true) then flags = O_WRONLY + O_CREAT + O_TRUNC
+        elseif mode:find('a', 1, true) then flags = O_WRONLY + O_CREAT + O_APPEND end
+        local fd = lib.C.open(path, flags, 420)
+        if fd < 0 then return nil end
+        -- open() drops its mode argument. Set the permission while the handle is still open.
+        pcall(function() lib.C.fchmod(fd, 420) end)
+        pcall(function() lib.C.chmod(path, 420) end)
+        local file = {fd = fd}
+        function file:write(...)
+            local parts = {}
+            for i = 1, select('#', ...) do parts[i] = tostring(select(i, ...)) end
+            local text = table.concat(parts)
+            if #text > 0 and lib.C.write(self.fd, text, #text) < 0 then error('WRITE_FAILED') end
+            return self
+        end
+        function file:read(fmt)
+            fmt = fmt or '*l'
+            if fmt == '*a' or fmt == 'a' then
+                local parts = {}
+                while true do
+                    local buf = lib.new('char[8192]')
+                    local n = tonumber(lib.C.read(self.fd, buf, 8192))
+                    if not n or n <= 0 then break end
+                    parts[#parts + 1] = lib.string(buf, n)
+                end
+                return table.concat(parts)
+            end
+            local chars = {}
+            while true do
+                local buf = lib.new('char[1]')
+                local n = tonumber(lib.C.read(self.fd, buf, 1))
+                if not n or n <= 0 then return #chars > 0 and table.concat(chars) or nil end
+                local ch = lib.string(buf, 1)
+                if ch == '\n' then return table.concat(chars) end
+                if ch ~= '\r' then chars[#chars + 1] = ch end
+            end
+        end
+        function file:lines() return function() return self:read('*l') end end
+        function file:close()
+            -- open() is variadic, so the creation mode is dropped and Resolve leaves the file unreadable.
+            if self.fd then pcall(function() lib.C.fchmod(self.fd, 420) end); pcall(function() lib.C.chmod(path, 420) end); lib.C.close(self.fd); self.fd = nil end
+            return true
+        end
+        function file:flush() return true end
+        return file
+    end
+    if needIo then
+        io = {open = openFile}
+        rawset(_G, 'io', io)
+    end
+    if needRename then
+        os.rename = function(old, new) return lib.C.rename(old, new) == 0 end
+    end
+    if needRemove then
+        os.remove = function(path) return lib.C.unlink(path) == 0 or lib.C.rmdir(path) == 0 end
+    end
+    bootWrite('SANDBOX io-from-ffi')
+end
+installSandboxIo()
+if type(debug) ~= 'table' or type(debug.getinfo) ~= 'function' then
+    local stubDir = tostring(platform.directory or '')
+    if type(debug) ~= 'table' then
+        debug = {}
+        rawset(_G, 'debug', debug)
+    end
+    function debug.getinfo()
+        return {source = '@' .. stubDir .. '/FlowStudio_Platform.lua', what = 'Lua', linedefined = 0, currentline = 1}
+    end
+end
+if type(require) ~= 'function' then
+    require = function(name)
+        if name == 'ffi' then return rawget(_G, 'ffi') end
+        error('module not found: ' .. tostring(name))
+    end
+    rawset(_G, 'require', require)
 end
 local function posixMkdir(path)
     local ffi = posixLib()
@@ -223,24 +363,49 @@ local function posixMkdir(path)
     if ffi.errno() == 17 then return 'exists' end
     return 'error'
 end
+local function dirExists(path)
+    if type(bmd) == 'table' and type(bmd.readdir) == 'function' then
+        local ok, entries = pcall(bmd.readdir, path)
+        if ok and type(entries) == 'table' then return true end
+    end
+    if type(bmd) == 'table' and type(bmd.fileexists) == 'function' then
+        local ok, result = pcall(bmd.fileexists, path)
+        if ok and result then return true end
+    end
+    if type(io) == 'table' and type(io.open) == 'function' then
+        local handle = io.open(path .. '/.flowstudio-dir', 'a')
+        if handle then handle:close(); return true end
+    end
+    return false
+end
 local function ensureDir(path)
     path = tostring(path):gsub('\\','/'):gsub('/+$','')
     if platform.windows then return runOK('mkdir -p '..quote(path)) end
-    if not posixLib() then
-        if bmd and type(bmd.createdir)=='function' and pcall(bmd.createdir, path) then return true end
-        noteFailure('Cannot create '..path)
-        return false
+    local function fail(acc, why)
+        noteFailure('Cannot create '..acc..' '..tostring(why or ''))
+        return false, tostring(why or '')
     end
     local acc = ''
     for part in path:gmatch('[^/]+') do
         acc = acc..'/'..part
-        local result = posixMkdir(acc)
-        if result ~= 'created' and result ~= 'exists' then
-            noteFailure('Cannot create '..acc)
-            return false
+        if posixLib() then
+            local result = posixMkdir(acc)
+            if result ~= 'created' and result ~= 'exists' and not dirExists(acc) then
+                return fail(acc, result or 'mkdir')
+            end
+        elseif not dirExists(acc) then
+            local why = 'ffi missing'
+            if type(bmd) == 'table' and type(bmd.createdir) == 'function' then
+                local ok, err = pcall(bmd.createdir, acc)
+                why = ok and 'createdir returned without a directory' or tostring(err)
+            else
+                why = 'ffi missing and bmd.createdir missing'
+            end
+            if not dirExists(acc) then return fail(acc, why) end
         end
     end
-    return acc ~= ''
+    if acc == '' then return fail(path, 'empty') end
+    return true
 end
 local function mkdirExclusive(path)
     local result = posixMkdir(path)
@@ -322,7 +487,16 @@ end
 local function exists(path) local f=io.open(path,'r'); if f then f:close(); return true end; return false end
 local dirs = {inbox, root..'/v0_5_0/done', root..'/v0_5_0/error', root..'/v0_5_0/suspended', root..'/logs'}
 for _,dir in ipairs(dirs) do
-    if not ensureDir(dir) then error('Cannot create '..dir) end
+    local ready, why = ensureDir(dir)
+    if not ready then error('Cannot create '..dir..(why and (' '..why) or '')) end
+end
+if not platform.windows then
+    local lib = posixLib()
+    if lib then
+        for _, path in ipairs({root..'/logs/bridge.log', stateFile, root..'/bridge_heartbeat.txt', root..'/bridge_status.txt'}) do
+            pcall(function() lib.C.chmod(path, 420) end)
+        end
+    end
 end
 pcall(function()
     local f = io.open(root..'/logs/bridge.log', 'a')
@@ -377,8 +551,9 @@ if not mkdirExclusive(lockDir) then
 end
 local state = {version='0.5.0',build='V0.13.5.67',capabilities='PREPARE_DAILY,IMPORT_BATCH,START_AUTOEDIT,RESUME_AUTOEDIT,FINISH_BATCH',stage='IDLE',detail='Bridge 在线，等待唤醒',whisper_language='sw'}
 local function log(message)
-    local f=assert(io.open(root..'/logs/bridge.log','a'))
-    f:write(os.date('%Y-%m-%d %H:%M:%S') .. ' version=0.5.0 ' .. tostring(message) .. '\n'); f:close()
+    local opened, file = pcall(io.open, root..'/logs/bridge.log', 'a')
+    if not opened or not file then return end
+    pcall(function() file:write(os.date('%Y-%m-%d %H:%M:%S') .. ' version=0.5.0 ' .. tostring(message) .. '\n'); file:close() end)
 end
 local function publish()
     state.updated_at = tostring(os.time())

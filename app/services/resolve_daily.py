@@ -37,6 +37,14 @@ def bridge_root():
     return Path.home() / 'Documents' / 'FlowStudioResolveBridge'
 
 
+def ensure_bridge_dirs(root=None):
+    """Create the folders the Bridge writes. Resolve 21.1 often cannot mkdir itself."""
+    root = Path(root or bridge_root())
+    for name in ('v0_5_0/commands', 'v0_5_0/done', 'v0_5_0/error', 'v0_5_0/suspended', 'logs'):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def script_dir():
     if sys.platform.startswith('linux'):return Path.home()/'.local/share/DaVinciResolve/Fusion/Scripts/Utility/FlowStudioAuto'
     if os.name == 'nt':
@@ -79,20 +87,24 @@ def bridge_wait_reason(root):
     root = Path(root)
     bits = []
     state_path = root / 'bridge_state.ini'
+    heart = root / 'bridge_heartbeat.txt'
+    script_ran = heart.is_file() or state_path.is_file()
     if not state_path.is_file():
         bits.append('没有状态文件')
     else:
         state = read_pairs(state_path)
-        try:
-            age = max(0, int(time.time() - float(state.get('updated_at') or 0)))
-            age_text = f'{age}秒前'
-        except (TypeError, ValueError):
-            age_text = '时间无效'
-        bits.append(f"状态{state.get('stage') or '空'}/{state.get('version') or '无版本'}/{age_text}")
-        detail = str(state.get('detail') or '').strip()
-        if detail:
-            bits.append(detail[:60])
-    heart = root / 'bridge_heartbeat.txt'
+        if not state:
+            bits.append('状态文件无法读取')
+        else:
+            try:
+                age = max(0, int(time.time() - float(state.get('updated_at') or 0)))
+                age_text = f'{age}秒前'
+            except (TypeError, ValueError):
+                age_text = '时间无效'
+            bits.append(f"状态{state.get('stage') or '空'}/{state.get('version') or '无版本'}/{age_text}")
+            detail = str(state.get('detail') or '').strip()
+            if detail:
+                bits.append(detail[:60])
     if heart.is_file():
         bits.append(f'心跳文件{max(0, int(time.time() - heart.stat().st_mtime))}秒前')
     else:
@@ -114,7 +126,9 @@ def bridge_wait_reason(root):
         click = _tail_line('/tmp/flowstudio-menu-click.log', 60)
         if click:
             bits.append('点击 ' + click)
-        if not boot and click.startswith('CLICK'):
+        if 'DOFILE_SENT' in click and not script_ran:
+            bits.append('已把脚本发送到控制台，等待达芬奇执行')
+        elif not boot and click.startswith('CLICK') and not script_ran:
             bits.append('达芬奇没有执行脚本')
     bits.append(str(root))
     return '；'.join(bits)[:300]
@@ -320,6 +334,12 @@ def menu_failure_text(detail):
         return _not_found_message(raw)
     if 'err:no_process' in low:
         return '没有找到正在运行的达芬奇。请先打开 DaVinci Resolve，再点唤醒。'
+    if 'no module named' in low and 'windows_resolve_runtime' in low:
+        return '唤醒组件没有随软件加载。请完全退出并重新打开 Flow Studio，再点一次唤醒。'
+    if 'err:no_console' in low:
+        return '没有找到达芬奇控制台。请在达芬奇打开「工作区 → 控制台」，看到 Lua> 后，再点一次唤醒。'
+    if 'console_not_focused' in low:
+        return '控制台没有到前台，已停止输入，避免打到时间线上。请点一下达芬奇的控制台窗口，再点唤醒。'
     if 'workspace_not_found' in low or 'no_menu_bar' in low or 'err:unreadable' in low or '不能获取对象' in raw or '-1728' in low or '$.exit' in raw:
         return '达芬奇菜单暂时读不到。请让达芬奇主窗口显示在前台，并在系统设置 → 隐私与安全性 → 辅助功能中允许 Flow Studio。'
     if raw.startswith('ERR:'):
@@ -400,7 +420,7 @@ class DailyWake:
         try:
             stdout, stderr = proc.communicate(timeout=12)
         except subprocess.TimeoutExpired:
-            return True, '菜单点击已交给达芬奇，不再重复点击。' + bridge_wait_reason(self.root)
+            return True, '已把脚本发送到控制台，不再重复点击。' + bridge_wait_reason(self.root)
         return interpret_menu_output(stdout, stderr)
 
     def progress(self, stage, detail):
@@ -421,6 +441,7 @@ class DailyWake:
     def _run(self):
         if sys.platform not in ('darwin', 'win32'):
             raise RuntimeError('DaVinci 自动化支持 Windows 与 macOS。')
+        ensure_bridge_dirs(self.root)
         state = snapshot(self.root)
         heartbeat = self.root / 'bridge_heartbeat.txt'
         if not state['alive'] and state.get('version') != VERSION and heartbeat.exists() and time.time() - heartbeat.stat().st_mtime < HEARTBEAT_FRESH_SECONDS:
