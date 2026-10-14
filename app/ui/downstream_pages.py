@@ -1509,9 +1509,10 @@ class DaVinciPage(BaseWorkflowPage):
             self._queue_signature=signature;self.reload(rows)
 
     def open_resolve(self):
-        from app.services.resolve_daily import DailyWake
+        from app.services.resolve_daily import DailyWake, grant_foreground
         if self._wake_future and not self._wake_future.done():
             return
+        grant_foreground()
         try:
             self._wake_error = ''
             self._operation = 'wake'
@@ -1718,12 +1719,10 @@ class DaVinciPage(BaseWorkflowPage):
             self.detect_status.setText(self._wake.detail)
         else:
             self.launch_resolve_btn.setText('唤醒达芬奇')
-            if self._wake_error:
-                self.detect_status.setText('⚠ ' + self._wake_error)
-            elif st.get('alive'):
-                self.detect_status.setText(('⚠ ' + st['warning']) if st.get('warning') else st.get('detail', 'Bridge 在线'))
-            elif st.get('version'):
-                self.detect_status.setText('Resolve Bridge 连接中断，请重新唤醒；已保留最近状态。')
+            from app.services.resolve_daily import connection_status_text
+            status_text = connection_status_text(st, self._wake_error)
+            if status_text:
+                self.detect_status.setText(status_text)
         ready = st.get('alive') and st.get('stage') == 'READY' and st.get('project') == 'FlowStudio-' + work_dates.active()
         self.bridge_state.setText('🟢 达芬奇已就绪' if ready else ('🟡 Bridge 在线' if st.get('alive') else '○ Bridge 未连接'))
         self.environment_meta.setText(

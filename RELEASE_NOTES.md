@@ -1,4 +1,13 @@
-Flow Studio 1.1.0
+Flow Studio 1.1.1
+
+安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
+
+- Windows 点击「唤醒达芬奇」时，只打开达芬奇菜单栏和当前子菜单，不再扫描整个界面。会把最大的达芬奇窗口拉到前台。
+- 菜单暂时点不开时会重试，并在自动剪辑页写明原因，不再停在「Bridge 未连接」且没有说明。
+- 还没配置 whisper.cpp 时仍可先唤醒达芬奇。开始自动剪辑前，请在组件管理中检测或安装 whisper.cpp。
+- 升级后请先停止正在运行的旧 Bridge，关闭并重新打开达芬奇，再在 Flow Studio 中重新唤醒。
+
+此前 1.1.0：
 
 安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
 

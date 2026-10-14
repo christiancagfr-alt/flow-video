@@ -3,6 +3,7 @@ No shell evaluation, console windows, or arbitrary task-derived shell commands.
 """
 import argparse
 import ctypes
+from ctypes import wintypes
 import json
 import os
 from pathlib import Path
@@ -28,36 +29,126 @@ def _window_area(window):
         return 0
 
 
+def pick_resolve_window(candidates):
+    """Choose the largest visible DaVinci window. Each item is (area, pid, hwnd)."""
+    visible = [item for item in candidates if int(item[0]) > 0 and int(item[2])]
+    if not visible:
+        return None
+    return max(visible, key=lambda item: int(item[0]))
+
+
+def resolve_windows():
+    """Visible top-level DaVinci windows as (area, pid, hwnd). EnumWindows only, no UI Automation."""
+    user32 = ctypes.WinDLL('user32', use_last_error=True)
+    user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+    user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+    user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+    user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
+    user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    results = []
+    enumerator = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    user32.EnumWindows.argtypes = [enumerator, ctypes.c_void_p]
+    user32.EnumWindows.restype = ctypes.c_int
+
+    @enumerator
+    def visit(hwnd, _param):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = int(user32.GetWindowTextLengthW(hwnd) or 0)
+        title = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, title, length + 1)
+        if 'DaVinci Resolve' not in title.value:
+            return True
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        area = max(0, int(rect.right) - int(rect.left)) * max(0, int(rect.bottom) - int(rect.top))
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        results.append((area, int(pid.value), int(hwnd or 0)))
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return results
+
+
+def force_foreground(hwnd):
+    """Bring a window forward. Windows blocks SetForegroundWindow unless this process may take focus."""
+    user32 = ctypes.WinDLL('user32', use_last_error=True)
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    user32.IsIconic.argtypes = [ctypes.c_void_p]
+    user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    user32.ShowWindow.restype = ctypes.c_int
+    user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+    user32.SetForegroundWindow.restype = ctypes.c_int
+    user32.BringWindowToTop.argtypes = [ctypes.c_void_p]
+    user32.GetForegroundWindow.restype = ctypes.c_void_p
+    user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    user32.GetWindowThreadProcessId.restype = ctypes.c_ulong
+    user32.AttachThreadInput.argtypes = [ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int]
+    user32.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte, ctypes.c_ulong, ctypes.c_void_p]
+    user32.AllowSetForegroundWindow.argtypes = [ctypes.c_ulong]
+    kernel32.GetCurrentThreadId.restype = ctypes.c_ulong
+    handle = ctypes.c_void_p(int(hwnd))
+    user32.ShowWindow(handle, 9 if user32.IsIconic(handle) else 5)
+    user32.AllowSetForegroundWindow(0xFFFFFFFF)
+    # A momentary Alt tap is the documented way to lift the foreground lock.
+    user32.keybd_event(0x12, 0, 0, None)
+    foreground = user32.GetForegroundWindow()
+    current = kernel32.GetCurrentThreadId()
+    target = user32.GetWindowThreadProcessId(handle, None)
+    source = user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
+    if source:
+        user32.AttachThreadInput(current, source, True)
+    if target:
+        user32.AttachThreadInput(current, target, True)
+    user32.BringWindowToTop(handle)
+    user32.SetForegroundWindow(handle)
+    if target:
+        user32.AttachThreadInput(current, target, False)
+    if source:
+        user32.AttachThreadInput(current, source, False)
+    user32.keybd_event(0x12, 0, 2, None)
+
+
 def resolve_window(pid=None):
     import psutil
     from pywinauto import Application
-    if pid:
-        process = psutil.Process(int(pid))
-        if process.name().lower() != 'resolve.exe':
+    chosen = pick_resolve_window(resolve_windows())
+    if pid and chosen and int(chosen[1]) != int(pid):
+        chosen = pick_resolve_window([item for item in resolve_windows() if int(item[1]) == int(pid)])
+    if not chosen:
+        found = [p for p in psutil.process_iter(['name']) if (p.info.get('name') or '').lower() == 'resolve.exe']
+        if not found:
+            raise RuntimeError('请先启动 DaVinci Resolve。')
+        raise RuntimeError('RESOLVE_MAIN_WINDOW_NOT_READY')
+    _area, process_pid, hwnd = chosen
+    try:
+        if psutil.Process(process_pid).name().lower() != 'resolve.exe':
             raise RuntimeError('RESOLVE_PROCESS_MISMATCH')
-    else:
-        found = [p for p in psutil.process_iter(['name']) if (p.info['name'] or '').lower() == 'resolve.exe']
-        if len(found) != 1:
-            raise RuntimeError('请启动并进入唯一一个 DaVinci Resolve 主窗口。')
-        process = found[0]
+    except psutil.Error as exc:
+        raise RuntimeError('RESOLVE_MAIN_WINDOW_NOT_READY') from exc
+    try:
+        force_foreground(hwnd)
+    except Exception:
+        pass
     last = RuntimeError('RESOLVE_MAIN_WINDOW_NOT_READY')
-    for _ in range(3):
+    for _ in range(2):
         try:
-            app = Application(backend='uia').connect(process=process.pid, timeout=8)
+            app = Application(backend='uia').connect(process=process_pid, timeout=4)
             windows = [w for w in app.windows() if w.is_visible() and 'DaVinci Resolve' in (w.window_text() or '')]
             if not windows:
                 last = RuntimeError('RESOLVE_MAIN_WINDOW_NOT_READY')
             else:
                 window = max(windows, key=_window_area)
                 try:
-                    window.set_focus()
+                    force_foreground(int(window.handle))
                 except Exception:
                     pass
-                time.sleep(0.15)
-                return app, window, process.pid
+                time.sleep(0.1)
+                return app, window, process_pid
         except Exception as exc:
             last = exc if isinstance(exc, RuntimeError) else RuntimeError('RESOLVE_MAIN_WINDOW_NOT_READY')
-        time.sleep(0.4)
+        time.sleep(0.25)
     raise last
 
 
@@ -70,25 +161,103 @@ def foreground_is(pid):
     return actual.value == int(pid)
 
 
+def _menu_label(item):
+    try:
+        return (item.window_text() or '').replace('&', '').split('\t')[0].strip()
+    except Exception:
+        return ''
+
+
+def _safe_children(parent, control_type):
+    if parent is None:
+        return []
+    try:
+        return list(parent.children(control_type=control_type))
+    except Exception:
+        return []
+
+
+def _matching_items(items, alternatives):
+    found = []
+    for item in items:
+        try:
+            visible = item.is_visible()
+        except Exception:
+            visible = True
+        if visible and _menu_label(item) in alternatives:
+            found.append(item)
+    return found
+
+
+def _items_under(parent):
+    found = []
+    for menu in _safe_children(parent, 'Menu'):
+        found.extend(_safe_children(menu, 'MenuItem'))
+    found.extend(_safe_children(parent, 'MenuItem'))
+    return found
+
+
+def _bar_items(window):
+    bars = _safe_children(window, 'MenuBar')
+    if not bars:
+        return _items_under(window)
+    found = []
+    for bar in bars:
+        found.extend(_items_under(bar))
+    return found
+
+
+def _popup_items(app, window):
+    # A newly opened menu is its own top-level window. Never walk the whole Resolve tree.
+    found = []
+    try:
+        tops = [top for top in app.windows() if getattr(top, 'handle', None) != getattr(window, 'handle', None)]
+    except Exception:
+        tops = []
+    for top in tops:
+        found.extend(_items_under(top))
+    return found
+
+
+def _activate_item(item, can_click):
+    for name in ('expand', 'invoke'):
+        action = getattr(item, name, None)
+        if action is None:
+            continue
+        try:
+            action()
+            return name
+        except Exception:
+            continue
+    if not can_click:
+        raise RuntimeError('RESOLVE_FOCUS_LOST: 达芬奇窗口没有拿到前台。请点开达芬奇主界面后重试。')
+    item.click_input()
+    return 'click'
+
+
 def menu_path(names, pid=None):
     app, window, pid = resolve_window(pid)
-    from pywinauto import Desktop
+    current = None
     for alternatives in names:
-        matches = []
-        for top in Desktop(backend='uia').windows(process=pid):
-            matches += [x for x in top.descendants(control_type='MenuItem')
-                        if x.is_visible() and x.window_text().replace('&','').split('\t')[0].strip() in alternatives]
-        if len(matches) != 1:
-            raise RuntimeError('RESOLVE_MENU_NOT_FOUND: ' + ' / '.join(alternatives))
-        if not foreground_is(pid):
+        focused = foreground_is(pid)
+        if not focused:
             try:
-                window.set_focus()
+                force_foreground(int(window.handle))
             except Exception:
                 pass
-            time.sleep(0.2)
-        if not foreground_is(pid):
-            raise RuntimeError('RESOLVE_FOCUS_LOST')
-        matches[0].click_input()
+            time.sleep(0.12)
+            focused = foreground_is(pid)
+        pool = _items_under(current) if current is not None else _bar_items(window)
+        matches = _matching_items(pool, alternatives)
+        if len(matches) != 1:
+            extra = _popup_items(app, window)
+            if current is None:
+                extra = _bar_items(window) + extra
+            matches = _matching_items(extra, alternatives)
+        if len(matches) != 1:
+            raise RuntimeError('RESOLVE_MENU_NOT_FOUND: ' + ' / '.join(alternatives))
+        _activate_item(matches[0], focused)
+        current = matches[0]
         time.sleep(0.12)
     return pid
 

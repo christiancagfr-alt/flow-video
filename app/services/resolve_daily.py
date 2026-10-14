@@ -116,7 +116,7 @@ def install_bridge():
             return bridge_root() / 'runtime' / source.name
         return script_dir() / source.name
     changed = [source for source in sources if not destination(source).is_file() or destination(source).read_bytes()!=source.read_bytes()]
-    config = {'python':Path(sys.executable).with_name('python.exe').as_posix(), 'helper':(bridge_root()/'runtime/windows_resolve_runtime.py').as_posix()} if os.name == 'nt' else {}
+    config = {'python':windows_python().as_posix(), 'helper':(bridge_root()/'runtime/windows_resolve_runtime.py').as_posix()} if os.name == 'nt' else {}
     config_changed = bool(config and read_pairs(script_dir()/'windows-runtime.ini') != config)
     if not changed and not config_changed:
         return False
@@ -138,7 +138,62 @@ def install_bridge():
 
 
 def _run(args, **kwargs):
-    return subprocess.run(args, capture_output=True, text=True, timeout=15, **kwargs)
+    return subprocess.run(args, capture_output=True, text=True, timeout=12, **kwargs)
+
+
+def grant_foreground():
+    """Let the menu helper take focus. Only works while Flow Studio itself is the foreground process."""
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.AllowSetForegroundWindow.argtypes = [ctypes.c_ulong]
+        user32.AllowSetForegroundWindow(0xFFFFFFFF)
+    except Exception:
+        return
+
+
+def windows_python():
+    current = Path(sys.executable)
+    if os.name != 'nt':
+        return current
+    sibling = current.with_name('python.exe')
+    return sibling if sibling.is_file() else current
+
+
+def menu_attempt_due(clicked_at, now, offline):
+    if offline or clicked_at is None:
+        return True
+    return now - clicked_at >= 8
+
+
+def interpret_menu_output(stdout, stderr):
+    text = ((stdout or '') + ('\n' + stderr if stderr else '')).strip()
+    try:
+        payload = json.loads(text.splitlines()[-1])
+    except (ValueError, IndexError, AttributeError):
+        return False, text[-180:]
+    if payload.get('ok'):
+        return True, ''
+    return False, str(payload.get('error') or text)[-180:]
+
+
+def connection_status_text(state, wake_error=''):
+    """Status line for the auto-edit page. A missing whisper path does not block waking Resolve."""
+    alive = bool(state.get('alive'))
+    error = str(wake_error or '')
+    whisper = 'whisper.cpp' in error
+    if error and not (not alive and whisper):
+        return '⚠ ' + error
+    if alive:
+        return ('⚠ ' + state['warning']) if state.get('warning') else (state.get('detail') or 'Bridge 在线')
+    if state.get('version'):
+        text = 'Resolve Bridge 连接中断，请重新唤醒；已保留最近状态。'
+        if whisper:
+            text += '自动剪辑前请在组件管理中检测或安装 whisper.cpp，这不阻止唤醒。'
+        return text
+    return ('⚠ ' + error) if error else ''
 
 
 def menu_error(output):
@@ -157,6 +212,19 @@ class DailyWake:
         self.stage = 'LAUNCHING'
         self.detail = '正在唤醒达芬奇'
         self.request_id = ''
+
+    def _invoke_bridge_menu(self):
+        python = windows_python()
+        script = BASE / 'scripts/davinci_run_menu.py'
+        if not python.is_file() or not script.is_file():
+            return False, '找不到唤醒达芬奇所需的 Python 或菜单脚本。'
+        try:
+            completed = _run([str(python), str(script), '--script-name', SCRIPT])
+        except subprocess.TimeoutExpired:
+            return False, '达芬奇菜单响应超时，正在重试。请保持达芬奇主界面可见。'
+        except OSError as exc:
+            return False, '无法启动达芬奇菜单脚本：' + str(exc)[:160]
+        return interpret_menu_output(completed.stdout, completed.stderr)
 
     def progress(self, stage, detail):
         self.stage, self.detail = stage, detail
@@ -187,28 +255,27 @@ class DailyWake:
         if not state['alive']:
             self.progress('BRIDGE_STARTING', '等待达芬奇初始化并启动 Bridge')
             deadline = time.monotonic() + 120
-            clicked = False
-            last = ''
+            clicked_at = None
+            last_message = ''
             while time.monotonic() < deadline:
                 observed = snapshot(self.root)
                 if observed['alive']:
                     break
-                if observed.get('stage') == 'OFFLINE':
-                    clicked = False
-                if not clicked:
-                    p = _run([str(Path(sys.executable).with_name('python.exe')) if os.name == 'nt' else sys.executable, str(BASE / 'scripts/davinci_run_menu.py'), '--script-name', SCRIPT])
-                    last = p.stdout + p.stderr
-                    permission = menu_error(last)
+                if menu_attempt_due(clicked_at, time.monotonic(), observed.get('stage') == 'OFFLINE'):
+                    grant_foreground()
+                    ok, message = self._invoke_bridge_menu()
+                    clicked_at = time.monotonic() if ok else None
+                    permission = menu_error(message)
                     if permission:
                         raise RuntimeError(permission)
-                    try:
-                        clicked = json.loads(p.stdout.strip().splitlines()[-1]).get('ok', False)
-                    except (ValueError, IndexError):
-                        clicked = False
+                    if message and message != last_message:
+                        self.progress('BRIDGE_STARTING', message)
+                        last_message = message
                 time.sleep(1)
             else:
                 hint = '首次安装后，达芬奇可能需要重新打开以刷新脚本菜单。' if installed else ''
-                raise RuntimeError('Resolve Bridge 启动超时。' + hint + '请检查 Workspace → Scripts 中的新 Bridge。' + last[-250:])
+                detail = last_message or '请检查 Workspace → Scripts 中的新 Bridge。'
+                raise RuntimeError('Resolve Bridge 启动超时。' + hint + detail)
         state = snapshot(self.root)
         if state.get('stage') not in ('IDLE', 'READY', 'ERROR', 'WAITING_USER_REVIEW'):
             raise RuntimeError('Bridge 当前正在执行任务，请等待当前操作结束：' + state.get('stage', ''))

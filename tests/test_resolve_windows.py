@@ -153,4 +153,106 @@ class WhisperRangeTests(unittest.TestCase):
             self.assertFalse(output.with_suffix('.crop.wav').exists())
 
 
+class MenuWalkTests(unittest.TestCase):
+    def _item(self, label, children=()):
+        item = type('Item', (), {})()
+        item.label = label
+        item.kids = list(children)
+        item.actions = []
+        item.descendants_called = False
+        def window_text():
+            return label
+        def is_visible():
+            return True
+        def children(control_type=None):
+            if control_type == 'MenuItem':
+                return list(item.kids)
+            return []
+        def descendants(**kwargs):
+            item.descendants_called = True
+            raise AssertionError('menu walk must not scan the whole Resolve tree')
+        def expand():
+            raise RuntimeError('no expand')
+        def invoke():
+            item.actions.append('invoke')
+        item.window_text = window_text
+        item.is_visible = is_visible
+        item.children = children
+        item.descendants = descendants
+        item.expand = expand
+        item.invoke = invoke
+        return item
+
+    def test_menu_walk_clicks_only_the_open_branch(self):
+        leaf = self._item('FlowStudio_Resolve_Bridge_v0.5.0')
+        folder = self._item('FlowStudioAuto', [leaf])
+        utility = self._item('Utility', [folder])
+        scripts = self._item('Scripts', [utility])
+        workspace = self._item('Workspace', [scripts])
+        bar = self._item('menu bar', [workspace])
+        window = self._item('DaVinci Resolve')
+        def window_children(control_type=None):
+            if control_type == 'MenuBar':
+                return [bar]
+            return []
+        window.children = window_children
+        window.handle = 70
+        app = type('App', (), {'windows': lambda self: []})()
+        with patch.object(runtime, 'resolve_window', return_value=(app, window, 7)), patch.object(runtime, 'foreground_is', return_value=False), patch.object(runtime, 'force_foreground'):
+            runtime.menu_path([('Workspace','工作区'), ('Scripts','脚本'), ('Utility','实用工具'), ('FlowStudioAuto',), ('FlowStudio_Resolve_Bridge_v0.5.0','FlowStudio_Resolve_Bridge_v0.5.0.lua')])
+        self.assertEqual(leaf.actions, ['invoke'])
+        self.assertFalse(leaf.descendants_called)
+
+    def test_ambiguous_menu_item_is_rejected(self):
+        window = self._item('DaVinci Resolve', [self._item('Workspace'), self._item('Workspace')])
+        window.handle = 1
+        app = type('App', (), {'windows': lambda self: []})()
+        with patch.object(runtime, 'resolve_window', return_value=(app, window, 7)), patch.object(runtime, 'foreground_is', return_value=True):
+            with self.assertRaisesRegex(RuntimeError, 'RESOLVE_MENU_NOT_FOUND'):
+                runtime.menu_path([('Workspace',)])
+
+    def test_largest_visible_window_is_selected(self):
+        self.assertEqual(runtime.pick_resolve_window([(10, 1, 11), (0, 2, 22), (90, 3, 33)]), (90, 3, 33))
+        self.assertIsNone(runtime.pick_resolve_window([(0, 1, 11), (12, 2, 0)]))
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows window enumeration')
+    def test_window_enumeration_does_not_crash(self):
+        found = runtime.resolve_windows()
+        self.assertIsInstance(found, list)
+        for area, pid, hwnd in found:
+            self.assertGreater(area, 0)
+            self.assertGreater(pid, 0)
+            self.assertGreater(hwnd, 0)
+
+
+class WakeStatusTests(unittest.TestCase):
+    def test_retry_and_status_text(self):
+        from app.services import resolve_daily as daily
+        self.assertTrue(daily.menu_attempt_due(None, 10, False))
+        self.assertFalse(daily.menu_attempt_due(10, 17, False))
+        self.assertTrue(daily.menu_attempt_due(10, 17, True))
+        self.assertTrue(daily.menu_attempt_due(10, 18, False))
+        ok, message = daily.interpret_menu_output('log\n{"ok": false, "error": "RESOLVE_FOCUS_LOST: 达芬奇窗口没有拿到前台。"}', '')
+        self.assertFalse(ok)
+        self.assertIn('RESOLVE_FOCUS_LOST', message)
+        ok, message = daily.interpret_menu_output('{"ok": true, "output": "ok"}', '')
+        self.assertTrue(ok)
+        self.assertEqual(message, '')
+        whisper = '请在组件管理中填写可执行的 whisper.cpp 命令路径，或点击“检测 / 安装 whisper.cpp”。'
+        disconnected = {'alive': False, 'version': '0.5.0', 'project': 'FlowStudio-2026-10-13', 'timeline': 'MAIN-2026-10-13'}
+        text = daily.connection_status_text(disconnected, whisper)
+        self.assertIn('请重新唤醒', text)
+        self.assertIn('whisper.cpp', text)
+        self.assertNotIn('请在组件管理中填写可执行的', text)
+        self.assertIn('RESOLVE_FOCUS_LOST', daily.connection_status_text(disconnected, 'RESOLVE_FOCUS_LOST: 没拿到前台'))
+
+    def test_menu_timeout_stays_a_retry_instead_of_aborting(self):
+        from app.services import resolve_daily as daily
+        wake = daily.DailyWake('25', root=Path('.'), day='2026-10-13')
+        with patch.object(daily, '_run', side_effect=daily.subprocess.TimeoutExpired('menu', 12)):
+            ok, message = wake._invoke_bridge_menu()
+        self.assertFalse(ok)
+        self.assertIn('超时', message)
+
+
 if __name__=='__main__':unittest.main()
