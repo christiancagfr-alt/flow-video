@@ -267,6 +267,12 @@ class WakeStatusTests(unittest.TestCase):
         ok, message = daily.interpret_menu_output('{"ok": false, "output": "ERR:not_found:FlowStudio_Resolve_Bridge_v0.5.0", "returncode": 3}', '')
         self.assertIn('没有找到 Bridge', message)
         self.assertNotIn('undefined', message)
+        raw_exit = '{"ok": false, "output": "ERR:Error: 不能获取对象。\\nexecution error: Error: TypeError: $.exit is not a function. (In \'$.exit(4)\', \'$.exit\' is undefined) (-2700)", "returncode": 1}'
+        ok, message = daily.interpret_menu_output(raw_exit, '')
+        self.assertFalse(ok)
+        self.assertIn('辅助功能', message)
+        self.assertNotIn('$.exit', message)
+        self.assertNotIn('TypeError', message)
 
 
 class MacMenuCommandTests(unittest.TestCase):
@@ -284,6 +290,18 @@ class MacMenuCommandTests(unittest.TestCase):
         self.assertNotIn('FLOWSTUDIO_SCRIPT_TARGET', source)
         self.assertNotIn('.js', source)
         self.assertNotIn('__FLOWSTUDIO_TARGET__', source)
+        self.assertNotIn('$.exit', source)
+        self.assertNotIn('menuItems()', source)
+        self.assertNotIn('menuBars()', source)
+        self.assertIn('byName', source)
+        self.assertIn('FlowStudioAuto', source)
+
+    def test_macos_result_uses_ok_line_instead_of_exit_code(self):
+        failed = self.menu.macos_result('ERR:not_found:FlowStudio_Resolve_Bridge_v0.5.0\n', '', 0)
+        self.assertFalse(failed['ok'])
+        self.assertEqual(failed['output'], 'ERR:not_found:FlowStudio_Resolve_Bridge_v0.5.0')
+        clicked = self.menu.macos_result('OK:FlowStudio_Resolve_Bridge_v0.5.0\n', '', 0)
+        self.assertTrue(clicked['ok'])
 
     def test_macos_command_rejects_a_name_that_could_break_the_script(self):
         with self.assertRaises(ValueError):

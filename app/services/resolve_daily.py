@@ -178,6 +178,8 @@ def menu_failure_text(detail):
     low = raw.lower()
     if any(token in low for token in ('-1719', '-1743', 'assistive', 'not authorized', 'not allowed', '辅助', '不允许')):
         return raw
+    if '不能获取对象' in raw or '-1728' in low or '$.exit' in raw or '-2700' in low:
+        return '达芬奇菜单暂时读不到。请让达芬奇主窗口显示在前台，并在系统设置 → 隐私与安全性 → 辅助功能中允许 Flow Studio。'
     if 'err:not_found:undefined' in low or 'err:missing_target' in low:
         return '唤醒没有拿到要运行的达芬奇脚本名称。请更新 Flow Studio 后再唤醒。'
     if 'err:not_found:' in low:

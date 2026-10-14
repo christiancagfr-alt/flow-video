@@ -1,2 +1,2 @@
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 REPOSITORY = "christiancagfr-alt/flow-video"

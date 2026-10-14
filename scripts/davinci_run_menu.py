@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Click a DaVinci Resolve Workspace script.
 
-Windows uses the menu bar directly and receives the script name as a Python
-argument. macOS used to read the name with JXA ``$.getenv(...).js``. On
-macOS 27 that ``.js`` read is undefined, so the menu search looks for an item
-named "undefined" and exits 3 with ``ERR:not_found:undefined``. The name is
-now embedded as a JSON string in the script itself. Linux has no auto-click.
+Windows receives the script name as a Python argument and walks the menu bar.
+macOS embeds that name as a JSON string and clicks one menu level at a time.
+JXA on macOS 27 has no $.exit, and calling menuItems() or menuBars() realizes
+every item, including separators, which throws "不能获取对象". Success is an
+OK: line. Linux has no auto-click.
 """
 from __future__ import annotations
 import argparse
@@ -18,47 +18,86 @@ from app.services import quiet_process as subprocess
 _TARGET_RE = re.compile(r'^[A-Za-z0-9_.-]{1,80}$')
 _MENU_JS = r'''
 var target = __FLOWSTUDIO_TARGET__;
-if (!target) { console.log('ERR:missing_target'); $.exit(5); }
-var se = Application('System Events');
-var p;
-try { p = se.processes.byName('DaVinci Resolve'); } catch(e) { console.log('ERR:no_process'); $.exit(2); }
-function n(x){ try { return String(x.name()); } catch(e) { return ''; } }
-function walkMenu(menu, depth) {
-  if (depth > 7) return false;
-  var items = [];
-  try { items = menu.menuItems(); } catch(e) { return false; }
-  for (var i=0; i<items.length; i++) {
-    var it = items[i];
-    var name = n(it);
-    if (name === target || name === target + '.lua' || name.indexOf(target) >= 0) {
-      try { it.click(); console.log('OK:' + name); return true; } catch(e) {}
-    }
+function pick(elements, alternatives) {
+  for (var a = 0; a < alternatives.length; a++) {
     try {
-      var subs = it.menus();
-      for (var j=0; j<subs.length; j++) if (walkMenu(subs[j], depth+1)) return true;
-    } catch(e) {}
+      var item = elements.byName(alternatives[a]);
+      if (String(item.name())) return item;
+    } catch (e) {}
   }
-  return false;
+  return null;
 }
-try {
-  p.frontmost = true;
-  delay(0.3);
-  var bars = p.menuBars();
-  if (!bars.length) throw 'no_menu_bar';
-  var top = bars[0].menuBarItems();
-  var workspace = null;
-  for (var i=0; i<top.length; i++) {
-    var name = n(top[i]);
-    if (name === 'Workspace' || name === '工作区') { workspace = top[i]; break; }
+function pickScript(elements) {
+  var exact = pick(elements, [target, target + '.lua']);
+  if (exact) return exact;
+  var misses = 0;
+  for (var i = 0; i < 80; i++) {
+    var item;
+    try { item = elements[i]; }
+    catch (e) { misses += 1; if (misses > 2) break; continue; }
+    misses = 0;
+    var name = '';
+    try { name = String(item.name()); } catch (e2) { continue; }
+    if (name && name.indexOf(target) >= 0) return item;
   }
-  if (!workspace) throw 'workspace_not_found';
-  var menus = workspace.menus();
-  for (var m=0; m<menus.length; m++) {
-    if (walkMenu(menus[m], 0)) $.exit(0);
+  return null;
+}
+function clickDown(item, label) {
+  try { item.click(); }
+  catch (e) { return 'ERR:click:' + label + ':' + e; }
+  delay(0.25);
+  try { return item.menus[0].menuItems; }
+  catch (e2) { return 'ERR:no_submenu:' + label + ':' + e2; }
+}
+function run() {
+  if (!target) return 'ERR:missing_target';
+  var se = Application('System Events');
+  var p = null;
+  var processNames = ['DaVinci Resolve', 'Resolve'];
+  for (var i = 0; i < processNames.length; i++) {
+    try {
+      var candidate = se.processes.byName(processNames[i]);
+      if (String(candidate.name())) { p = candidate; break; }
+    } catch (e) {}
   }
-  console.log('ERR:not_found:' + target);
-  $.exit(3);
-} catch(e) { console.log('ERR:' + String(e)); $.exit(4); }
+  if (!p) return 'ERR:no_process';
+  try { p.frontmost = true; } catch (e) {}
+  delay(0.4);
+  var elements;
+  try { elements = p.menuBars[0].menuBarItems; }
+  catch (e) { return 'ERR:no_menu_bar:' + e; }
+  var workspace = pick(elements, ['Workspace', '工作区']);
+  if (!workspace) return 'ERR:workspace_not_found';
+  var opened = clickDown(workspace, 'Workspace');
+  if (typeof opened === 'string') return opened;
+  elements = opened;
+  var folders = [
+    ['Scripts', '脚本'],
+    ['Utility', '实用工具', '实用程序'],
+    ['FlowStudioAuto']
+  ];
+  for (var f = 0; f < folders.length; f++) {
+    var found = pickScript(elements);
+    if (found) {
+      try { found.click(); return 'OK:' + String(found.name()); }
+      catch (e) { return 'ERR:click:' + target + ':' + e; }
+    }
+    var folder = pick(elements, folders[f]);
+    if (!folder) {
+      if (f === 0) return 'ERR:not_found:' + folders[f].join('/');
+      return 'ERR:not_found:' + target;
+    }
+    opened = clickDown(folder, folders[f][0]);
+    if (typeof opened === 'string') return opened;
+    elements = opened;
+  }
+  found = pickScript(elements);
+  if (!found) return 'ERR:not_found:' + target;
+  try { found.click(); return 'OK:' + String(found.name()); }
+  catch (e3) { return 'ERR:click:' + target + ':' + e3; }
+}
+try { console.log(run()); }
+catch (e) { console.log('ERR:' + String(e)); }
 '''
 
 
@@ -70,7 +109,7 @@ def script_basename(script_name):
 
 
 def macos_menu_source(script_name):
-    """JXA source that searches Workspace for this script. The name is a JSON literal."""
+    """JXA source that clicks Workspace → Scripts down to this script."""
     target = script_basename(script_name)
     if not _TARGET_RE.fullmatch(target):
         raise ValueError('达芬奇脚本名称无效。')
@@ -79,6 +118,29 @@ def macos_menu_source(script_name):
 
 def macos_osascript_command(script_name):
     return ['/usr/bin/osascript', '-l', 'JavaScript', '-e', macos_menu_source(script_name)]
+
+
+def macos_menu_status(stdout, stderr):
+    """Success is an OK: line. macOS 27 has no $.exit, so the exit code is not enough."""
+    text = ((stdout or '') + ('\n' + stderr if stderr else '')).strip()
+    ok_line = ''
+    err_line = ''
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('OK:'):
+            ok_line = stripped
+        elif stripped.startswith('ERR:'):
+            err_line = stripped
+    if ok_line:
+        return True, ok_line
+    if err_line:
+        return False, err_line
+    return False, text
+
+
+def macos_result(stdout, stderr, returncode):
+    ok, detail = macos_menu_status(stdout, stderr)
+    return {'ok': ok, 'output': detail, 'returncode': returncode}
 
 
 def main():
@@ -102,9 +164,9 @@ def main():
         print(json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False))
         return 1
     p = subprocess.run(command, capture_output=True, text=True)
-    out = ((p.stdout or '') + ('\n' + p.stderr if p.stderr else '')).strip()
-    print(json.dumps({'ok': p.returncode == 0, 'output': out, 'returncode': p.returncode}, ensure_ascii=False))
-    return p.returncode
+    result = macos_result(p.stdout, p.stderr, p.returncode)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result['ok'] else 1
 
 
 if __name__ == '__main__':
