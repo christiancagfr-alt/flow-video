@@ -96,6 +96,7 @@ def bridge_wait_reason(root):
         if not state:
             bits.append('状态文件无法读取')
         else:
+            age = None
             try:
                 age = max(0, int(time.time() - float(state.get('updated_at') or 0)))
                 age_text = f'{age}秒前'
@@ -103,6 +104,8 @@ def bridge_wait_reason(root):
                 age_text = '时间无效'
             bits.append(f"状态{state.get('stage') or '空'}/{state.get('version') or '无版本'}/{age_text}")
             detail = str(state.get('detail') or '').strip()
+            if detail and age is not None and age >= 30:
+                detail = '上次记录：' + detail
             if detail:
                 bits.append(detail[:60])
     if heart.is_file():

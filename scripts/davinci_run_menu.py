@@ -32,6 +32,27 @@ on isConsole(windowName)
   if label contains "Console" or label contains "console" or label contains "控制台" then return true
   return false
 end isConsole
+on hasClearButton(procName, i)
+  set hit to false
+  tell application "System Events"
+    tell process procName
+      tell window i
+        set labels to {}
+        try
+          set labels to name of buttons
+        end try
+        try
+          set labels to labels & name of buttons of toolbar 1
+        end try
+        repeat with b in labels
+          set oneName to b as text
+          if oneName is "Cls" or oneName is "Clear" or oneName is "清除" then set hit to true
+        end repeat
+      end tell
+    end tell
+  end tell
+  return hit
+end hasClearButton
 on consoleIndex(procName)
   set found to 0
   tell application "System Events"
@@ -44,11 +65,40 @@ on consoleIndex(procName)
           end try
           if found is not 0 then exit repeat
         end repeat
+        if found is 0 then
+          repeat with i from 1 to totalCount
+            try
+              if my hasClearButton(procName, i) then set found to i as integer
+            end try
+            if found is not 0 then exit repeat
+          end repeat
+        end if
       end tell
     end if
   end tell
   return found
 end consoleIndex
+on windowNames(procName)
+  set seen to ""
+  tell application "System Events"
+    if exists process procName then
+      tell process procName
+        set totalCount to count of windows
+        if totalCount > 6 then set totalCount to 6
+        repeat with i from 1 to totalCount
+          set label to ""
+          try
+            set label to name of window i as text
+          end try
+          if label is "" then set label to "(空)"
+          if seen is not "" then set seen to seen & "|"
+          set seen to seen & label
+        end repeat
+      end tell
+    end if
+  end tell
+  return seen
+end windowNames
 set procName to "DaVinci Resolve"
 tell application "System Events"
   if not (exists process procName) then set procName to "Resolve"
@@ -69,6 +119,10 @@ if idx is 0 then
     tell process procName
       set opened to false
       repeat with barName in {"工作区", "Workspace"}
+        try
+          click menu bar item barName of menu bar 1
+          delay 0.25
+        end try
         repeat with itemName in {"控制台", "Console"}
           try
             click menu item itemName of menu 1 of menu bar item barName of menu bar 1
@@ -84,7 +138,7 @@ if idx is 0 then
   set idx to my consoleIndex(procName)
 end if
 if idx is 0 then
-  my trace("NO_CONSOLE")
+  my trace("NO_CONSOLE " & my windowNames(procName))
   return "ERR:no_console"
 end if
 tell application "System Events"
@@ -96,13 +150,21 @@ tell application "System Events"
   end tell
 end tell
 delay 0.3
+set idx to my consoleIndex(procName)
 set frontName to ""
+set frontOk to false
 tell application "System Events"
   try
     set frontName to name of window 1 of process procName as text
   end try
 end tell
-if my isConsole(frontName) is false then
+if my isConsole(frontName) then set frontOk to true
+if frontOk is false then
+  try
+    if my hasClearButton(procName, 1) then set frontOk to true
+  end try
+end if
+if frontOk is false then
   my trace("FOCUS_FAIL " & frontName)
   return "ERR:console_not_focused:" & frontName
 end if

@@ -336,7 +336,7 @@ class WakeStatusTests(unittest.TestCase):
             (root / 'bridge_state.ini').write_text('version=0.5.0\nstage=OFFLINE\nupdated_at=1\ndetail=HOME unavailable\n', encoding='utf-8')
             reason = daily.bridge_wait_reason(root)
             self.assertIn('OFFLINE', reason)
-            self.assertIn('HOME unavailable', reason)
+            self.assertIn('上次记录：HOME unavailable', reason)
             self.assertIn('START home=/Users/test', reason)
             folder = Path(tempfile.mkdtemp(prefix='flow-boot-'))
             (folder / 'flowstudio-bridge-boot.txt').write_text('BOOT /Users/hauhua/Library\n', encoding='utf-8')
@@ -438,6 +438,8 @@ class MacMenuCommandTests(unittest.TestCase):
         self.assertNotIn('$.exit', source)
         self.assertNotIn('return w', source)
         self.assertIn('consoleIndex', source)
+        self.assertIn('Cls', source)
+        self.assertIn('click menu bar item barName', source)
 
     def test_windows_helper_loads_when_python_omits_the_script_directory(self):
         source = (BASE / 'scripts' / 'davinci_run_menu.py').read_text(encoding='utf-8')

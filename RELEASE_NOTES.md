@@ -1,4 +1,12 @@
-Flow Studio 1.1.12
+Flow Studio 1.1.13
+
+安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
+
+- 1.1.12 只认标题里带有「控制台」或 Console 的窗口。这台达芬奇的控制台标题对不上，所以唤醒停在 `NO_CONSOLE`，命令没有贴进去。1.1.13 还会认出带「Cls / Clear / 清除」按钮的控制台，并先点开「工作区」再点「控制台」。
+- 几小时前的旧状态不再显示成「Bridge 在线」。
+- 菜单名称改为 `FlowStudio_Resolve_Bridge_v1.1.13`。请先完全退出达芬奇，再重新打开，然后只点一次唤醒。
+
+此前 1.1.12：
 
 安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
 
