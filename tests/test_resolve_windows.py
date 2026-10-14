@@ -252,10 +252,45 @@ class WakeStatusTests(unittest.TestCase):
     def test_menu_timeout_stays_a_retry_instead_of_aborting(self):
         from app.services import resolve_daily as daily
         wake = daily.DailyWake('25', root=Path('.'), day='2026-10-13')
-        with patch.object(daily, '_run', side_effect=daily.subprocess.TimeoutExpired('menu', 12)):
+        with patch.object(daily.sys, 'platform', 'win32'), patch.object(daily, '_run', side_effect=daily.subprocess.TimeoutExpired('menu', 12)):
             ok, message = wake._invoke_bridge_menu()
         self.assertFalse(ok)
         self.assertIn('超时', message)
+
+    def test_mac_menu_timeout_is_not_killed_or_clicked_again(self):
+        from app.services import resolve_daily as daily
+        wake = daily.DailyWake('25', root=Path('.'), day='2026-10-13')
+
+        class Proc:
+            def communicate(self, timeout=None):
+                raise daily.subprocess.TimeoutExpired('menu', timeout or 12)
+
+            def kill(self):
+                raise AssertionError('the menu process must keep running')
+
+        with patch.object(daily.sys, 'platform', 'darwin'), patch.object(daily.subprocess, 'Popen', return_value=Proc()):
+            ok, message = wake._invoke_bridge_menu()
+        self.assertTrue(ok)
+        self.assertIn('不再重复点击', message)
+
+    def test_wait_reason_names_the_missing_heartbeat(self):
+        from app.services import resolve_daily as daily
+        root = Path(tempfile.mkdtemp(prefix='flow-bridge-wait-'))
+        try:
+            reason = daily.bridge_wait_reason(root)
+            self.assertIn('没有状态文件', reason)
+            self.assertIn('没有心跳文件', reason)
+            self.assertIn(str(root), reason)
+            log = root / 'logs'
+            log.mkdir()
+            (log / 'bridge.log').write_text('2026-10-14 00:00:00 START home=/Users/test\n', encoding='utf-8')
+            (root / 'bridge_state.ini').write_text('version=0.5.0\nstage=OFFLINE\nupdated_at=1\ndetail=HOME unavailable\n', encoding='utf-8')
+            reason = daily.bridge_wait_reason(root)
+            self.assertIn('OFFLINE', reason)
+            self.assertIn('HOME unavailable', reason)
+            self.assertIn('START home=/Users/test', reason)
+        finally:
+            shutil.rmtree(root)
 
     def test_bridge_menu_name_follows_the_app_version_and_old_names_are_removed(self):
         from app.version import VERSION
@@ -313,41 +348,20 @@ class MacMenuCommandTests(unittest.TestCase):
         self.assertEqual(command[:2], ['/usr/bin/osascript', '-e'])
         source = command[2]
         self.assertIn('"FlowStudio_Resolve_Bridge_v0.5.0"', source)
-        self.assertIn('READY:', source)
-        self.assertNotIn('ignoring application responses', source)
+        self.assertIn('ignoring application responses', source)
+        self.assertIn('/tmp/flowstudio-menu-click.log', source)
+        self.assertIn('CLICKING', source)
+        self.assertLess(source.index('CLICKING'), source.index('ignoring application responses'))
         self.assertIn('name of menu items', source)
         self.assertIn('FlowStudioAuto', source)
+        self.assertNotIn('start_new_session', source)
+        self.assertNotIn('READY:', source)
         self.assertNotIn('getenv', source)
         self.assertNotIn('FLOWSTUDIO_SCRIPT_TARGET', source)
         self.assertNotIn('.js', source)
         self.assertNotIn('__FLOWSTUDIO_TARGET__', source)
         self.assertNotIn('$.exit', source)
         self.assertNotIn('byName', source)
-
-    def test_ready_path_clicks_the_script_in_its_own_session(self):
-        ready = self.menu.macos_ready(
-            'READY:DaVinci Resolve\t工作区\t脚本\t实用工具\tFlowStudioAuto\tFlowStudio_Resolve_Bridge_v1.1.5\n',
-            '',
-        )
-        self.assertEqual(
-            ready,
-            ('DaVinci Resolve', ['工作区', '脚本', '实用工具', 'FlowStudioAuto', 'FlowStudio_Resolve_Bridge_v1.1.5']),
-        )
-        self.assertIsNone(self.menu.macos_ready('ERR:no_process\n', ''))
-        click = self.menu.macos_click_source('DaVinci Resolve', ready[1])
-        self.assertIn('ignoring application responses', click)
-        self.assertIn('menu bar item "工作区"', click)
-        self.assertIn('click menu item "FlowStudio_Resolve_Bridge_v1.1.5" of menu 1 of currentItem', click)
-        self.assertLess(click.index('click currentItem'), click.index('ignoring application responses'))
-        self.assertNotIn('getenv', click)
-        self.assertNotIn('$.exit', click)
-        with patch.object(self.menu.subprocess, 'Popen') as popen:
-            output = self.menu.dispatch_macos_click('DaVinci Resolve', ready[1])
-        self.assertEqual(output, 'OK:FlowStudio_Resolve_Bridge_v1.1.5')
-        args, kwargs = popen.call_args
-        self.assertEqual(args[0][:2], ['/usr/bin/osascript', '-e'])
-        self.assertTrue(kwargs.get('start_new_session'))
-        self.assertIn('ignoring application responses', args[0][2])
 
     def test_macos_result_uses_ok_line_instead_of_exit_code(self):
         failed = self.menu.macos_result('ERR:not_found:FlowStudio_Resolve_Bridge_v0.5.0\n', '', 0)

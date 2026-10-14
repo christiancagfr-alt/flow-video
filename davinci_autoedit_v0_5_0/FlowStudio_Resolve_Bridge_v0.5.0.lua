@@ -134,20 +134,31 @@ end
 -- Test harness returns only the pure preparation function; no application connection.
 if FLOWSTUDIO_DAILY_TEST then return prepareDaily, acquireResolve end
 
+local function noteFailure(msg)
+    pcall(function()
+        local f = io.open('/tmp/flowstudio-bridge-error.txt', 'w')
+        if f then f:write(os.date('%Y-%m-%d %H:%M:%S ') .. tostring(msg)); f:close() end
+    end)
+end
 local function bridgeHome()
-    -- Fusion on macOS often leaves HOME unset. Python uses the same home directory.
+    -- Fusion on macOS often leaves HOME unset. A child shell then also has no HOME.
     local home = os.getenv('HOME')
     if type(home) == 'string' and home ~= '' then return home end
     local function readCmd(cmd)
-        local pipe = io.popen(cmd)
-        local value = pipe and pipe:read('*a') or ''
-        if pipe then pipe:close() end
-        return tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')
+        local ok, pipe = pcall(io.popen, cmd)
+        if not ok or not pipe then return '' end
+        local value = pipe:read('*a') or ''
+        pipe:close()
+        return tostring(value):gsub('^%s+', ''):gsub('%s+$', '')
     end
-    home = readCmd([[/bin/sh -c 'printf %s "$HOME"']])
-    if home ~= '' then return home end
-    home = readCmd([[/usr/bin/python3 -c 'import pathlib; print(pathlib.Path.home())']])
+    home = readCmd([[/usr/bin/osascript -e 'POSIX path of (path to home folder)']]):gsub('/+$', '')
     if home:sub(1, 1) == '/' then return home end
+    local fields = readCmd('/usr/bin/id -P')
+    home = fields:match('^[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:([^:]+)') or ''
+    if home:sub(1, 1) == '/' then return home end
+    home = readCmd([[/bin/sh -c 'printf %s "$HOME"']])
+    if home:sub(1, 1) == '/' then return home end
+    noteFailure('HOME unavailable')
     error('HOME unavailable')
 end
 local home = bridgeHome()
@@ -156,6 +167,11 @@ local inbox = root .. '/v0_5_0/commands'
 local stateFile = root .. '/bridge_state.ini'
 local lockDir = root .. '/v0_5_0/instance.lock'
 local function quote(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+pcall(function()
+    os.execute('mkdir -p ' .. quote(root .. '/logs'))
+    local f = io.open(root .. '/logs/bridge.log', 'a')
+    if f then f:write(os.date('%Y-%m-%d %H:%M:%S') .. ' START home=' .. home .. '\n'); f:close() end
+end)
 local function runOK(cmd)
     local a, _, c = os.execute(cmd)
     return a == 0 or a == true and (c == nil or c == 0)
@@ -356,6 +372,6 @@ local ok, err = pcall(function()
     os.remove(root..'/v0_5_0/STOP')
     report('OFFLINE','Bridge 已停止')
 end)
-if not ok then pcall(report,'OFFLINE',tostring(err)) end
+if not ok then noteFailure(err); pcall(report,'OFFLINE',tostring(err)) end
 runOK('rmdir '..quote(lockDir)..' 2>/dev/null')
 if not ok then error(err) end

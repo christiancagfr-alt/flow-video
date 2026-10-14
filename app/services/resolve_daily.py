@@ -62,6 +62,65 @@ def snapshot(root=None):
     return dict(state, alive=alive, root=str(root))
 
 
+def _tail_line(path, limit=80):
+    try:
+        lines = Path(path).read_text(encoding='utf-8', errors='replace').splitlines()
+    except (OSError, UnicodeError):
+        return ''
+    for line in reversed(lines):
+        text = line.strip()
+        if text:
+            return text[:limit]
+    return ''
+
+
+def bridge_wait_reason(root):
+    """Why the heartbeat is not alive yet. Shown on the wake status line."""
+    root = Path(root)
+    bits = []
+    state_path = root / 'bridge_state.ini'
+    if not state_path.is_file():
+        bits.append('没有状态文件')
+    else:
+        state = read_pairs(state_path)
+        try:
+            age = max(0, int(time.time() - float(state.get('updated_at') or 0)))
+            age_text = f'{age}秒前'
+        except (TypeError, ValueError):
+            age_text = '时间无效'
+        bits.append(f"状态{state.get('stage') or '空'}/{state.get('version') or '无版本'}/{age_text}")
+        detail = str(state.get('detail') or '').strip()
+        if detail:
+            bits.append(detail[:60])
+    heart = root / 'bridge_heartbeat.txt'
+    if heart.is_file():
+        bits.append(f'心跳文件{max(0, int(time.time() - heart.stat().st_mtime))}秒前')
+    else:
+        bits.append('没有心跳文件')
+    last_log = _tail_line(root / 'logs' / 'bridge.log')
+    if last_log:
+        bits.append(last_log)
+    if sys.platform == 'darwin':
+        error = _tail_line('/tmp/flowstudio-bridge-error.txt')
+        if error:
+            bits.append(error)
+        click = _tail_line('/tmp/flowstudio-menu-click.log', 60)
+        if click:
+            bits.append('点击 ' + click)
+    bits.append(str(root))
+    return '；'.join(bits)[:300]
+
+
+def clear_mac_wake_traces():
+    if sys.platform != 'darwin':
+        return
+    for path in (Path('/tmp/flowstudio-menu-click.log'), Path('/tmp/flowstudio-bridge-error.txt')):
+        try:
+            path.write_text('', encoding='utf-8')
+        except OSError:
+            return
+
+
 def heartbeat_age(state):
     try:
         return time.time() - float(state.get('updated_at') or 0)
@@ -308,13 +367,28 @@ class DailyWake:
         script = BASE / 'scripts/davinci_run_menu.py'
         if not python.is_file() or not script.is_file():
             return False, '找不到唤醒达芬奇所需的 Python 或菜单脚本。'
+        command = [str(python), str(script), '--script-name', SCRIPT]
+        if sys.platform == 'darwin':
+            return self._invoke_macos_menu(command)
         try:
-            completed = _run([str(python), str(script), '--script-name', SCRIPT])
+            completed = _run(command)
         except subprocess.TimeoutExpired:
             return False, '达芬奇菜单响应超时，正在重试。请保持达芬奇主界面可见。'
         except OSError as exc:
             return False, '无法启动达芬奇菜单脚本：' + str(exc)[:160]
         return interpret_menu_output(completed.stdout, completed.stderr)
+
+    def _invoke_macos_menu(self, command):
+        """Leave a slow click running. Killing it aborts the Bridge script."""
+        try:
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        except OSError as exc:
+            return False, '无法启动达芬奇菜单脚本：' + str(exc)[:160]
+        try:
+            stdout, stderr = proc.communicate(timeout=12)
+        except subprocess.TimeoutExpired:
+            return True, '菜单点击已交给达芬奇，不再重复点击。' + bridge_wait_reason(self.root)
+        return interpret_menu_output(stdout, stderr)
 
     def progress(self, stage, detail):
         self.stage, self.detail = stage, detail
@@ -344,15 +418,24 @@ class DailyWake:
         launch_resolve()
         if not state['alive']:
             self.progress('BRIDGE_STARTING', '等待达芬奇初始化并启动 Bridge')
+            clear_mac_wake_traces()
             deadline = time.monotonic() + 120
             clicked_at = None
             started = False
             retried = False
             last_message = ''
+            last_report = 0.0
             while time.monotonic() < deadline:
                 observed = snapshot(self.root)
                 if observed['alive']:
                     break
+                now = time.monotonic()
+                if now - last_report >= 5:
+                    reason = bridge_wait_reason(self.root)
+                    if reason != last_message:
+                        self.progress('BRIDGE_STARTING', reason)
+                        last_message = reason
+                    last_report = now
                 if menu_attempt_due(clicked_at, time.monotonic(), observed.get('stage') == 'OFFLINE', started, retried):
                     grant_foreground()
                     was_started = started
@@ -372,7 +455,7 @@ class DailyWake:
                 time.sleep(1)
             else:
                 hint = '首次安装后，达芬奇可能需要重新打开以刷新脚本菜单。' if installed else ''
-                detail = last_message or '请检查 Workspace → Scripts 中的新 Bridge。'
+                detail = bridge_wait_reason(self.root)
                 raise RuntimeError('Resolve Bridge 启动超时。' + hint + detail)
         state = snapshot(self.root)
         if state.get('stage') not in ('IDLE', 'READY', 'ERROR', 'WAITING_USER_REVIEW'):

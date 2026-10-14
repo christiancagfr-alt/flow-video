@@ -1,4 +1,13 @@
-Flow Studio 1.1.6
+Flow Studio 1.1.7
+
+安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
+
+- macOS 唤醒改为在已经拿到辅助功能权限的同一次菜单操作里点击 Bridge。1.1.6 把点击放到另一个进程后，点击到不了达芬奇，所以页面显示已启动，脚本却没有跑起来。
+- 这次点击如果比较慢，不再关掉它，也不再马上重试。关掉点击会把正在启动的 Bridge 一起停掉。
+- 等待心跳时，状态行会写明卡在哪里：有没有点到脚本、状态文件、心跳文件、Bridge 日志最后一行，以及脚本报错。
+- 菜单名称改为 `FlowStudio_Resolve_Bridge_v1.1.7`。升级后请先停止旧 Bridge，关闭并重新打开达芬奇，再唤醒。
+
+此前 1.1.6：
 
 安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
 
