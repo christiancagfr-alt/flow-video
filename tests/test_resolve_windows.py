@@ -278,6 +278,7 @@ class WakeStatusTests(unittest.TestCase):
         self.assertNotIn('osascript', text)
         self.assertNotIn('id -P', text)
         self.assertIn('posixMkdir', text)
+        self.assertIn("bootWrite('ENTER')", text)
         self.assertIn("noteFailure('BOOT '", text)
 
     def test_wait_reason_names_the_missing_heartbeat(self):
@@ -366,8 +367,9 @@ class MacMenuCommandTests(unittest.TestCase):
         self.assertIn('"FlowStudio_Resolve_Bridge_v0.5.0"', source)
         self.assertNotIn('ignoring application responses', source)
         self.assertIn('/tmp/flowstudio-menu-click.log', source)
+        self.assertIn('click at', source)
         self.assertIn('CLICKING', source)
-        self.assertLess(source.index('CLICKING'), source.index('click menu item scriptIndex'))
+        self.assertLess(source.index('CLICKING'), source.index('click at'))
         self.assertIn('name of menu items', source)
         self.assertIn('FlowStudioAuto', source)
         self.assertNotIn('start_new_session', source)

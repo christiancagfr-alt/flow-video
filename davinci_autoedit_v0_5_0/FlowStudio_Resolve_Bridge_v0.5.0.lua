@@ -1,6 +1,36 @@
-local platformSource=debug.getinfo(1,'S').source:sub(2):gsub('\\','/')
-local platform=assert(loadfile(platformSource:match('^(.*)/[^/]+$')..'/FlowStudio_Platform.lua'))()
-local os,io,loadfile=platform.os,platform.io,platform.loadfile
+local rawIo = io
+local chunkInfo = debug.getinfo(1, 'S')
+local function bootWrite(msg)
+    -- Before platform load. A bad script path used to stop the file here, with no record left behind.
+    pcall(function()
+        local f = rawIo.open('/tmp/flowstudio-bridge-boot.txt', 'w')
+        if f then f:write(os.date('%Y-%m-%d %H:%M:%S ') .. tostring(msg)); f:close() end
+    end)
+end
+bootWrite('ENTER')
+local function scriptFile()
+    local src = chunkInfo and chunkInfo.source or ''
+    src = tostring(src):gsub('^@', ''):gsub('\\', '/')
+    if src:find('/', 1, true) then return src end
+    bootWrite('source-has-no-path ' .. tostring(chunkInfo and chunkInfo.source))
+    return ''
+end
+local function loadPlatform()
+    local dir = scriptFile():match('^(.*)/[^/]+$') or ''
+    if dir ~= '' then
+        local chunk, err = loadfile(dir .. '/FlowStudio_Platform.lua')
+        if chunk then
+            local ok, result = pcall(chunk)
+            if ok and type(result) == 'table' then return result end
+            bootWrite('platform-call ' .. tostring(result))
+        else
+            bootWrite('platform-load ' .. tostring(err))
+        end
+    end
+    return {windows = package.config:sub(1, 1) == '\\', os = os, io = io, loadfile = loadfile, directory = dir}
+end
+local platform = loadPlatform()
+local os, io, loadfile = platform.os, platform.io, platform.loadfile
 -- FlowStudio Bridge v0.5.0 / phase 1: internal Resolve Lua only.
 -- File command/heartbeat architecture retained from v0.4.5.3.
 -- Original AutoEditing, Cleanup and Export algorithms remain untouched.

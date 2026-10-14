@@ -1,4 +1,12 @@
-Flow Studio 1.1.9
+Flow Studio 1.1.10
+
+安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
+
+- macOS 改为在脚本菜单项的位置上点击，和用手点一样。1.1.9 的菜单点击会立刻返回，达芬奇并没有执行脚本，所以没有状态文件和心跳。
+- 脚本在加载其他文件之前就写下启动记录。如果脚本一开始就退出，状态行会显示具体原因，而不再只写「达芬奇没有执行脚本」。
+- 菜单名称改为 `FlowStudio_Resolve_Bridge_v1.1.10`。请先完全退出达芬奇，再重新打开，然后唤醒。
+
+此前 1.1.9：
 
 安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
 

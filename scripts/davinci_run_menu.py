@@ -103,7 +103,15 @@ on runClick()
           set chosen to name of menu item scriptIndex of menu 1 of parentItem as text
           my trace("CLICKING " & chosen)
           delay 0.3
-          click menu item scriptIndex of menu 1 of parentItem
+          set targetItem to menu item scriptIndex of menu 1 of parentItem
+          try
+            set itemPosition to position of targetItem
+            set itemSize to size of targetItem
+            click at {(item 1 of itemPosition) + (item 1 of itemSize) div 2, (item 2 of itemPosition) + (item 2 of itemSize) div 2}
+          on error errMsg
+            my trace("PRESS_FAIL " & errMsg)
+            click targetItem
+          end try
           my trace("CLICKED " & chosen)
           return "OK:" & chosen
         end if
@@ -123,7 +131,15 @@ on runClick()
                 set chosen to name of menu item deepIndex of menu 1 of menu item childIndex of menu 1 of parentItem as text
                 my trace("CLICKING " & chosen)
                 delay 0.3
-                click menu item deepIndex of menu 1 of menu item childIndex of menu 1 of parentItem
+                set targetItem to menu item deepIndex of menu 1 of menu item childIndex of menu 1 of parentItem
+                try
+                  set itemPosition to position of targetItem
+                  set itemSize to size of targetItem
+                  click at {(item 1 of itemPosition) + (item 1 of itemSize) div 2, (item 2 of itemPosition) + (item 2 of itemSize) div 2}
+                on error errMsg
+                  my trace("PRESS_FAIL " & errMsg)
+                  click targetItem
+                end try
                 my trace("CLICKED " & chosen)
                 return "OK:" & chosen
               end if

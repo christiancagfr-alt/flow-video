@@ -101,6 +101,10 @@ def bridge_wait_reason(root):
     if last_log:
         bits.append(last_log)
     boot = _tail_line(script_dir() / 'flowstudio-bridge-boot.txt')
+    if sys.platform == 'darwin':
+        tmp_boot = _tail_line('/tmp/flowstudio-bridge-boot.txt')
+        if tmp_boot:
+            boot = tmp_boot
     if boot:
         bits.append('脚本已启动 ' + boot)
     if sys.platform == 'darwin':
@@ -119,7 +123,7 @@ def bridge_wait_reason(root):
 def clear_mac_wake_traces():
     if sys.platform != 'darwin':
         return
-    paths = [Path('/tmp/flowstudio-menu-click.log'), Path('/tmp/flowstudio-bridge-error.txt'), script_dir() / 'flowstudio-bridge-boot.txt']
+    paths = [Path('/tmp/flowstudio-menu-click.log'), Path('/tmp/flowstudio-bridge-error.txt'), Path('/tmp/flowstudio-bridge-boot.txt'), script_dir() / 'flowstudio-bridge-boot.txt']
     for path in paths:
         try:
             if path.name.endswith('.txt'):
