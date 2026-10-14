@@ -134,7 +134,23 @@ end
 -- Test harness returns only the pure preparation function; no application connection.
 if FLOWSTUDIO_DAILY_TEST then return prepareDaily, acquireResolve end
 
-local home = assert(os.getenv('HOME'), 'HOME unavailable')
+local function bridgeHome()
+    -- Fusion on macOS often leaves HOME unset. Python uses the same home directory.
+    local home = os.getenv('HOME')
+    if type(home) == 'string' and home ~= '' then return home end
+    local function readCmd(cmd)
+        local pipe = io.popen(cmd)
+        local value = pipe and pipe:read('*a') or ''
+        if pipe then pipe:close() end
+        return tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    end
+    home = readCmd([[/bin/sh -c 'printf %s "$HOME"']])
+    if home ~= '' then return home end
+    home = readCmd([[/usr/bin/python3 -c 'import pathlib; print(pathlib.Path.home())']])
+    if home:sub(1, 1) == '/' then return home end
+    error('HOME unavailable')
+end
+local home = bridgeHome()
 local root = home .. '/Documents/FlowStudioResolveBridge'
 local inbox = root .. '/v0_5_0/commands'
 local stateFile = root .. '/bridge_state.ini'

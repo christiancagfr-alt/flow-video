@@ -194,8 +194,19 @@ def windows_python():
     return sibling if sibling.is_file() else current
 
 
-def menu_attempt_due(clicked_at, now, offline):
-    if offline or clicked_at is None:
+def menu_attempt_due(clicked_at, now, offline, started=False, retried=False):
+    """Retry a missed click. After one successful start, allow only one later try.
+
+    A state file that still says OFFLINE must not cause another click every
+    second once Bridge has already been started. That click restarts the script.
+    """
+    if clicked_at is None:
+        return True
+    if started:
+        if retried:
+            return False
+        return now - clicked_at >= 25
+    if offline:
         return True
     return now - clicked_at >= 8
 
@@ -335,15 +346,23 @@ class DailyWake:
             self.progress('BRIDGE_STARTING', '等待达芬奇初始化并启动 Bridge')
             deadline = time.monotonic() + 120
             clicked_at = None
+            started = False
+            retried = False
             last_message = ''
             while time.monotonic() < deadline:
                 observed = snapshot(self.root)
                 if observed['alive']:
                     break
-                if menu_attempt_due(clicked_at, time.monotonic(), observed.get('stage') == 'OFFLINE'):
+                if menu_attempt_due(clicked_at, time.monotonic(), observed.get('stage') == 'OFFLINE', started, retried):
                     grant_foreground()
+                    was_started = started
                     ok, message = self._invoke_bridge_menu()
                     clicked_at = time.monotonic()
+                    if was_started:
+                        retried = True
+                    if ok:
+                        started = True
+                        message = message or '已启动 Bridge。达芬奇里显示「正在执行脚本」是正常状态，请等待上线。'
                     permission = menu_error(message)
                     if permission:
                         raise RuntimeError(permission)

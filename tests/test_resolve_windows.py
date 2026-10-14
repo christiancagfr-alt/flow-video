@@ -232,6 +232,9 @@ class WakeStatusTests(unittest.TestCase):
         self.assertFalse(daily.menu_attempt_due(10, 17, False))
         self.assertTrue(daily.menu_attempt_due(10, 17, True))
         self.assertTrue(daily.menu_attempt_due(10, 18, False))
+        self.assertFalse(daily.menu_attempt_due(10, 34, True, started=True))
+        self.assertTrue(daily.menu_attempt_due(10, 35, True, started=True))
+        self.assertFalse(daily.menu_attempt_due(10, 80, True, started=True, retried=True))
         ok, message = daily.interpret_menu_output('log\n{"ok": false, "error": "RESOLVE_FOCUS_LOST: 达芬奇窗口没有拿到前台。"}', '')
         self.assertFalse(ok)
         self.assertIn('RESOLVE_FOCUS_LOST', message)
@@ -310,7 +313,8 @@ class MacMenuCommandTests(unittest.TestCase):
         self.assertEqual(command[:2], ['/usr/bin/osascript', '-e'])
         source = command[2]
         self.assertIn('"FlowStudio_Resolve_Bridge_v0.5.0"', source)
-        self.assertIn('ignoring application responses', source)
+        self.assertIn('READY:', source)
+        self.assertNotIn('ignoring application responses', source)
         self.assertIn('name of menu items', source)
         self.assertIn('FlowStudioAuto', source)
         self.assertNotIn('getenv', source)
@@ -319,6 +323,31 @@ class MacMenuCommandTests(unittest.TestCase):
         self.assertNotIn('__FLOWSTUDIO_TARGET__', source)
         self.assertNotIn('$.exit', source)
         self.assertNotIn('byName', source)
+
+    def test_ready_path_clicks_the_script_in_its_own_session(self):
+        ready = self.menu.macos_ready(
+            'READY:DaVinci Resolve\t工作区\t脚本\t实用工具\tFlowStudioAuto\tFlowStudio_Resolve_Bridge_v1.1.5\n',
+            '',
+        )
+        self.assertEqual(
+            ready,
+            ('DaVinci Resolve', ['工作区', '脚本', '实用工具', 'FlowStudioAuto', 'FlowStudio_Resolve_Bridge_v1.1.5']),
+        )
+        self.assertIsNone(self.menu.macos_ready('ERR:no_process\n', ''))
+        click = self.menu.macos_click_source('DaVinci Resolve', ready[1])
+        self.assertIn('ignoring application responses', click)
+        self.assertIn('menu bar item "工作区"', click)
+        self.assertIn('click menu item "FlowStudio_Resolve_Bridge_v1.1.5" of menu 1 of currentItem', click)
+        self.assertLess(click.index('click currentItem'), click.index('ignoring application responses'))
+        self.assertNotIn('getenv', click)
+        self.assertNotIn('$.exit', click)
+        with patch.object(self.menu.subprocess, 'Popen') as popen:
+            output = self.menu.dispatch_macos_click('DaVinci Resolve', ready[1])
+        self.assertEqual(output, 'OK:FlowStudio_Resolve_Bridge_v1.1.5')
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0][:2], ['/usr/bin/osascript', '-e'])
+        self.assertTrue(kwargs.get('start_new_session'))
+        self.assertIn('ignoring application responses', args[0][2])
 
     def test_macos_result_uses_ok_line_instead_of_exit_code(self):
         failed = self.menu.macos_result('ERR:not_found:FlowStudio_Resolve_Bridge_v0.5.0\n', '', 0)
