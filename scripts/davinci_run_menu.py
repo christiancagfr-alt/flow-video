@@ -32,31 +32,41 @@ on isConsole(windowName)
   if label contains "Console" or label contains "console" or label contains "控制台" then return true
   return false
 end isConsole
-on findConsole(proc)
+on consoleIndex(procName)
+  set found to 0
   tell application "System Events"
-    tell proc
-      repeat with w in windows
-        try
-          if my isConsole(name of w) then return w
-        end try
-      end repeat
-    end tell
+    if exists process procName then
+      tell process procName
+        set totalCount to count of windows
+        repeat with i from 1 to totalCount
+          try
+            if my isConsole(name of window i as text) then set found to i as integer
+          end try
+          if found is not 0 then exit repeat
+        end repeat
+      end tell
+    end if
   end tell
-  return missing value
-end findConsole
+  return found
+end consoleIndex
+set procName to "DaVinci Resolve"
 tell application "System Events"
-  set procName to "DaVinci Resolve"
   if not (exists process procName) then set procName to "Resolve"
-  if not (exists process procName) then
-    my trace("NO_PROCESS")
-    return "ERR:no_process"
-  end if
-  tell process procName
-    set frontmost to true
-    delay 0.4
-    set consoleWindow to my findConsole(process procName)
-    if consoleWindow is missing value then
-      my trace("OPEN_CONSOLE")
+  if not (exists process procName) then set procName to ""
+end tell
+if procName is "" then
+  my trace("NO_PROCESS")
+  return "ERR:no_process"
+end if
+tell application "System Events"
+  tell process procName to set frontmost to true
+end tell
+delay 0.4
+set idx to my consoleIndex(procName)
+if idx is 0 then
+  my trace("OPEN_CONSOLE")
+  tell application "System Events"
+    tell process procName
       set opened to false
       repeat with barName in {"工作区", "Workspace"}
         repeat with itemName in {"控制台", "Console"}
@@ -68,43 +78,51 @@ tell application "System Events"
         end repeat
         if opened then exit repeat
       end repeat
-      delay 0.8
-      set consoleWindow to my findConsole(process procName)
-    end if
-    if consoleWindow is missing value then
-      my trace("NO_CONSOLE")
-      return "ERR:no_console"
-    end if
+    end tell
+  end tell
+  delay 0.8
+  set idx to my consoleIndex(procName)
+end if
+if idx is 0 then
+  my trace("NO_CONSOLE")
+  return "ERR:no_console"
+end if
+tell application "System Events"
+  tell process procName
     try
-      perform action "AXRaise" of consoleWindow
+      perform action "AXRaise" of window idx
     end try
-    click consoleWindow
-    delay 0.3
-    set frontName to ""
-    try
-      set frontName to name of window 1 as text
-    end try
-    if my isConsole(frontName) is false then
-      my trace("FOCUS_FAIL " & frontName)
-      return "ERR:console_not_focused:" & frontName
-    end if
-    my trace("TYPE_DOFILE")
-    try
-      set previousClip to the clipboard
-    end try
-    set the clipboard to luaLine
-    delay 0.2
-    keystroke "v" using command down
-    delay 0.35
-    keystroke return
-    delay 0.15
-    try
-      set the clipboard to previousClip
-    end try
-    my trace("DOFILE_SENT")
-    return "OK:console"
+    click window idx
   end tell
 end tell
+delay 0.3
+set frontName to ""
+tell application "System Events"
+  try
+    set frontName to name of window 1 of process procName as text
+  end try
+end tell
+if my isConsole(frontName) is false then
+  my trace("FOCUS_FAIL " & frontName)
+  return "ERR:console_not_focused:" & frontName
+end if
+my trace("TYPE_DOFILE")
+try
+  set previousClip to the clipboard
+end try
+set the clipboard to luaLine
+delay 0.2
+tell application "System Events"
+  keystroke "v" using command down
+  delay 0.35
+  keystroke return
+end tell
+delay 0.15
+try
+  set the clipboard to previousClip
+end try
+my trace("DOFILE_SENT")
+return "OK:console"
 '''
 
 

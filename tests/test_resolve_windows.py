@@ -402,6 +402,11 @@ class WakeStatusTests(unittest.TestCase):
         ok, message = daily.interpret_menu_output('{"ok": false, "error": "No module named \'windows_resolve_runtime\'"}', '')
         self.assertIn('唤醒组件', message)
         self.assertNotIn('No module named', message)
+        raw = '{"ok": false, "output": "ERR:Error: 发生错误。", "returncode": 4}\nexecution error: Error: 发生错误。 (4)'
+        ok, message = daily.interpret_menu_output(raw, '')
+        self.assertFalse(ok)
+        self.assertIn('控制台', message)
+        self.assertNotIn('{"ok"', message)
 
 
 class MacMenuCommandTests(unittest.TestCase):
@@ -431,6 +436,8 @@ class MacMenuCommandTests(unittest.TestCase):
         self.assertNotIn('getenv', source)
         self.assertNotIn('__FLOWSTUDIO_LINE__', source)
         self.assertNotIn('$.exit', source)
+        self.assertNotIn('return w', source)
+        self.assertIn('consoleIndex', source)
 
     def test_windows_helper_loads_when_python_omits_the_script_directory(self):
         source = (BASE / 'scripts' / 'davinci_run_menu.py').read_text(encoding='utf-8')

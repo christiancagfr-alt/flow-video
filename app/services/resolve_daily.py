@@ -318,14 +318,34 @@ def _not_found_message(raw):
     return text
 
 
+def _menu_detail(detail):
+    """Use the helper's output field when a status line still contains its JSON."""
+    text = str(detail or '').strip()
+    for line in reversed(text.splitlines()):
+        candidate = line.strip()
+        if not candidate.startswith('{'):
+            continue
+        try:
+            payload = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            inner = payload.get('error') or payload.get('output')
+            if inner:
+                return str(inner).strip()
+    return text
+
+
 def menu_failure_text(detail):
     """Turn a menu-helper failure into a short status line.
 
     The macOS helper reports ``output`` (for example ``ERR:not_found:Scripts|saw:File``)
     rather than ``error``. Showing that JSON makes the wake button look stuck.
     """
-    raw = str(detail or '').strip()
+    raw = _menu_detail(detail)
     low = raw.lower()
+    if '发生错误' in raw:
+        return '唤醒没有把命令送进达芬奇控制台。请让达芬奇窗口留在前台，打开「工作区 → 控制台」，再点一次唤醒。'
     if any(token in low for token in ('-1719', '-1743', 'assistive', 'not authorized', 'not allowed', '辅助', '不允许')):
         return raw
     if 'err:not_found:undefined' in low or 'err:missing_target' in low:
@@ -379,7 +399,10 @@ def connection_status_text(state, wake_error=''):
 
 
 def menu_error(output):
-    if any(x in output.lower() for x in ('-1719', '-1743', 'assistive', 'not authorized', 'not allowed', '辅助', '不允许')):
+    text = str(output or '')
+    if '发生错误' in text:
+        return '唤醒没有把命令送进达芬奇控制台。请让达芬奇窗口留在前台，打开「工作区 → 控制台」，再点一次唤醒。'
+    if any(x in text.lower() for x in ('-1719', '-1743', 'assistive', 'not authorized', 'not allowed', '辅助', '不允许')):
         return '缺少 macOS 辅助功能或自动化权限：请在系统设置 → 隐私与安全性中允许 Flow Studio / Python 控制 DaVinci Resolve。'
     return ''
 

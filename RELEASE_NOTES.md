@@ -1,4 +1,11 @@
-Flow Studio 1.1.11
+Flow Studio 1.1.12
+
+安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
+
+- 1.1.11 把启动命令送进达芬奇控制台时，系统只返回「发生错误」，页面上会看到一串原始结果。1.1.12 改为只记录窗口序号，并在系统事件外面粘贴命令。
+- 菜单名称改为 `FlowStudio_Resolve_Bridge_v1.1.12`。请先完全退出达芬奇，再重新打开，然后只点一次唤醒。
+
+此前 1.1.11：
 
 安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
 
