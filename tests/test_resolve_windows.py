@@ -273,6 +273,13 @@ class WakeStatusTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn('不再重复点击', message)
 
+    def test_bridge_startup_does_not_shell_out_on_macos(self):
+        text = (BASE / 'davinci_autoedit_v0_5_0' / 'FlowStudio_Resolve_Bridge_v0.5.0.lua').read_text(encoding='utf-8')
+        self.assertNotIn('osascript', text)
+        self.assertNotIn('id -P', text)
+        self.assertIn('posixMkdir', text)
+        self.assertIn("noteFailure('BOOT '", text)
+
     def test_wait_reason_names_the_missing_heartbeat(self):
         from app.services import resolve_daily as daily
         root = Path(tempfile.mkdtemp(prefix='flow-bridge-wait-'))

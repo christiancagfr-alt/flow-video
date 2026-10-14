@@ -1,4 +1,11 @@
-Flow Studio 1.1.7
+Flow Studio 1.1.8
+
+安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
+
+- 达芬奇里的 Bridge 在写出心跳之前不再调用终端。此前这一步会一直停住，所以文稿目录里没有状态文件，也没有心跳文件，Flow Studio 就停在「正在唤醒达芬奇」。
+- 菜单名称改为 `FlowStudio_Resolve_Bridge_v1.1.8`。请先完全退出达芬奇，停掉正在执行的旧脚本，再重新打开，然后唤醒。
+
+此前 1.1.7：
 
 安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
 

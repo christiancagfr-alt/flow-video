@@ -140,25 +140,16 @@ local function noteFailure(msg)
         if f then f:write(os.date('%Y-%m-%d %H:%M:%S ') .. tostring(msg)); f:close() end
     end)
 end
+-- Written before any shell call. A shell call inside Resolve can sit forever and leave no files.
+noteFailure('BOOT '..tostring(platform.directory))
 local function bridgeHome()
-    -- Fusion on macOS often leaves HOME unset. A child shell then also has no HOME.
+    -- Resolve is busy running this script, so asking macOS for the home folder from here never returns.
     local home = os.getenv('HOME')
     if type(home) == 'string' and home ~= '' then return home end
-    local function readCmd(cmd)
-        local ok, pipe = pcall(io.popen, cmd)
-        if not ok or not pipe then return '' end
-        local value = pipe:read('*a') or ''
-        pipe:close()
-        return tostring(value):gsub('^%s+', ''):gsub('%s+$', '')
-    end
-    home = readCmd([[/usr/bin/osascript -e 'POSIX path of (path to home folder)']]):gsub('/+$', '')
-    if home:sub(1, 1) == '/' then return home end
-    local fields = readCmd('/usr/bin/id -P')
-    home = fields:match('^[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:([^:]+)') or ''
-    if home:sub(1, 1) == '/' then return home end
-    home = readCmd([[/bin/sh -c 'printf %s "$HOME"']])
-    if home:sub(1, 1) == '/' then return home end
-    noteFailure('HOME unavailable')
+    local dir = tostring(platform.directory or '')
+    home = dir:match('^(/Users/[^/]+)/') or dir:match('^(/home/[^/]+)/') or ''
+    if home ~= '' then return home end
+    noteFailure('HOME unavailable dir='..dir)
     error('HOME unavailable')
 end
 local home = bridgeHome()
@@ -167,14 +158,117 @@ local inbox = root .. '/v0_5_0/commands'
 local stateFile = root .. '/bridge_state.ini'
 local lockDir = root .. '/v0_5_0/instance.lock'
 local function quote(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
-pcall(function()
-    os.execute('mkdir -p ' .. quote(root .. '/logs'))
-    local f = io.open(root .. '/logs/bridge.log', 'a')
-    if f then f:write(os.date('%Y-%m-%d %H:%M:%S') .. ' START home=' .. home .. '\n'); f:close() end
-end)
 local function runOK(cmd)
     local a, _, c = os.execute(cmd)
     return a == 0 or a == true and (c == nil or c == 0)
+end
+local _posix
+local function posixLib()
+    if _posix ~= nil then return _posix or nil end
+    if platform.windows then _posix=false; return nil end
+    local ok, ffi = pcall(require, 'ffi')
+    if not ok or not ffi then _posix=false; return nil end
+    local defined = pcall(function()
+        ffi.cdef[[
+            int mkdir(const char *path, int mode);
+            int rmdir(const char *path);
+            typedef struct { long tv_sec; long tv_nsec; } FS_TIMESPEC;
+            int nanosleep(const FS_TIMESPEC *req, const FS_TIMESPEC *rem);
+        ]]
+    end)
+    if not defined then _posix=false; return nil end
+    _posix = ffi
+    return ffi
+end
+local function posixMkdir(path)
+    local ffi = posixLib()
+    if not ffi then return nil end
+    if ffi.C.mkdir(path, 493) == 0 then return 'created' end
+    if ffi.errno() == 17 then return 'exists' end
+    return 'error'
+end
+local function ensureDir(path)
+    path = tostring(path):gsub('\\','/'):gsub('/+$','')
+    if platform.windows then return runOK('mkdir -p '..quote(path)) end
+    if not posixLib() then
+        if bmd and type(bmd.createdir)=='function' and pcall(bmd.createdir, path) then return true end
+        noteFailure('Cannot create '..path)
+        return false
+    end
+    local acc = ''
+    for part in path:gmatch('[^/]+') do
+        acc = acc..'/'..part
+        local result = posixMkdir(acc)
+        if result ~= 'created' and result ~= 'exists' then
+            noteFailure('Cannot create '..acc)
+            return false
+        end
+    end
+    return acc ~= ''
+end
+local function mkdirExclusive(path)
+    local result = posixMkdir(path)
+    if result == 'created' then return true end
+    if result == 'exists' then return false end
+    if platform.windows then return runOK('mkdir '..quote(path)..' 2>/dev/null') end
+    noteFailure('Cannot lock '..path)
+    return false
+end
+local function removeDir(path)
+    local ffi = posixLib()
+    if ffi and ffi.C.rmdir(path) == 0 then return true end
+    if platform.windows then return runOK('rmdir '..quote(path)..' 2>/dev/null') end
+    return false
+end
+local function sleepOne()
+    local ffi = posixLib()
+    if ffi then
+        local ok = pcall(function()
+            local req = ffi.new('FS_TIMESPEC')
+            req.tv_sec = 1
+            req.tv_nsec = 0
+            ffi.C.nanosleep(req, nil)
+        end)
+        if ok then return end
+    end
+    if bmd and type(bmd.wait) == 'function' and pcall(bmd.wait, 1) then return end
+    if platform.windows then os.execute('/bin/sleep 1'); return end
+    local started = os.clock()
+    while os.clock() - started < 1 do end
+end
+local function jobsFromEntries(dir, entries)
+    local jobs = {}
+    for _, entry in pairs(entries) do
+        local name, isDir
+        if type(entry) == 'table' then
+            name = entry.Name or entry.name
+            isDir = entry.IsDir or entry.isDir
+        elseif type(entry) == 'string' then
+            name = entry
+        end
+        if type(name) == 'string' and name:match('%.job$') and not isDir then
+            jobs[#jobs+1] = dir..'/'..name
+        end
+    end
+    table.sort(jobs)
+    return jobs
+end
+local function listJobPaths(dir)
+    if not platform.windows then
+        if bmd and type(bmd.readdir) == 'function' then
+            for _, folder in ipairs({dir, dir..'/', dir..'/*'}) do
+                local ok, entries = pcall(bmd.readdir, folder)
+                if ok and type(entries) == 'table' then return jobsFromEntries(dir, entries) end
+            end
+        end
+        noteFailure('Cannot list '..dir)
+        return {}
+    end
+    local pipe = assert(io.popen('find '..quote(dir)..' -maxdepth 1 -type f -name "*.job" -print | sort'))
+    local paths = {}
+    for path in pipe:lines() do paths[#paths+1] = path end
+    pipe:close()
+    return paths
 end
 local function readPairs(path)
     local f = io.open(path, 'r'); local values = {}
@@ -191,12 +285,18 @@ local function atomicWrite(path, text)
 end
 local function exists(path) local f=io.open(path,'r'); if f then f:close(); return true end; return false end
 local dirs = {inbox, root..'/v0_5_0/done', root..'/v0_5_0/error', root..'/v0_5_0/suspended', root..'/logs'}
-for _,dir in ipairs(dirs) do assert(runOK('mkdir -p '..quote(dir)), 'Cannot create '..dir) end
+for _,dir in ipairs(dirs) do
+    if not ensureDir(dir) then error('Cannot create '..dir) end
+end
+pcall(function()
+    local f = io.open(root..'/logs/bridge.log', 'a')
+    if f then f:write(os.date('%Y-%m-%d %H:%M:%S') .. ' START home=' .. home .. '\n'); f:close() end
+end)
 -- Manual Workspace launches must also refuse a live legacy bridge.
 local legacyHeartbeat = io.open(root..'/bridge_heartbeat.txt','r')
 if legacyHeartbeat then
     local value = legacyHeartbeat:read('*a'); legacyHeartbeat:close()
-    if not tonumber(value) then
+    if platform.windows and not tonumber(value) then
         local stat = io.popen('/usr/bin/stat -f %m '..quote(root..'/bridge_heartbeat.txt'))
         local stamp = stat and tonumber(stat:read('*l'))
         if stat then stat:close() end
@@ -212,13 +312,16 @@ if old.version == '0.5.0' and old.stage~='OFFLINE' and age >= 0 and age < 30 the
     print('[FlowStudio] Bridge 已在线，不重复启动'); return
 end
 -- Reclaim only an expired instance directory; mkdir remains the exclusive acquisition.
-if not runOK('mkdir '..quote(lockDir)..' 2>/dev/null') then
+if not mkdirExclusive(lockDir) then
     -- Recheck the lease after losing mkdir: another script may just have started.
     local fresh = readPairs(stateFile)
     local leaseAge = os.time() - (tonumber(fresh.updated_at) or 0)
-    local stat = io.popen('/usr/bin/stat -f %m '..quote(lockDir))
-    local lockTime = stat and tonumber(stat:read('*l')) or os.time()
-    if stat then stat:close() end
+    local lockTime = 0
+    if platform.windows then
+        local stat = io.popen('/usr/bin/stat -f %m '..quote(lockDir))
+        lockTime = stat and tonumber(stat:read('*l')) or os.time()
+        if stat then stat:close() end
+    end
     if (fresh.version=='0.5.0' and fresh.stage~='OFFLINE' and leaseAge>=0 and leaseAge<30) or os.time()-(lockTime or os.time())<30 then
         print('[FlowStudio] Bridge 正在启动，不重复启动'); return
     end
@@ -232,7 +335,7 @@ if not runOK('mkdir '..quote(lockDir)..' 2>/dev/null') then
     if importing.batch_id and not resumable then
         error('IMPORT_RECOVERY_REQUIRED: 上次导入仍持有运行锁，不能接管可能仍在执行的进程。请检查旧 Bridge 和批次日志')
     end
-    if not runOK('rmdir '..quote(lockDir)..' 2>/dev/null') or not runOK('mkdir '..quote(lockDir)..' 2>/dev/null') then
+    if not removeDir(lockDir) or not mkdirExclusive(lockDir) then
         error('BRIDGE_LOCKED: Bridge 启动锁被占用')
     end
 end
@@ -261,6 +364,7 @@ local ok, err = pcall(function()
     state.resolve_version = 'pending'
     log('START Resolve='..state.resolve_version)
     report('IDLE', 'Bridge 在线，等待唤醒')
+    noteFailure('')
     local lostChecks=0
     while not exists(root..'/v0_5_0/STOP') do
         -- Publish before the Resolve call so a slow or briefly failing API does not look offline.
@@ -272,8 +376,7 @@ local ok, err = pcall(function()
             return
         end
         publish()
-        local p=assert(io.popen('find '..quote(inbox)..' -maxdepth 1 -type f -name "*.job" -print | sort'))
-        local paths={}; for path in p:lines() do paths[#paths+1]=path end; p:close()
+        local paths=listJobPaths(inbox)
         for _,path in ipairs(paths) do
             local job=readPairs(path)
             state.request_id=job.request_id or ''
@@ -367,11 +470,11 @@ local ok, err = pcall(function()
                 report('IDLE','当前项目或时间线已切换，请再次唤醒达芬奇')
             end
         end
-        os.execute('/bin/sleep 1')
+        sleepOne()
     end
     os.remove(root..'/v0_5_0/STOP')
     report('OFFLINE','Bridge 已停止')
 end)
 if not ok then noteFailure(err); pcall(report,'OFFLINE',tostring(err)) end
-runOK('rmdir '..quote(lockDir)..' 2>/dev/null')
+removeDir(lockDir)
 if not ok then error(err) end
