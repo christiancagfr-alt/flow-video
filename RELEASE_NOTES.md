@@ -1,4 +1,12 @@
-Flow Studio 1.1.4
+Flow Studio 1.1.5
+
+安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
+
+- 达芬奇「工作区 → 脚本」里的 Bridge 名称改为 `FlowStudio_Resolve_Bridge_v1.1.5`。以后每次升级，这个版本号都会跟着软件版本变化。
+- 安装时会去掉旧的 `FlowStudio_Resolve_Bridge_v0.5.0` 等旧名称，避免菜单里同时留下好几份。
+- 升级后请先停止旧 Bridge，关闭并重新打开达芬奇。菜单刷新后应只看到 `v1.1.5`。
+
+此前 1.1.4：
 
 安装包仍只附带网页插件目录 `extension/FlowStudio_Web_Plugin_v0.9.66_FLOW_SUBMIT_HITTEST_FIX`。目录名保持不变。其中清单版本是 0.9.67（读取 Flow 点数）。安装包不附带 1.8.3。
 

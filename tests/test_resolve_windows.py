@@ -254,6 +254,27 @@ class WakeStatusTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('超时', message)
 
+    def test_bridge_menu_name_follows_the_app_version_and_old_names_are_removed(self):
+        from app.version import VERSION
+        from app.services import resolve_daily as daily
+        self.assertEqual(daily.SCRIPT, f'FlowStudio_Resolve_Bridge_v{VERSION}.lua')
+        self.assertTrue((daily.BASE / 'davinci_autoedit_v0_5_0' / daily.BRIDGE_SOURCE).is_file())
+        folder = Path(tempfile.mkdtemp(prefix='flow-bridge-names-'))
+        try:
+            current = folder / daily.SCRIPT
+            current.write_text('current', encoding='utf-8')
+            (folder / 'FlowStudio_Resolve_Bridge_v0.5.0.lua').write_text('old', encoding='utf-8')
+            (folder / 'FlowStudio_Resolve_Bridge_v1.0.0.lua').write_text('previous', encoding='utf-8')
+            (folder / 'FlowStudio_Import_Batch.lua').write_text('keep', encoding='utf-8')
+            (folder / 'notes.lua').write_text('keep', encoding='utf-8')
+            removed = daily.retire_old_bridge_scripts(folder, daily.SCRIPT)
+            self.assertCountEqual(removed, ['FlowStudio_Resolve_Bridge_v0.5.0.lua', 'FlowStudio_Resolve_Bridge_v1.0.0.lua'])
+            self.assertEqual(current.read_text(encoding='utf-8'), 'current')
+            self.assertEqual((folder / 'FlowStudio_Import_Batch.lua').read_text(encoding='utf-8'), 'keep')
+            self.assertEqual((folder / 'notes.lua').read_text(encoding='utf-8'), 'keep')
+        finally:
+            shutil.rmtree(folder)
+
     def test_macos_undefined_target_is_chinese_not_raw_json(self):
         from app.services import resolve_daily as daily
         raw = '{"ok": false, "output": "ERR:not_found:undefined", "returncode": 3}'

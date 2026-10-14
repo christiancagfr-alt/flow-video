@@ -13,7 +13,20 @@ from pathlib import Path
 from app.core import repository as repo
 
 VERSION = '0.5.0'
-SCRIPT = 'FlowStudio_Resolve_Bridge_v0.5.0.lua'
+BRIDGE_SOURCE = 'FlowStudio_Resolve_Bridge_v0.5.0.lua'
+_BRIDGE_INSTALLED_RE = re.compile(r'^FlowStudio_Resolve_Bridge_v\d+\.\d+\.\d+\.lua$')
+
+
+def installed_bridge_name(app_version=None):
+    """Menu name shown inside DaVinci. It follows the app version so an upgrade is visible."""
+    from app.version import VERSION as current
+    version = str(app_version or current)
+    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+        raise ValueError('无效软件版本号')
+    return f'FlowStudio_Resolve_Bridge_v{version}.lua'
+
+
+SCRIPT = installed_bridge_name()
 HEARTBEAT_FRESH_SECONDS = 30
 IMPORT_DISCONNECT_SECONDS = 45
 FPS_VALUES = ('23.976', '24', '25', '29.97', '30', '50', '59.94', '60')
@@ -104,26 +117,43 @@ def reconcile_rebuilt_timeline(day, root=None):
     return len(reset)
 
 
+def retire_old_bridge_scripts(folder, keep):
+    """Remove previous Bridge menu entries. Other Resolve scripts stay in place."""
+    folder = Path(folder)
+    removed = []
+    if not folder.is_dir():
+        return removed
+    for path in folder.glob('FlowStudio_Resolve_Bridge_v*.lua'):
+        if path.name != keep and _BRIDGE_INSTALLED_RE.fullmatch(path.name):
+            path.unlink()
+            removed.append(path.name)
+    return removed
+
+
 def install_bridge():
     """Install just the new bridge; never quit Resolve or replace legacy scripts."""
-    sources = [BASE / 'davinci_autoedit_v0_5_0' / name for name in (SCRIPT, 'FlowStudio_Import_Batch.lua', 'Autoediting_V1.7_FlowStudio.lua', 'FlowStudio_Finish_Batch.lua', 'FlowStudio_Platform.lua')]
+    sources = [BASE / 'davinci_autoedit_v0_5_0' / name for name in (BRIDGE_SOURCE, 'FlowStudio_Import_Batch.lua', 'Autoediting_V1.7_FlowStudio.lua', 'FlowStudio_Finish_Batch.lua', 'FlowStudio_Platform.lua')]
     if os.name == 'nt':
         sources.append(BASE / 'scripts/windows_resolve_runtime.py')
     for source in sources:
         if not source.is_file():
             raise RuntimeError('安装文件缺失：' + str(source))
+    folder = script_dir()
     def destination(source):
         if source.name == 'windows_resolve_runtime.py':
             return bridge_root() / 'runtime' / source.name
-        return script_dir() / source.name
+        if source.name == BRIDGE_SOURCE:
+            return folder / SCRIPT
+        return folder / source.name
     changed = [source for source in sources if not destination(source).is_file() or destination(source).read_bytes()!=source.read_bytes()]
     config = {'python':windows_python().as_posix(), 'helper':(bridge_root()/'runtime/windows_resolve_runtime.py').as_posix()} if os.name == 'nt' else {}
-    config_changed = bool(config and read_pairs(script_dir()/'windows-runtime.ini') != config)
-    if not changed and not config_changed:
+    config_changed = bool(config and read_pairs(folder/'windows-runtime.ini') != config)
+    stale = [path for path in folder.glob('FlowStudio_Resolve_Bridge_v*.lua') if path.name != SCRIPT and _BRIDGE_INSTALLED_RE.fullmatch(path.name)] if folder.is_dir() else []
+    if not changed and not config_changed and not stale:
         return False
-    if snapshot().get('alive'):
+    if snapshot().get('alive') and (changed or config_changed):
         raise RuntimeError('新版 Bridge 正在运行，请先停止 Bridge，再更新。')
-    script_dir().mkdir(parents=True, exist_ok=True)
+    folder.mkdir(parents=True, exist_ok=True)
     # Install the module first and the calling bridge last.
     for source in reversed(changed):
         dest=destination(source)
@@ -132,9 +162,10 @@ def install_bridge():
         shutil.copyfile(source,temp)
         temp.replace(dest)
     if os.name == 'nt':
-        atomic_pairs(script_dir()/'windows-runtime.ini', config)
+        atomic_pairs(folder/'windows-runtime.ini', config)
         # Remove only our former internal helper entry from Resolve's menu.
-        (script_dir()/'windows_resolve_runtime.py').unlink(missing_ok=True)
+        (folder/'windows_resolve_runtime.py').unlink(missing_ok=True)
+    retire_old_bridge_scripts(folder, SCRIPT)
     return True
 
 
