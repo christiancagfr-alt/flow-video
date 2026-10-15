@@ -327,6 +327,28 @@ class PackagingReelsMixin:
         for i in range(grid.count()):
             widget=grid.itemAt(i).widget()
             if isinstance(widget,QLabel):widget.setStyleSheet('font-size:12px;');widget.setToolTip(widget.text())
+
+        from app.services.packaging_overlay import CUSTOM_SCROLL
+        self.scroll_options=QWidget()
+        scroll_grid=QGridLayout(self.scroll_options);scroll_grid.setContentsMargins(0,2,0,2);scroll_grid.setHorizontalSpacing(6);scroll_grid.setVerticalSpacing(3)
+        self.scroll_area_top=QSpinBox();self.scroll_area_top.setRange(0,99);self.scroll_area_top.setFixedWidth(68);self.scroll_area_top.setSuffix('%')
+        self.scroll_area_bottom=QSpinBox();self.scroll_area_bottom.setRange(1,100);self.scroll_area_bottom.setFixedWidth(68);self.scroll_area_bottom.setSuffix('%')
+        self.scroll_start_y=QSpinBox();self.scroll_start_y.setRange(-500,300);self.scroll_start_y.setFixedWidth(68);self.scroll_start_y.setSuffix('%')
+        self.scroll_end_y=QSpinBox();self.scroll_end_y.setRange(-500,300);self.scroll_end_y.setFixedWidth(68);self.scroll_end_y.setSuffix('%')
+        self.scroll_end_auto=QCheckBox('自动完全离场')
+        self.scroll_area_top.setToolTip('字幕显示区域的上边界，按画面高度百分比设置。')
+        self.scroll_area_bottom.setToolTip('字幕显示区域的下边界，按画面高度百分比设置。')
+        self.scroll_start_y.setToolTip('整段字幕进入动画的起始 Y 坐标；100% 表示画面底部，负数表示画面上方。')
+        self.scroll_end_y.setToolTip('整段字幕离场动画的结束 Y 坐标；可设为负数让字幕移出画面上沿。')
+        self.scroll_end_auto.setToolTip('自动把字幕移到画面上方，确保最后一行也完全滚出显示区域。')
+        for widget in (self.scroll_area_top,self.scroll_area_bottom,self.scroll_start_y,self.scroll_end_y):
+            widget.valueChanged.connect(self._scroll_style_changed)
+        self.scroll_end_auto.toggled.connect(self._scroll_style_changed)
+        scroll_grid.addWidget(QLabel('区域上沿'),0,0);scroll_grid.addWidget(self.scroll_area_top,0,1)
+        scroll_grid.addWidget(QLabel('区域下沿'),0,2);scroll_grid.addWidget(self.scroll_area_bottom,0,3)
+        scroll_grid.addWidget(QLabel('入场 Y'),1,0);scroll_grid.addWidget(self.scroll_start_y,1,1)
+        scroll_grid.addWidget(QLabel('离场 Y'),1,2);scroll_grid.addWidget(self.scroll_end_y,1,3);scroll_grid.addWidget(self.scroll_end_auto,1,4)
+        layout.addWidget(self.scroll_options)
         self._sync_inline_styles()
 
     def _sync_inline_styles(self):
@@ -342,6 +364,36 @@ class PackagingReelsMixin:
                 color=style.get(key,'#FFFFFF');widget.setProperty('color',color);widget.setToolTip(color)
                 widget.setStyleSheet('min-height:16px;padding:2px 4px;border-bottom:3px solid '+QColor(color).name()+';')
             widget.blockSignals(old)
+        self._sync_scroll_controls()
+
+    def _sync_scroll_controls(self):
+        if not hasattr(self,'scroll_options'):return
+        from app.services.packaging_overlay import CUSTOM_SCROLL
+        style=self._reels_style or self._reels_presets.get('默认白字',{})
+        self.scroll_options.setVisible(style.get('free_animation')==CUSTOM_SCROLL)
+        values={'scroll_area_top':20,'scroll_area_bottom':80,'scroll_start_y':100,'scroll_end_y':-100}
+        for key,widget in [('scroll_area_top',self.scroll_area_top),('scroll_area_bottom',self.scroll_area_bottom),
+                           ('scroll_start_y',self.scroll_start_y),('scroll_end_y',self.scroll_end_y)]:
+            old=widget.blockSignals(True);widget.setValue(int(style.get(key,values[key])));widget.blockSignals(old)
+        old=self.scroll_end_auto.blockSignals(True);self.scroll_end_auto.setChecked(bool(style.get('scroll_end_auto',True)));self.scroll_end_auto.blockSignals(old)
+        self.scroll_end_y.setEnabled(not self.scroll_end_auto.isChecked())
+
+    def _scroll_style_changed(self,*args):
+        if self._loading_state:return
+        from app.services.packaging_overlay import CUSTOM_SCROLL
+        style=copy.deepcopy(self._reels_style or self._reels_presets.get('默认白字',{}))
+        if style.get('free_animation')!=CUSTOM_SCROLL:return
+        sender=self.sender()
+        if sender is self.scroll_area_top and self.scroll_area_top.value()>=self.scroll_area_bottom.value():
+            self.scroll_area_bottom.setValue(min(100,self.scroll_area_top.value()+1))
+        elif sender is self.scroll_area_bottom and self.scroll_area_bottom.value()<=self.scroll_area_top.value():
+            self.scroll_area_top.setValue(max(0,self.scroll_area_bottom.value()-1))
+        style.update({'scroll_area_top':self.scroll_area_top.value(),'scroll_area_bottom':self.scroll_area_bottom.value(),
+                      'scroll_start_y':self.scroll_start_y.value(),'scroll_end_y':self.scroll_end_y.value(),
+                      'scroll_end_auto':self.scroll_end_auto.isChecked()})
+        self._reels_style=style
+        self.scroll_end_y.setEnabled(not self.scroll_end_auto.isChecked())
+        self._state_changed()
 
     def _inline_style_changed(self,*args):
         if self._loading_state:return

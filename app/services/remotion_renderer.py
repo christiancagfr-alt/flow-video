@@ -338,7 +338,7 @@ type Props = {
   source?: string;
   width?: number; height?: number; fps?: number; fit?: string;
   watermarks?: any[];
-  captionOverlays?: {path: string; start: number; duration: number; scroll?: boolean; imageHeight?: number; scrollBand?: {top: number; height: number; fade?: number}}[];
+  captionOverlays?: {path: string; start: number; duration: number; scroll?: boolean; imageHeight?: number; scrollBand?: {top: number; height: number; fade?: number}; scrollPath?: {startY: number; endY: number}}[];
   mainDuration?: number;
   totalDuration?: number;
   ratio?: string;
@@ -388,7 +388,10 @@ const ScrollFrame = ({c, relFrame, width, height, captionScale}: {c: NonNullable
     const top = Number(c.scrollBand.top) * captionScale;
     const bh = Number(c.scrollBand.height) * captionScale;
     const fade = Math.max(8, Number(c.scrollBand.fade || 48) * captionScale);
-    const y = bh - (bh + ih) * progress;
+    const pathY = Number(c.scrollPath?.startY) + (Number(c.scrollPath?.endY) - Number(c.scrollPath?.startY)) * progress;
+    const y = c.scrollPath
+      ? (pathY - Number(c.scrollBand.top)) * captionScale
+      : bh - (bh + ih) * progress;
     const mask = `linear-gradient(to bottom, transparent 0px, #000 ${fade}px, #000 ${Math.max(fade, bh - fade)}px, transparent ${bh}px)`;
     return (
       <div style={{position:'absolute', left, top, width: iw, height: bh, overflow:'hidden', maskImage: mask, WebkitMaskImage: mask}}>

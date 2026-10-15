@@ -34,6 +34,16 @@ PRESETS = {
         "position": "画面中间", "caption_mode": "自由文案动画（不对口型）",
         "free_animation": "中间固定滚动", "animation_speed": 120,
     },
+    # Customizable entry/exit path with a separately clipped display window.
+    "滚动字幕 · 自定义区域": {
+        "text": "#FFFFFF", "outline": "#1C1917", "highlight": "#FACC15", "outline_width": 4,
+        "effect": "outline", "font": "Arial", "font_size": 72, "line_length": 18,
+        "letter_spacing": 0, "line_spacing": 110, "margin_v": 520, "max_words": 12, "max_lines": 8,
+        "position": "画面中间", "caption_mode": "自由文案动画（不对口型）",
+        "free_animation": "自定义区域滚动", "animation_speed": 120,
+        "scroll_area_top": 20, "scroll_area_bottom": 80,
+        "scroll_start_y": 100, "scroll_end_y": -100, "scroll_end_auto": True,
+    },
     "双眼皮 经典红黄黑": {"text": "#FF0000", "outline": "#FFFF00", "highlight": "#111111", "outline_width": 3,
                            "effect": "double_outline", "font": "Arial", "font_size": 90, "line_length": 26,
                            "letter_spacing": -4, "line_spacing": 100, "margin_v": 500,

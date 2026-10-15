@@ -31,18 +31,41 @@ def paint_settings(raw):
 
 FULL_SCROLL = '持续向上滚动'
 BAND_SCROLL = '中间固定滚动'
-SCROLL_ANIMATIONS = (FULL_SCROLL, BAND_SCROLL)
+CUSTOM_SCROLL = '自定义区域滚动'
+SCROLL_ANIMATIONS = (FULL_SCROLL, BAND_SCROLL, CUSTOM_SCROLL)
 
 
 def scroll_band(style, canvas_h=1920):
     """Fixed middle window. Text is clipped here and does not travel off the frame."""
-    if (style or {}).get('free_animation') != BAND_SCROLL:
+    style = style or {}
+    animation = style.get('free_animation')
+    if animation == CUSTOM_SCROLL:
+        top_pct = max(0.0, min(99.0, float(style.get('scroll_area_top', 20))))
+        bottom_pct = max(1.0, min(100.0, float(style.get('scroll_area_bottom', 80))))
+        if bottom_pct <= top_pct:
+            bottom_pct = min(100.0, top_pct + 1.0)
+        top = int(round(int(canvas_h) * top_pct / 100.0))
+        bottom = int(round(int(canvas_h) * bottom_pct / 100.0))
+        height = max(1, bottom - top)
+        return {'top': top, 'height': height, 'fade': max(1, int(round(height * 0.08)))}
+    if animation != BAND_SCROLL:
         return None
     height = int(round(canvas_h * 0.42))
     height = max(360, min(int(canvas_h) - 200, height))
     top = (int(canvas_h) - height) // 2
     fade = max(36, int(round(height * 0.08)))
     return {'top': top, 'height': height, 'fade': fade}
+
+
+def scroll_positions(style, canvas_h=1920, image_h=0):
+    """Return the custom scroll image's starting and ending Y positions in canvas pixels."""
+    style = style or {}
+    start = int(round(int(canvas_h) * float(style.get('scroll_start_y', 100)) / 100.0))
+    if style.get('scroll_end_auto', True):
+        end = -max(1, int(image_h))
+    else:
+        end = int(round(int(canvas_h) * float(style.get('scroll_end_y', -100)) / 100.0))
+    return start, end
 
 
 def scroll_offset(progress, view_h, image_h):
@@ -64,7 +87,11 @@ def paint_at(captions,style,time):
             band=scroll_band(style)
             painter=QPainter(canvas);painter.setRenderHint(QPainter.Antialiasing,True)
             if band:
-                y=band['top']+scroll_offset(progress,band['height'],scroll.height())
+                if style.get('free_animation') == CUSTOM_SCROLL:
+                    start_y,end_y=scroll_positions(style,1920,scroll.height())
+                    y=start_y+(end_y-start_y)*max(0.0,min(1.0,float(progress)))
+                else:
+                    y=band['top']+scroll_offset(progress,band['height'],scroll.height())
                 painter.setClipRect(0,band['top'],1080,band['height'])
                 painter.drawImage(0,int(y),scroll)
                 fade=QImage(1080,band['height'],QImage.Format_ARGB32_Premultiplied);fade.fill(Qt.transparent)
@@ -125,6 +152,9 @@ def prepare_overlays(payload,root):
         layer={'path':str(path),'start':start,'duration':max(1,end-start),'scroll':True,'imageHeight':image.height()}
         band=scroll_band(style)
         if band:layer['scrollBand']=band
+        if style.get('free_animation') == CUSTOM_SCROLL:
+            start_y,end_y=scroll_positions(style,1920,image.height())
+            layer['scrollPath']={'startY':start_y,'endY':end_y}
         payload['captionOverlays']=[layer]
         payload['captions']=[];payload['_reels_prepared']=True;return payload
     layers=[]
