@@ -52,6 +52,30 @@ def script_dir():
     return Path.home() / 'Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/FlowStudioAuto'
 
 
+def bridge_dofile_command(script_path):
+    """Return the Lua console command users can paste to start the installed Bridge."""
+    path = Path(script_path).expanduser().resolve()
+    if not _BRIDGE_INSTALLED_RE.fullmatch(path.name):
+        raise ValueError('Bridge 本地脚本路径无效。')
+    value = path.as_posix()
+    if any(char in value for char in ('\r', '\n', '\x00')):
+        raise ValueError('Bridge 本地脚本路径无效。')
+    equals = ''
+    while f']{equals}]' in value:
+        equals += '='
+    return 'dofile([' + equals + '[' + value + ']' + equals + '])'
+
+
+def prepare_bridge_dofile_command():
+    """Ensure the user Bridge file exists, then return its copy-and-paste command."""
+    path = script_dir() / SCRIPT
+    if not path.is_file():
+        install_bridge()
+    if not path.is_file():
+        raise RuntimeError('没有找到已安装的 Bridge 脚本，请先在组件管理中安装 Bridge。')
+    return bridge_dofile_command(path)
+
+
 def read_pairs(path):
     try:
         return dict(line.split('=', 1) for line in path.read_text(encoding='utf-8').splitlines() if '=' in line)
@@ -82,9 +106,72 @@ def _tail_line(path, limit=80):
     return ''
 
 
+def _resolve_debug_log_path():
+    if os.name != 'nt':
+        return None
+    app_data = os.environ.get('APPDATA')
+    if not app_data:
+        return None
+    return Path(app_data) / 'Blackmagic Design' / 'DaVinci Resolve' / 'Support' / 'logs' / 'ResolveDebug.txt'
+
+
+def _resolve_debug_log_offset():
+    path = _resolve_debug_log_path()
+    try:
+        return path.stat().st_size if path else None
+    except OSError:
+        return None
+
+
+def _recent_resolve_sandbox_error(after_offset=None):
+    """Surface Resolve script-runtime restrictions instead of a generic wake timeout."""
+    path = _resolve_debug_log_path()
+    if path is None:
+        return ''
+    try:
+        stat = path.stat()
+        if time.time() - stat.st_mtime > 15 * 60:
+            return ''
+        with path.open('rb') as log_file:
+            if after_offset is not None:
+                log_file.seek(after_offset if stat.st_size >= after_offset else 0)
+                content = log_file.read()
+            else:
+                log_file.seek(max(0, stat.st_size - 512 * 1024))
+                content = log_file.read()
+        lines = content.decode('utf-8', errors='replace').splitlines()[-500:]
+    except OSError:
+        return ''
+    for line in reversed(lines):
+        low = line.lower()
+        if (('sandbox' in low and ('ffi' in low or 'file' in low or '读写文件' in line))
+                or 'bridge_runtime_unavailable' in low):
+            diagnostic = re.search(r'\[(platform\.windows=[^\]]+)\]', line, re.IGNORECASE)
+            return sandbox_permission_message(diagnostic.group(1) if diagnostic else '')
+    return ''
+
+
+def sandbox_permission_message(diagnostic=''):
+    message = ('达芬奇「工作区 → 脚本」的沙箱没有 Bridge 所需的文件接口；“Automatic scripted actions / Allow all”不能补回这些接口。'
+               '你已确认「工作区 → 控制台」提供 ffi 与 dofile，可从控制台手动启动 Bridge；菜单启动暂不兼容。')
+    if diagnostic:
+        message += ' 诊断：' + diagnostic
+    return message
+
+
 def bridge_wait_reason(root):
     """Why the heartbeat is not alive yet. Shown on the wake status line."""
     root = Path(root)
+    # Avoid letting the real user's Resolve log leak into checks that inspect
+    # an explicitly supplied temporary bridge root.
+    sandbox_error = ''
+    try:
+        if root.resolve() == bridge_root().resolve():
+            sandbox_error = _recent_resolve_sandbox_error()
+    except OSError:
+        pass
+    if sandbox_error:
+        return sandbox_error
     bits = []
     state_path = root / 'bridge_state.ini'
     heart = root / 'bridge_heartbeat.txt'
@@ -347,8 +434,16 @@ def menu_failure_text(detail):
     """
     raw = _menu_detail(detail)
     low = raw.lower()
+    if ('sandbox_permission_required' in low or 'bridge_runtime_unavailable' in low
+            or ('sandbox' in low and ('ffi' in low or '读写文件' in raw))):
+        diagnostic = re.search(r'\[(platform\.windows=[^\]]+)\]', raw, re.IGNORECASE)
+        return sandbox_permission_message(diagnostic.group(1) if diagnostic else '')
     if '发生错误' in raw:
         return '唤醒没有把命令送进达芬奇控制台。请让达芬奇窗口留在前台，打开「工作区 → 控制台」，再点一次唤醒。'
+    if 'resolve_main_window_not_ready' in low:
+        return '检测到达芬奇进程，但目前没有可操作的主窗口。请退出启动画面/弹窗，切回达芬奇主界面后重试连接。'
+    if 'resolve_focus_lost' in low:
+        return '达芬奇窗口没有到前台，已停止输入。请切回达芬奇主界面后重试连接。'
     if any(token in low for token in ('-1719', '-1743', 'assistive', 'not authorized', 'not allowed', '辅助', '不允许')):
         return raw
     if 'err:not_found:undefined' in low or 'err:missing_target' in low:
@@ -359,8 +454,30 @@ def menu_failure_text(detail):
         return '没有找到正在运行的达芬奇。请先打开 DaVinci Resolve，再点唤醒。'
     if 'no module named' in low and 'windows_resolve_runtime' in low:
         return '唤醒组件没有随软件加载。请完全退出并重新打开 Flow Studio，再点一次唤醒。'
+    if 'resolve_main_window_not_ready' in low:
+        return '达芬奇进程已启动，正在等待主窗口完成加载；请保持达芬奇打开，软件会继续重试。'
+    if 'resolve_menu_not_found' in low:
+        detail = raw.split('RESOLVE_MENU_NOT_FOUND:', 1)[-1].strip()
+        requested, _, seen = detail.partition('|saw:')
+        if 'console' in requested.lower() or '控制台' in requested:
+            message = '没找到达芬奇控制台入口。请确认 DaVinci Resolve 已完全启动，并在「工作区」菜单中能看到「控制台」。'
+        elif 'utility' in requested.lower() or '实用' in requested or '工具' in requested:
+            message = '已找到达芬奇主窗口，但没有读到「工作区 → 脚本 → 实用工具」菜单。若刚安装或更新 Bridge，请完全退出并重新打开达芬奇，让它刷新脚本菜单后再唤醒。'
+        else:
+            message = '已找到达芬奇主窗口，但脚本菜单层级与当前版本不一致。请确认达芬奇已完全启动，并检查「工作区 → 脚本」菜单。'
+        if seen:
+            message += '当前可读菜单：' + seen[:90]
+        return message
     if 'err:no_console' in low:
         return '没有找到达芬奇控制台。请在达芬奇打开「工作区 → 控制台」，看到 Lua> 后，再点一次唤醒。'
+    if 'resolve_console_not_found' in low:
+        return '达芬奇控制台没有成功打开。请确认「工作区 → 控制台」已经显示 Lua>，再点连接 Bridge。'
+    if 'resolve_console_input_not_found' in low:
+        return '没有识别到达芬奇 Lua> 命令输入区。请在「工作区 → 控制台」打开 Lua 控制台后再点连接 Bridge。'
+    if 'resolve_console_input_failed' in low:
+        return '达芬奇控制台已打开，但没有成功输入 Bridge 命令。请点一下控制台中的 Lua> 输入行，再重试连接。'
+    if 'invalid_bridge_script_path' in low:
+        return 'Bridge 本地脚本路径无效。请在 Flow Studio 的组件管理中重新安装 / 更新 Bridge。'
     if 'console_not_focused' in low:
         return '控制台没有到前台，已停止输入，避免打到时间线上。请点一下达芬奇的控制台窗口，再点唤醒。'
     if 'workspace_not_found' in low or 'no_menu_bar' in low or 'err:unreadable' in low or '不能获取对象' in raw or '-1728' in low or '$.exit' in raw:
@@ -375,13 +492,13 @@ def interpret_menu_output(stdout, stderr):
     try:
         payload = json.loads(text.splitlines()[-1])
     except (ValueError, IndexError, AttributeError):
-        return False, menu_failure_text(text)[-180:]
+        return False, menu_failure_text(text)[:300]
     if payload.get('ok'):
         return True, ''
     detail = payload.get('error')
     if not detail:
         detail = payload.get('output') or text
-    return False, menu_failure_text(str(detail))[-180:]
+    return False, menu_failure_text(str(detail))[:300]
 
 
 def connection_status_text(state, wake_error=''):
@@ -403,6 +520,13 @@ def connection_status_text(state, wake_error=''):
 
 def menu_error(output):
     text = str(output or '')
+    if any(message in text for message in (
+        '没找到达芬奇控制台入口', '达芬奇控制台没有成功打开',
+        '没有识别到达芬奇 Lua>', '控制台已打开，但没有成功输入 Bridge 命令',
+        '控制台没有到前台', '达芬奇窗口没有到前台', '没有可操作的主窗口', '脚本菜单层级与当前版本不一致',
+        '工作区」菜单里没有「脚本', '没有读到「工作区 → 脚本',
+    )):
+        return text
     if '发生错误' in text:
         return '唤醒没有把命令送进达芬奇控制台。请让达芬奇窗口留在前台，打开「工作区 → 控制台」，再点一次唤醒。'
     if any(x in text.lower() for x in ('-1719', '-1743', 'assistive', 'not authorized', 'not allowed', '辅助', '不允许')):
@@ -426,7 +550,7 @@ class DailyWake:
         script = BASE / 'scripts/davinci_run_menu.py'
         if not python.is_file() or not script.is_file():
             return False, '找不到唤醒达芬奇所需的 Python 或菜单脚本。'
-        command = [str(python), str(script), '--script-name', SCRIPT]
+        command = [str(python), str(script), '--script-name', SCRIPT, '--script-path', str(script_dir() / SCRIPT)]
         if sys.platform == 'darwin':
             return self._invoke_macos_menu(command)
         try:
@@ -457,38 +581,56 @@ class DailyWake:
         with (log_dir / 'davinci-workflow.log').open('a', encoding='utf-8') as f:
             f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} request={self.request_id} stage={stage} detail={detail}\n')
 
-    def run(self):
+    def connect(self, foreground=False):
         try:
-            return self._run()
+            return self._connect(foreground=foreground)
         except Exception as exc:
             self.progress('ERROR', str(exc))
             raise
 
-    def _run(self):
+    def _connect(self, foreground=False):
+        """Install, launch and wait for Bridge only; never enqueue project creation."""
         if sys.platform not in ('darwin', 'win32'):
             raise RuntimeError('DaVinci 自动化支持 Windows 与 macOS。')
         ensure_bridge_dirs(self.root)
         state = snapshot(self.root)
+        if state['alive']:
+            if foreground:
+                # Preserve the daily-wake update guard: never use a stale
+                # running Bridge when this app's installed files have changed.
+                install_bridge()
+                from app.services.davinci_workflow import launch_resolve
+                launch_resolve()
+            self.stage = state.get('stage', 'ONLINE')
+            self.detail = 'Bridge 已连接；尚未创建当天项目。'
+            self.progress('BRIDGE_CONNECTED', self.detail)
+            return state
         heartbeat = self.root / 'bridge_heartbeat.txt'
         if not state['alive'] and state.get('version') != VERSION and heartbeat.exists() and time.time() - heartbeat.stat().st_mtime < HEARTBEAT_FRESH_SECONDS:
             raise RuntimeError('检测到旧版 Resolve Bridge 正在运行。请先停止旧 Bridge；旧版本文件会保留。')
         installed = install_bridge()
-        # open -a reuses a running application and brings it to the front.
         from app.services.davinci_workflow import launch_resolve
         launch_resolve()
         if not state['alive']:
-            self.progress('BRIDGE_STARTING', '等待达芬奇初始化并启动 Bridge')
+            self.progress('BRIDGE_STARTING', '正在打开达芬奇控制台并启动 Bridge')
             clear_mac_wake_traces()
             deadline = time.monotonic() + 120
             clicked_at = None
+            resolve_log_offset = None
             started = False
             retried = False
             last_message = ''
             last_report = 0.0
+            menu_attempts = 0
             while time.monotonic() < deadline:
                 observed = snapshot(self.root)
                 if observed['alive']:
+                    state = observed
                     break
+                if resolve_log_offset is not None:
+                    runtime_error = _recent_resolve_sandbox_error(after_offset=resolve_log_offset)
+                    if runtime_error:
+                        raise RuntimeError(runtime_error)
                 now = time.monotonic()
                 if now - last_report >= 5:
                     reason = bridge_wait_reason(self.root)
@@ -497,6 +639,8 @@ class DailyWake:
                         last_message = reason
                     last_report = now
                 if menu_attempt_due(clicked_at, time.monotonic(), observed.get('stage') == 'OFFLINE', started, retried):
+                    menu_attempts += 1
+                    resolve_log_offset = _resolve_debug_log_offset()
                     grant_foreground()
                     was_started = started
                     ok, message = self._invoke_bridge_menu()
@@ -507,10 +651,12 @@ class DailyWake:
                         started = True
                         if '不再重复点击' in message:
                             retried = True
-                        message = message or '已启动 Bridge。达芬奇里显示「正在执行脚本」是正常状态，请等待上线。'
+                        message = message or '已向达芬奇 Lua 控制台发送 Bridge 启动命令，正在等待上线。'
                     permission = menu_error(message)
                     if permission:
                         raise RuntimeError(permission)
+                    if not ok and menu_attempts >= 3:
+                        raise RuntimeError('已尝试连接 3 次，停止重复操作。' + (message or '请确认达芬奇主窗口可见后重试。'))
                     if message and message != last_message:
                         self.progress('BRIDGE_STARTING', message)
                         last_message = message
@@ -518,8 +664,26 @@ class DailyWake:
             else:
                 hint = '首次安装后，达芬奇可能需要重新打开以刷新脚本菜单。' if installed else ''
                 detail = bridge_wait_reason(self.root)
-                raise RuntimeError('Resolve Bridge 启动超时。' + hint + detail)
+                menu_detail = ('最近一次连接结果：' + last_message + '。') if last_message else ''
+                bridge_detail = ('Bridge 状态：' + detail) if detail else ''
+                raise RuntimeError('Resolve Bridge 启动超时。' + hint + menu_detail + bridge_detail)
         state = snapshot(self.root)
+        if not state['alive']:
+            raise RuntimeError('Bridge 启动命令已发送，但尚未收到在线心跳。' + bridge_wait_reason(self.root))
+        self.stage = state.get('stage', 'ONLINE')
+        self.detail = 'Bridge 已连接；尚未创建当天项目。'
+        self.progress('BRIDGE_CONNECTED', self.detail)
+        return state
+
+    def run(self):
+        try:
+            return self._run()
+        except Exception as exc:
+            self.progress('ERROR', str(exc))
+            raise
+
+    def _run(self):
+        state = self._connect(foreground=True)
         if state.get('stage') not in ('IDLE', 'READY', 'ERROR', 'WAITING_USER_REVIEW'):
             raise RuntimeError('Bridge 当前正在执行任务，请等待当前操作结束：' + state.get('stage', ''))
         self.request_id = uuid.uuid4().hex

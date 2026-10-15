@@ -19,8 +19,8 @@ scratch/
 *.key
 build/
 dist/
-audit/environment-audit.json
 .DS_Store
 
-# Private audit evidence; never publish or bundle.
-/audit/local-*/
+# Local audit evidence and generated manifests; never publish or bundle.
+/audit/
+/SECURITY_AUDIT.md

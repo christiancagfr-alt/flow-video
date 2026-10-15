@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Start a DaVinci Resolve Workspace script.
-
-Windows receives the script name as a Python argument and walks the menu bar.
-macOS pastes dofile into the Resolve console. A menu click reports success
-without running the Lua file on Resolve 21. Linux has no auto-start.
-"""
+"""Start the Flow Studio Bridge through Resolve's interactive Lua console."""
 from __future__ import annotations
 import argparse
 import json
@@ -259,25 +254,31 @@ def load_windows_menu():
     module = module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module.invoke_menu
+    return module.invoke_console_dofile
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--script-name', required=True)
+    ap.add_argument('--script-path')
     args = ap.parse_args()
     if sys.platform.startswith('linux'):
         print(json.dumps({'ok':False,'error':'Linux 请在达芬奇 工作区 → 脚本 菜单手动运行对应脚本。'},ensure_ascii=False));return 1
     if sys.platform == 'win32':
         try:
-            output = load_windows_menu()(args.script_name)
+            if args.script_path:
+                script_path = Path(args.script_path).expanduser().resolve()
+            else:
+                from app.services.resolve_daily import script_dir
+                script_path = script_dir() / args.script_name
+            output = load_windows_menu()(args.script_name, script_path)
             print(json.dumps({'ok': True, 'output': output}))
             return 0
         except Exception as exc:
             print(json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=True))
             return 1
     try:
-        command = macos_osascript_command(args.script_name)
+        command = macos_osascript_command(args.script_name, args.script_path)
     except ValueError as exc:
         print(json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False))
         return 1

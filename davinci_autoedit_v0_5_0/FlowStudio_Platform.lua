@@ -1,7 +1,30 @@
 -- Platform-local OS facade. Never changes Resolve's global os/io tables.
 if _G.__FLOWSTUDIO_PLATFORM then return _G.__FLOWSTUDIO_PLATFORM end
 local nativeOS, nativeIO = os, io
-local windows = type(package) == 'table' and type(package.config) == 'string' and package.config:sub(1, 1) == '\\'
+local function envValue(name)
+    if type(nativeOS) == 'table' and type(nativeOS.getenv) == 'function' then
+        local ok, value = pcall(nativeOS.getenv, name)
+        if ok and type(value) == 'string' and value ~= '' then return value end
+    end
+    return ''
+end
+local function isWindows()
+    local pkg = rawget(_G, 'package')
+    if type(pkg) == 'table' and type(pkg.config) == 'string' then
+        if pkg.config:sub(1, 1) == '\\' then return true end
+    end
+    -- Resolve's menu-script sandbox can hide or alter `package.config`, so
+    -- don't treat a non-Windows separator as authoritative on its own.
+    -- Check the runtime/OS markers that remain available in that sandbox.
+    local jitRuntime = rawget(_G, 'jit')
+    if type(jitRuntime) == 'table' and type(jitRuntime.os) == 'string' and jitRuntime.os:lower() == 'windows' then return true end
+    local ffiRuntime = rawget(_G, 'ffi')
+    if type(ffiRuntime) == 'table' and type(ffiRuntime.os) == 'string' and ffiRuntime.os:lower() == 'windows' then return true end
+    if envValue('OS'):upper() == 'WINDOWS_NT' then return true end
+    if envValue('USERPROFILE') ~= '' or envValue('APPDATA') ~= '' then return true end
+    return false
+end
+local windows = isWindows()
 local P = {windows=windows, os=os, io=io, loadfile=loadfile}
 function P.path(s) return P.windows and tostring(s):gsub('\\','/') or s end
 local source = ''
@@ -9,10 +32,25 @@ if type(debug) == 'table' and type(debug.getinfo) == 'function' then
     local info = debug.getinfo(1, 'S')
     source = info and info.source or ''
 end
-source = tostring(source):sub(2)
-P.directory=P.path(source):match('^(.*)/[^/]+$') or ''
+source = tostring(source):sub(2):gsub('\\','/')
+-- A menu script's absolute drive path is available even in Resolve builds
+-- that hide package, jit, ffi metadata, and OS environment variables.
+if source:match('^[A-Za-z]:/') then P.windows=true end
+P.directory=source:match('^(.*)/[^/]+$') or ''
+local explicitDirectory = rawget(_G, '__FLOWSTUDIO_PLATFORM_DIRECTORY')
+if type(explicitDirectory) == 'string' and explicitDirectory ~= '' then
+    P.directory = explicitDirectory:gsub('\\', '/')
+end
 if not P.windows then return P end
-local ffi=assert(require('ffi'),'Windows bridge requires LuaJIT FFI')
+local ffi=rawget(_G, 'ffi')
+if type(ffi) ~= 'table' then
+    local loader = rawget(_G, 'require')
+    if type(loader) == 'function' then
+        local ok, loaded = pcall(loader, 'ffi')
+        if ok then ffi = loaded end
+    end
+end
+assert(type(ffi) == 'table', 'Windows bridge requires LuaJIT FFI')
 ffi.cdef[[
 typedef struct { unsigned long cb; wchar_t *reserved; wchar_t *desktop; wchar_t *title; unsigned long x,y,xsize,ysize,xchars,ychars,fill,flags; unsigned short show,cbreserved; unsigned char *reserved2; void *input,*output,*error; } FS_STARTUP;
 typedef struct { void *process,*thread; unsigned long pid,tid; } FS_PROCESS;
@@ -83,7 +121,17 @@ end
 P.io=setmetatable({open=open},{__index=nativeIO})
 P.os=setmetatable({},{__index=nativeOS})
 function P.os.getenv(key)
-    return key=='HOME' and P.path(nativeOS.getenv('USERPROFILE')) or nativeOS.getenv(key)
+    if key == 'HOME' then
+        local profile = envValue('USERPROFILE')
+        if profile ~= '' then return P.path(profile) end
+        local appData = P.path(envValue('APPDATA'))
+        profile = appData:match('^(.*)/AppData/Roaming$')
+        if profile then return profile end
+        profile = P.directory:match('^(.*)/AppData/Roaming/Blackmagic Design/')
+        if profile then return profile end
+    end
+    if type(nativeOS) == 'table' and type(nativeOS.getenv) == 'function' then return nativeOS.getenv(key) end
+    return nil
 end
 function P.os.rename(old,new)
     if K.MoveFileExW(wide(old),wide(new),1)~=0 then return true end

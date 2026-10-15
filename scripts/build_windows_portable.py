@@ -49,7 +49,7 @@ def source_files():
     files.extend(iter_plugin_files(ROOT))
     files.extend(ROOT.glob('requirements-asr.txt'))
     files.extend(ROOT.glob('THIRD_PARTY_NOTICES.md'))
-    for name in ['main.py','Flow Studio.vbs','requirements-release.lock','requirements-windows.txt','requirements-macos.lock','requirements-linux.lock','README.md','RELEASE_NOTES.md','.env.example','.gitignore']:
+    for name in ['main.py','Flow Studio.vbs','监控达芬奇唤醒.bat','requirements-release.lock','requirements-windows.txt','requirements-macos.lock','requirements-linux.lock','README.md','RELEASE_NOTES.md','.env.example','.gitignore']:
         p=ROOT/name
         if p.exists():files.append(p)
     return sorted(set(files))
@@ -75,7 +75,12 @@ def main():
     if hashlib.sha256(archive.read_bytes()).hexdigest()!=PYTHON_SHA256:raise ValueError('Python checksum mismatch')
     lines=[x.strip() for x in (ROOT/'requirements-release.lock').read_text().splitlines() if '==' in x]
     with ThreadPoolExecutor(max_workers=2) as pool:records=list(pool.map(wheel_record,lines))
-    (ROOT/'audit/wheel-manifest.json').write_text(json.dumps(records,indent=2),encoding='utf-8')
+    manifest=ROOT/'audit/wheel-manifest.json';manifest.parent.mkdir(parents=True,exist_ok=True)
+    manifest.write_text(json.dumps(records,indent=2),encoding='utf-8')
+    resolved_build=BUILD.resolve();resolved_out=OUT.resolve()
+    if resolved_out==resolved_build or not resolved_out.is_relative_to(resolved_build):
+        raise ValueError(f'Unsafe Windows build output path: {resolved_out}')
+    if OUT.exists():shutil.rmtree(OUT)
     OUT.mkdir(parents=True,exist_ok=True)
     for p in source_files():
         target=OUT/p.relative_to(ROOT);target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(p,target)

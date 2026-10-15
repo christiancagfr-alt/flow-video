@@ -24,6 +24,12 @@ local function homeDir()
     if ok and type(value) == 'string' and value ~= '' then return value:gsub('\\', '/') end
     ok, value = pcall(os.getenv, 'USERPROFILE')
     if ok and type(value) == 'string' and value ~= '' then return value:gsub('\\', '/') end
+    ok, value = pcall(os.getenv, 'APPDATA')
+    if ok and type(value) == 'string' and value ~= '' then
+        local appData = value:gsub('\\', '/'):gsub('/+$', '')
+        local profile = appData:match('^(.*)/AppData/Roaming$')
+        if profile and profile ~= '' then return profile end
+    end
     return ''
 end
 local function scriptFile()
@@ -43,11 +49,38 @@ local function scriptFile()
     return ''
 end
 local function loadPlatform()
-    local dir = scriptFile():match('^(.*)/[^/]+$') or ''
-    if dir ~= '' and type(loadfile) == 'function' then
-        local chunk, err = loadfile(dir .. '/FlowStudio_Platform.lua')
+    local sourcePath = scriptFile()
+    local dir = sourcePath:match('^(.*)/[^/]+$') or ''
+    local windows = sourcePath:match('^[A-Za-z]:/') ~= nil
+    local function runPlatform(callback)
+        -- Console-loaded chunks may not expose debug.getinfo. Pass the Bridge
+        -- directory explicitly so the Windows adapter can find its config.
+        local key = '__FLOWSTUDIO_PLATFORM_DIRECTORY'
+        local previous = rawget(_G, key)
+        if dir ~= '' then rawset(_G, key, dir) end
+        local ok, result = pcall(callback)
+        rawset(_G, key, previous)
+        return ok, result
+    end
+    if dir ~= '' then
+        local platformPath = dir .. '/FlowStudio_Platform.lua'
+        local chunk, err
+        if type(loadfile) == 'function' then
+            local ok, loaded, loadErr = pcall(loadfile, platformPath)
+            if ok then chunk, err = loaded, loadErr else err = loaded end
+        end
+        if type(chunk) ~= 'function' and type(dofile) == 'function' then
+            -- Some Resolve builds expose dofile but make loadfile unavailable
+            -- for menu scripts. Try the adapter through the remaining loader.
+            local ok, result = runPlatform(function() return dofile(platformPath) end)
+            if ok and type(result) == 'table' then
+                if type(result.directory) ~= 'string' or result.directory == '' then result.directory = dir end
+                return result
+            end
+            if not ok then err = tostring(err or '') .. '; dofile: ' .. tostring(result) end
+        end
         if chunk then
-            local ok, result = pcall(chunk)
+            local ok, result = runPlatform(chunk)
             if ok and type(result) == 'table' then
                 if type(result.directory) ~= 'string' or result.directory == '' then result.directory = dir end
                 return result
@@ -57,8 +90,8 @@ local function loadPlatform()
             bootWrite('platform-load ' .. tostring(err))
         end
     end
-    local windows = type(package) == 'table' and type(package.config) == 'string' and package.config:sub(1, 1) == '\\'
-    return {windows = windows, os = os, io = io, loadfile = loadfile, directory = dir}
+    windows = windows or (type(package) == 'table' and type(package.config) == 'string' and package.config:sub(1, 1) == '\\')
+    return {windows = windows, os = os, io = io, loadfile = loadfile, directory = dir, adapterLoaded = false}
 end
 local platform = loadPlatform()
 local os, io, loadfile = platform.os, platform.io, platform.loadfile
@@ -213,8 +246,16 @@ local function bridgeHome()
     -- Resolve is busy running this script, so asking macOS for the home folder from here never returns.
     local home = os.getenv('HOME')
     if type(home) == 'string' and home ~= '' then return home end
+    local appData = os.getenv('APPDATA')
+    if type(appData) == 'string' and appData ~= '' then
+        local profile = appData:gsub('\\', '/'):gsub('/+$', ''):match('^(.*)/AppData/Roaming$')
+        if profile and profile ~= '' then return profile end
+    end
     local dir = tostring(platform.directory or '')
     home = dir:match('^(/Users/[^/]+)/') or dir:match('^(/home/[^/]+)/') or ''
+    if home ~= '' then return home end
+    local normalizedDir = dir:gsub('\\', '/')
+    home = normalizedDir:match('^(.*)/AppData/Roaming/Blackmagic Design/') or ''
     if home ~= '' then return home end
     noteFailure('HOME unavailable dir='..dir)
     error('HOME unavailable')
@@ -266,15 +307,24 @@ local function posixLib()
     return lib
 end
 local function installSandboxIo()
-    -- Resolve 21.1 leaves ffi in place and removes io. Heartbeat files go through POSIX open.
+    -- Provide a truthful diagnostic when Resolve has removed the file APIs the Bridge needs.
     local needIo = not (type(io) == 'table' and type(io.open) == 'function')
     local needRename = not (type(os) == 'table' and type(os.rename) == 'function')
     local needRemove = not (type(os) == 'table' and type(os.remove) == 'function')
     if not needIo and not needRename and not needRemove then return end
     local lib = posixLib()
     if not lib then
-        bootWrite('SANDBOX io-missing ffi-missing')
-        error('SANDBOX: 达芬奇 21.1 禁止脚本读写文件，而且没有 ffi')
+        bootWrite('BRIDGE_RUNTIME_UNAVAILABLE io-missing')
+        local rawFfi = rawget(_G, 'ffi')
+        local ioType = type(rawget(_G, 'io'))
+        local ioOpenType = ioType == 'table' and type(io.open) or 'missing'
+        local detail = ' [platform.windows=' .. tostring(platform.windows)
+            .. ', io=' .. ioType .. '/' .. ioOpenType
+            .. ', ffi=' .. type(rawFfi)
+            .. ', loadfile=' .. type(rawget(_G, 'loadfile'))
+            .. ', dofile=' .. type(rawget(_G, 'dofile'))
+            .. ', platform_adapter=' .. tostring(platform.adapterLoaded ~= false) .. ']'
+        error('BRIDGE_RUNTIME_UNAVAILABLE: 达芬奇脚本环境未提供 Bridge 所需的文件接口；“Automatic scripted actions / Allow all”不能补回这些接口。Resolve 21.1 与早期版本存在脚本运行环境差异；若为免费版 21.1，请使用 Studio 版，若为 Studio 请检查 Bridge 兼容性并提供完整版本号。' .. detail)
     end
     local O_RDONLY, O_WRONLY, O_APPEND, O_CREAT, O_TRUNC = 0, 1, 8, 512, 1024
     local function openFile(path, mode)

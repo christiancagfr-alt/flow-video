@@ -63,13 +63,52 @@ class WindowsLuaTests(unittest.TestCase):
     def test_bridge_loads_when_resolve_hides_debug_and_package(self):
         from lupa.luajit21 import LuaRuntime
         lua = LuaRuntime(unpack_returned_tuples=True)
-        lua.execute('debug = nil; package = nil')
+        lua.execute("debug = nil; package = nil; jit = nil; ffi = nil; os.getenv = function() return '' end")
         platform = lua.execute((self.root / 'FlowStudio_Platform.lua').read_text(encoding='utf-8'), name='@' + (self.root / 'FlowStudio_Platform.lua').as_posix())
         self.assertEqual(platform.windows, False)
         lua.globals().FLOWSTUDIO_DAILY_TEST = True
         script = self.root / 'FlowStudio_Resolve_Bridge_v0.5.0.lua'
         prepare, _acquire = lua.execute(script.read_text(encoding='utf-8'), name='@' + script.as_posix())
         self.assertIsNotNone(prepare)
+
+    def test_platform_uses_bridge_directory_when_console_hides_debug(self):
+        from lupa.luajit21 import LuaRuntime
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        lua.execute('debug = nil; package = nil')
+        lua.globals()["__FLOWSTUDIO_PLATFORM_DIRECTORY"] = self.root.as_posix()
+        platform = lua.execute(
+            (self.root / 'FlowStudio_Platform.lua').read_text(encoding='utf-8'),
+            name='=(Resolve Console)',
+        )
+        self.assertTrue(platform.windows)
+        self.assertEqual(platform.directory, self.root.as_posix())
+
+    def test_bridge_passes_its_directory_when_console_hides_debug(self):
+        from lupa.luajit21 import LuaRuntime
+        profile = self.root / 'console-user'
+        script_dir = profile / 'AppData/Roaming/Blackmagic Design/DaVinci Resolve/Support/Fusion/Scripts/Utility/FlowStudioAuto'
+        script_dir.mkdir(parents=True)
+        shutil.copy2(self.root / 'FlowStudio_Platform.lua', script_dir / 'FlowStudio_Platform.lua')
+        shutil.copy2(self.root / 'windows-runtime.ini', script_dir / 'windows-runtime.ini')
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        lua.execute("ffi = require('ffi'); debug = nil; package = nil")
+        lua.globals()['test_profile'] = profile.as_posix()
+        lua.execute(r"""
+            local nativeGetenv = os.getenv
+            os.getenv = function(key)
+                if key == 'HOME' then return '' end
+                if key == 'USERPROFILE' then return test_profile end
+                if key == 'APPDATA' then return test_profile .. '/AppData/Roaming' end
+                if key == 'OS' then return 'Windows_NT' end
+                return nativeGetenv(key)
+            end
+            FLOWSTUDIO_DAILY_TEST = true
+        """)
+        script = self.root / 'FlowStudio_Resolve_Bridge_v0.5.0.lua'
+        lua.execute(script.read_text(encoding='utf-8'), name='=(Resolve Console)')
+        platform = lua.globals()['__FLOWSTUDIO_PLATFORM']
+        self.assertTrue(platform.windows)
+        self.assertEqual(platform.directory, script_dir.as_posix())
 
     def test_windows_bridge_processes_daily_job_and_keeps_heartbeating(self):
         bridge=self.root/'Documents/FlowStudioResolveBridge'
@@ -144,6 +183,53 @@ class ResolveDiscoveryTests(unittest.TestCase):
                 self.assertEqual(Path(config['helper']),root/'bridge/runtime/windows_resolve_runtime.py')
                 self.assertTrue(Path(config['helper']).is_file())
                 self.assertFalse(daily.install_bridge())
+
+
+class ResolveConsoleTests(unittest.TestCase):
+    def test_bridge_console_command_is_scoped_to_a_versioned_local_bridge_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'FlowStudio_Resolve_Bridge_v1.0.0.lua'
+            line = runtime.console_dofile_line(path)
+            self.assertEqual(line, 'dofile([[' + path.resolve().as_posix() + ']])')
+            with self.assertRaisesRegex(ValueError, 'INVALID_BRIDGE_SCRIPT_PATH'):
+                runtime.console_dofile_line(path.with_name('untrusted.lua'))
+
+    def test_console_launcher_opens_workspace_console_and_types_without_clipboard(self):
+        from types import ModuleType
+
+        class Window:
+            handle = 123
+            def __init__(self):
+                self.edit = type('Edit', (), {
+                    'is_visible': lambda self: True,
+                    'is_enabled': lambda self: True,
+                    'rectangle': lambda self: type('Rect', (), {'bottom': 100, 'width': lambda self: 200, 'height': lambda self: 24})(),
+                    'set_focus': lambda self: None,
+                    'click_input': lambda self, **_kwargs: None,
+                })()
+            def descendants(self, control_type=None):
+                return [self.edit] if control_type == 'Edit' else []
+
+        keyboard = ModuleType('pywinauto.keyboard')
+        sent_keys = []
+        keyboard.send_keys = lambda value, **_kwargs: sent_keys.append(value)
+        pywinauto = ModuleType('pywinauto')
+        pywinauto.keyboard = keyboard
+        with tempfile.TemporaryDirectory() as folder:
+            script = Path(folder) / 'FlowStudio_Resolve_Bridge_v1.0.0.lua'
+            with patch.dict(sys.modules, {'pywinauto': pywinauto, 'pywinauto.keyboard': keyboard}), \
+                    patch.object(runtime, 'menu_path', return_value=123) as menu, \
+                    patch.object(runtime, '_resolve_console_window', return_value=Window()), \
+                    patch.object(runtime, 'foreground_is', return_value=True), \
+                    patch.object(runtime, 'foreground_window_is', return_value=True), \
+                    patch.object(runtime, '_send_unicode_text') as type_text, \
+                    patch.object(runtime.time, 'sleep'):
+                result = runtime.invoke_console_dofile(script.name, script)
+            self.assertEqual(result, 'OK:console')
+            self.assertEqual(menu.call_args.args[0], [('Workspace', '工作区'), ('Console', '控制台')])
+            self.assertEqual(menu.call_args.args[1], None)
+            type_text.assert_called_once_with('dofile([[' + script.resolve().as_posix() + ']])')
+            self.assertEqual(sent_keys, ['^{END}', '{ENTER}'])
 
 class WhisperRangeTests(unittest.TestCase):
     def test_retry_start_zero_crops_the_requested_range(self):
@@ -240,6 +326,11 @@ class MenuWalkTests(unittest.TestCase):
 class WakeStatusTests(unittest.TestCase):
     def test_retry_and_status_text(self):
         from app.services import resolve_daily as daily
+        self.assertIn('没有识别到达芬奇 Lua>', daily.menu_failure_text('RESOLVE_CONSOLE_INPUT_NOT_FOUND'))
+        self.assertIn('没有成功输入', daily.menu_failure_text('RESOLVE_CONSOLE_INPUT_FAILED'))
+        self.assertIn('没有可操作的主窗口', daily.menu_failure_text('RESOLVE_MAIN_WINDOW_NOT_READY'))
+        self.assertIn('没有可操作的主窗口', daily.menu_error(daily.menu_failure_text('RESOLVE_MAIN_WINDOW_NOT_READY')))
+        self.assertIn('脚本菜单层级', daily.menu_error('已找到达芬奇主窗口，但脚本菜单层级与当前版本不一致。'))
         self.assertTrue(daily.menu_attempt_due(None, 10, False))
         self.assertFalse(daily.menu_attempt_due(10, 17, False))
         self.assertTrue(daily.menu_attempt_due(10, 17, True))
@@ -249,7 +340,8 @@ class WakeStatusTests(unittest.TestCase):
         self.assertFalse(daily.menu_attempt_due(10, 80, True, started=True, retried=True))
         ok, message = daily.interpret_menu_output('log\n{"ok": false, "error": "RESOLVE_FOCUS_LOST: 达芬奇窗口没有拿到前台。"}', '')
         self.assertFalse(ok)
-        self.assertIn('RESOLVE_FOCUS_LOST', message)
+        self.assertIn('达芬奇窗口没有到前台', message)
+        self.assertTrue(daily.menu_error(message))
         ok, message = daily.interpret_menu_output('{"ok": true, "output": "ok"}', '')
         self.assertTrue(ok)
         self.assertEqual(message, '')

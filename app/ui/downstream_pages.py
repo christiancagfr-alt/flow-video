@@ -1413,7 +1413,13 @@ class DaVinciPage(BaseWorkflowPage):
         self._wake_future = None
         self._wake = None
         self._wake_error = ''
+        self._bridge_manual_notice = ''
+        self._bridge_manual_notice_until = 0.0
         tools = QHBoxLayout()
+        self.connect_bridge_btn = QPushButton('复制 Bridge 命令')
+        self.connect_bridge_btn.clicked.connect(self.copy_bridge_command)
+        self.connect_bridge_btn.setToolTip('复制启动命令；切到 DaVinci Resolve，按 F6 打开 Lua 控制台，粘贴并按 Enter。')
+        tools.addWidget(self.connect_bridge_btn)
         self.launch_resolve_btn = QPushButton('唤醒达芬奇', objectName='primaryBtn')
         self.launch_resolve_btn.clicked.connect(self.open_resolve)
         tools.addWidget(self.launch_resolve_btn)
@@ -1520,6 +1526,20 @@ class DaVinciPage(BaseWorkflowPage):
             self._wake_future = self._wake_pool.submit(self._wake.run)
             self.launch_resolve_btn.setEnabled(False)
             self.detect_status.setText('正在唤醒达芬奇…')
+        except Exception as exc:
+            self._wake_error = str(exc)
+            self.detect_status.setText('⚠ ' + str(exc))
+
+    def copy_bridge_command(self):
+        try:
+            from PySide6.QtGui import QGuiApplication
+            from app.services.resolve_daily import prepare_bridge_dofile_command
+            command = prepare_bridge_dofile_command()
+            QGuiApplication.clipboard().setText(command)
+            self._wake_error = ''
+            self._bridge_manual_notice = '启动命令已复制。切到 DaVinci Resolve，按 F6 打开 Lua 控制台，粘贴（Ctrl+V / ⌘V）后按 Enter；连接状态会自动刷新。'
+            self._bridge_manual_notice_until = time.monotonic() + 90
+            self.detect_status.setText('✓ ' + self._bridge_manual_notice)
         except Exception as exc:
             self._wake_error = str(exc)
             self.detect_status.setText('⚠ ' + str(exc))
@@ -1707,6 +1727,8 @@ class DaVinciPage(BaseWorkflowPage):
             try:
                 response = future.result()
                 self._wake_error = ''
+                if self._operation == 'connect' and not response.get('alive'):
+                    self._wake_error = 'Bridge 启动命令已发送，但尚未收到在线心跳。'
                 if self._operation in ('import','autoedit','reanalyze') and not response.get('submitted'):
                     self._wake_error = response.get('detail', '')
             except Exception as exc:
@@ -1715,12 +1737,16 @@ class DaVinciPage(BaseWorkflowPage):
             self.launch_resolve_btn.setEnabled(True)
         busy = self._wake_future is not None
         if busy:
-            self.launch_resolve_btn.setText('唤醒达芬奇' if self._operation in ('import','autoedit','reanalyze') else '⟳ 正在唤醒达芬奇')
-            self.detect_status.setText(self._wake.detail)
+            self.launch_resolve_btn.setText('⟳ 正在唤醒达芬奇' if self._operation == 'wake' else '唤醒达芬奇')
+            self.connect_bridge_btn.setText('复制 Bridge 命令')
+            manual_notice = self._bridge_manual_notice if time.monotonic() < self._bridge_manual_notice_until else ''
+            self.detect_status.setText(manual_notice or self._wake.detail)
         else:
             self.launch_resolve_btn.setText('唤醒达芬奇')
+            self.connect_bridge_btn.setText('复制 Bridge 命令')
             from app.services.resolve_daily import connection_status_text
-            status_text = connection_status_text(st, self._wake_error)
+            manual_notice = self._bridge_manual_notice if time.monotonic() < self._bridge_manual_notice_until else ''
+            status_text = manual_notice or connection_status_text(st, self._wake_error)
             if status_text:
                 self.detect_status.setText(status_text)
         ready = st.get('alive') and st.get('stage') == 'READY' and st.get('project') == 'FlowStudio-' + work_dates.active()
@@ -1732,6 +1758,7 @@ class DaVinciPage(BaseWorkflowPage):
         )
         importing = st.get('alive') and st.get('stage') == 'IMPORTING'
         self.launch_resolve_btn.setEnabled(not busy and not importing)
+        self.connect_bridge_btn.setEnabled(True)
         self.import_batch_btn.setText('⟳ 正在导入剪辑素材' if importing else ('重试原批次导入' if batch and batch['status']=='IMPORT_ERROR' else '导入剪辑素材'))
         allowed = st.get('alive') and 'IMPORT_BATCH' in st.get('capabilities','').split(',') and st.get('stage') in ('READY','ERROR','WAITING_USER_REVIEW') and st.get('project')=='FlowStudio-'+work_dates.active() and st.get('timeline')=='MAIN-'+work_dates.active()
         self.import_batch_btn.setEnabled(bool(allowed and not busy and (not batch or batch['status'] in ('IMPORTED','IMPORT_ERROR','COMPLETED','SKIPPED'))))
