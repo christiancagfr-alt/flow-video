@@ -7,7 +7,7 @@ permissions:
   contents: read
 concurrency:
   group: local-windows-release
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   windows:
     runs-on: windows-2025
@@ -68,6 +68,7 @@ jobs:
             build/FlowStudio-Windows/build/media-regression/*/ffmpeg.log
           if-no-files-found: warn
   publish:
+    if: ${{ false }} # Hold for the CPython security-runtime decision.
     needs: windows
     runs-on: ubuntu-latest
     permissions:
