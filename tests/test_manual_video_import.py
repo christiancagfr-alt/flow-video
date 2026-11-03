@@ -1,5 +1,6 @@
 """Unit tests for manual external video import (single segment, whole video, whole host)."""
 from __future__ import annotations
+from scripts.test_runtime import DatabaseTemporaryDirectory
 
 import tempfile
 import unittest
@@ -12,7 +13,7 @@ from app.services import flow_redownload, manual_video_import as mvi
 
 class TestManualVideoImport(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = DatabaseTemporaryDirectory()
         self.tmp_dir = Path(self._tmp.name)
         self._db_patch = patch.object(database, "DB_PATH", self.tmp_dir / "test_import.db")
         self._db_patch.start()

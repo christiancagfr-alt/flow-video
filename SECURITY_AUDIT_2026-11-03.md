@@ -56,9 +56,11 @@ Windows CI 仅从本地发布分支触发；第三方 Actions 固定提交 SHA�
 
 未发现可确认仿冒包。google-api-python-client 处维护模式但仍安全支持；pywinauto 0.6.9 更新频率较低，应持续关注，不据此断言 EOL。Qt Multimedia 内部 FFmpeg 与独立导出 FFmpeg 是不同组件，升级后者不能证明前者已修复。Chromium 与原生库的完整 CVE 映射待确认。
 
+Windows 首轮原生测试揭示连接池持有临时 SQLite 文件，导致 Windows 删除测试目录时报 WinError 32。测试夹具现在仅关闭所属临时目录中的闲置数据库和素材注册表连接，再清理目录；保留生产连接池与测试断言，不忽略删除错误。另固定 Git 文本换行为 LF，避免 Windows CRLF 破坏源码契约测试。
+
 ## 验证结果
 
-- macOS 独立修复环境：Python 207 项通过，11 项跳过（平台或可选集成）；扩展 Node 47 项通过；桌面图标、版本、更新对话框启动通过。
+- macOS 独立修复环境：Python 207 项通过，11 项跳过（平台或可选集成）；扩展 Node 47 项通过；根目录 JS 1 项通过、2 项因未发行 v1.8.3 扩展而明确跳过；桌面图标、版本、更新对话框启动通过。
 - FFmpeg 9.0 实际执行带音频/字幕/PNG 水印的 320×180 两秒样片：H.264 / ProRes / VP9 均成功，时长与尺寸核验通过；Pillow PNG/JPEG 及动画图像处理通过。
 - 修复后 Windows 42 项锁与 ASR 清单 pip-audit 无已知漏洞；新 npm 锁 npm audit 无已知漏洞。无命中不等于无未知漏洞或原生库漏洞。
 - Windows 原生安装、内嵌 Python 测试、安装后 UI 和三编码回归由 windows-local-release.yml 强制执行，全部成功才上传并发布。写报告时待 CI 完成，不能把本机 macOS 结果当成 Windows 通过。

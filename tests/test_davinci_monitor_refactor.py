@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 """Tests for the refactored DaVinci Auto-Editing Center progress monitor (cards + inline drawer + table toggle)."""
 import os
 import tempfile
@@ -21,7 +22,7 @@ class TestDaVinciMonitorRefactor(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = DatabaseTemporaryDirectory()
         self.tmp_path = Path(self.tmp.name)
         self.db_path = self.tmp_path / "test_dv_refactor.sqlite3"
         self._db_patcher = patch.object(database, "DB_PATH", self.db_path)

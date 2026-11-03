@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import os
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 import json
@@ -57,7 +58,7 @@ class PackagingReelsTests(unittest.TestCase):
         params={'rename_enabled':True,'rename_start':2,'rename_padding':3,
             'rename_prefix':'a/b','rename_titles':'Hello\nWorld','rename_date_enabled':True,'rename_date':'20261011'}
         self.assertEqual(output_basename('source.mp4',params,1),'003-a_b-World-20261011')
-        with tempfile.TemporaryDirectory() as d:
+        with DatabaseTemporaryDirectory() as d:
             first=available_output(d,'name','mp4');Path(first).touch()
             self.assertEqual(Path(available_output(d,'name','mp4')).name,'name_2.mp4')
 
@@ -87,7 +88,7 @@ class PackagingReelsTests(unittest.TestCase):
                 image=paint_at(captions,style,1.6)
                 self.assertFalse(image.isNull())
                 self.assertTrue(any(bytes(image.bits())[3::4]),name)
-        with tempfile.TemporaryDirectory() as d:
+        with DatabaseTemporaryDirectory() as d:
             p=prepare_overlays({'mainDuration':4,'fps':30,'captions':captions,'reelsStyle':presets['Descript 经典黄']},d)
             self.assertTrue(p['captionOverlays']);self.assertGreaterEqual(p['captionOverlays'][0]['start'],30)
             self.assertTrue(all(x['start']+x['duration']<=90 for x in p['captionOverlays']))
@@ -127,7 +128,7 @@ class PackagingReelsTests(unittest.TestCase):
     def test_watermark_alpha_and_gif_timing(self):
         from PIL import Image
         from app.services.packaging_watermark import prepare_knockout,gif_frames
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             source=Path(folder)/'logo.png'
             im=Image.new('RGBA',(2,1),'white');im.putpixel((0,0),(255,0,0,128));im.save(source)
             with Image.open(prepare_knockout(source)) as result:

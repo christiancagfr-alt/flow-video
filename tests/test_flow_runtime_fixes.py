@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import os
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 import unittest,tempfile
@@ -10,7 +11,7 @@ from app.ui.runtime_tasks import RuntimeTasksDialog
 
 class RuntimeFixTests(unittest.TestCase):
     def setUp(self):
-        self.folder=tempfile.TemporaryDirectory()
+        self.folder=DatabaseTemporaryDirectory()
         self.dbpatch=patch.object(database,'DB_PATH',Path(self.folder.name)/'studio.db');self.dbpatch.start();database.init_db()
         rid=repo.find_or_create_recipient('r','ZB','t','20261009');hid=repo.find_or_create_host(rid,'h')
         vid=repo.add_video_to_host(hid,original_script='Hello. Amen.')

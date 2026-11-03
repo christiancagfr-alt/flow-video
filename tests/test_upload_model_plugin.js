@@ -1,5 +1,6 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict'),path=require('path');
 const root=path.join(__dirname,'../extension/FlowStudio_Web_Plugin_v1.8.3_IDENTITY_ALIAS_DOWNLOAD');
+if(!fs.existsSync(root)){require('node:test')('optional v1.8.3 plugin regression',{skip:'This local release ships v0.9.69; v1.8.3 is not included'},()=>{});return;}
 const code=fs.readFileSync(path.join(root,'content.js'),'utf8');
 const norm=code.split('\n').find(x=>x.includes('const norm ='));
 const upload=code.slice(code.indexOf('  let uploadCheckInFlight='),code.indexOf('  function maybeAutoUpload()'));

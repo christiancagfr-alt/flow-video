@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import unittest,tempfile,json,os
 from pathlib import Path
 from app.services.bridge_security import allowed_request,published_file
@@ -14,7 +15,7 @@ class SecurityTests(unittest.TestCase):
         self.assertTrue(allowed_request({**base,'Origin':'chrome-extension://'+'a'*32},17831))
         self.assertFalse(allowed_request({**base,'Origin':'chrome-extension://'+'a'*32},17831,False))
     def test_files_only_published_media(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             image=Path(folder)/'a.png';image.write_bytes(b'image');secret=Path(folder)/'secret.json';secret.write_text('{}')
             self.assertFalse(published_file(str(image),[]));self.assertTrue(published_file(str(image),[{'image_files':[{'path':str(image)}]}]))
             self.assertFalse(published_file(str(secret),[{'path':str(secret)}]))
@@ -35,7 +36,7 @@ class SecurityTests(unittest.TestCase):
         from unittest.mock import patch
         from app.services.local_bridge import FlowStudioBridge
         from app.core import database
-        with tempfile.TemporaryDirectory() as folder, patch.object(database,'DB_PATH',Path(folder)/'test.db'):
+        with DatabaseTemporaryDirectory() as folder, patch.object(database,'DB_PATH',Path(folder)/'test.db'):
             database.init_db()
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
@@ -99,7 +100,7 @@ class SecurityTests(unittest.TestCase):
     def test_receipt_paths_stay_inside_download_roots(self):
         from unittest.mock import patch
         from app.services.workflow import resolve_download_path, managed_download_path
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             base=Path(folder); approved=base/'downloads';approved.mkdir()
             inside=approved/'ok.mp4';inside.write_bytes(b'video')
             outside=base/'private.mp4';outside.write_bytes(b'private')
@@ -111,7 +112,7 @@ class SecurityTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name=='nt','Windows DPAPI')
     def test_dpapi_migration_roundtrip(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             p=Path(folder)/'token.json';payload={'refresh_token':'not-a-real-test-secret'};p.write_text(json.dumps(payload))
             self.assertEqual(credential_file.load(p),payload);self.assertNotIn(payload['refresh_token'],p.read_text());self.assertEqual(credential_file.load(p),payload)
 
@@ -133,7 +134,7 @@ class SecurityTests(unittest.TestCase):
                 raise OSError('locked')
             def get_password(self,*args):
                 return None
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             payload={'refresh_token':'not-a-real-test-secret','token':'abc'}
             original=json.dumps(payload)
             p=Path(folder)/'google_token.json'
@@ -170,7 +171,7 @@ class SecurityTests(unittest.TestCase):
         self.assertIn('REPLACE.txt',names)
         self.assertNotIn('background.js.bak',names)
         self.assertTrue(all('tests' not in path.parts for path in module.iter_plugin_files(script.parents[1])))
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             copied=module.copy_plugin(script.parents[1],folder)
             manifest=json.loads((Path(folder)/module.PLUGIN_REL/'manifest.json').read_text(encoding='utf-8'))
             self.assertEqual(manifest['version'],'0.9.69')

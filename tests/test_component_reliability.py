@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import json
 import tempfile
 import unittest
@@ -58,7 +59,7 @@ class ReliabilityTests(unittest.TestCase):
 
     def test_offline_restore_preserves_installed_components(self):
         from app.services import bundled_components as bundled
-        with tempfile.TemporaryDirectory() as temp:
+        with DatabaseTemporaryDirectory() as temp:
             app=Path(temp)/'app'; data=Path(temp)/'user'
             source=app/'bundled-components/packaging/node';source.mkdir(parents=True)
             (source/'runtime').write_text('bundled')
@@ -74,7 +75,7 @@ class ReliabilityTests(unittest.TestCase):
 
     def test_renderer_limits_resource_usage(self):
         from app.services.remotion_renderer import RemotionRenderer,RemotionStatus
-        with tempfile.TemporaryDirectory() as temp:
+        with DatabaseTemporaryDirectory() as temp:
             renderer=RemotionRenderer(temp)
             Path(temp,renderer.TEMPLATE_DIR).mkdir()
             status=RemotionStatus(ok=True,project_dir=temp,runner='remotion')

@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import tempfile
 import time
 import unittest
@@ -11,7 +12,7 @@ from app.services.whisper_cpp import discover, extract_zip
 
 class WhisperDiscoveryTests(unittest.TestCase):
     def test_finds_whisper_cpp_and_skips_openai_executable(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             root = Path(folder)
             cli = root / "bin" / "whisper-cli.exe"
             cli.parent.mkdir()
@@ -28,7 +29,7 @@ class WhisperDiscoveryTests(unittest.TestCase):
             self.assertEqual(found["model"], str(model.resolve()))
 
     def test_zip_slip_is_rejected(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             root = Path(folder)
             archive = root / "bad.zip"
             with zipfile.ZipFile(archive, "w") as bundle:
@@ -40,7 +41,7 @@ class WhisperDiscoveryTests(unittest.TestCase):
 
 class BridgeHeartbeatTests(unittest.TestCase):
     def test_short_gap_stays_connected_and_long_gap_can_mark_import(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             root = Path(folder)
             state = root / "bridge_state.ini"
 

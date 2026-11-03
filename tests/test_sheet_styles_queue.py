@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import copy
@@ -46,7 +47,7 @@ class StyleTests(unittest.TestCase):
 
     def test_style_updates_preserve_local_edits(self):
         old=database.DB_PATH
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             database.DB_PATH=Path(folder)/'test.db'
             try:
                 sheet_style.save_video(3, {'外文内容': {'text':'unchanged','cell':{}}})
@@ -59,7 +60,7 @@ class SyncIntegrationTests(unittest.TestCase):
     def test_repeat_sync_preserves_ids_text_and_production(self):
         from app.services import pre_gpt_pipeline as pipeline
         old=database.DB_PATH
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             root=Path(folder);database.DB_PATH=root/'studio.db'
             try:
                 database.init_db()

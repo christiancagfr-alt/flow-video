@@ -23,6 +23,7 @@ jobs:
         shell: pwsh
         run: |
           $tests = Get-ChildItem 'extension/*/tests/*.test.cjs' | ForEach-Object { $_.FullName }
+          $tests += Get-ChildItem 'tests/*.js' | ForEach-Object { $_.FullName }
           node --test $tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: python -m pip install packaging==26.3
@@ -36,6 +37,18 @@ jobs:
         run: |
           & build/FlowStudio-Windows/runtime/python.exe build/FlowStudio-Windows/scripts/smoke_media.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Audit the actual packaged dependency trees
+        shell: pwsh
+        run: |
+          python -m pip install pip-audit==2.10.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip_audit --path build/FlowStudio-Windows/runtime/Lib/site-packages --path build/FlowStudio-Windows/bundled-components/packaging/asr-libs --path build/FlowStudio-Windows/bundled-components/packaging/ffmpeg-libs --format json --output audit/windows-package-audit.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location build/FlowStudio-Windows/bundled-components/packaging/remotion
+          npm audit --omit=dev --json | Out-File -Encoding utf8 ../../../../../audit/windows-npm-audit.json
+          $auditExit = $LASTEXITCODE
+          Pop-Location
+          if ($auditExit -ne 0) { exit $auditExit }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: installer-windows
@@ -48,6 +61,8 @@ jobs:
           name: windows-validation
           path: |
             audit/wheel-manifest.json
+            audit/windows-package-audit.json
+            audit/windows-npm-audit.json
             build/FlowStudio-Windows/RUNTIME_MANIFEST.json
             build/FlowStudio-Windows/build/media-regression/results.json
             build/FlowStudio-Windows/build/media-regression/*/ffmpeg.log

@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import unittest,tempfile,struct
 from pathlib import Path
 from app.core.daily_statistics import summarize,movie_duration
@@ -18,7 +19,7 @@ class DailyStatisticsTests(unittest.TestCase):
         d=summarize(rows,'2026-10-10',lambda p:None);self.assertEqual((d['total'],d['rate'],d['backlog']),(0,0,1))
     def test_actual_movie_header_versions_and_bad_files(self):
         def box(kind,data):return struct.pack('>I4s',len(data)+8,kind)+data
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             for version,data in [(0,b'\0'*12+struct.pack('>II',1000,65432)),(1,b'\1'+b'\0'*19+struct.pack('>IQ',1000,65432))]:
                 p=Path(folder)/f'{version}.mp4';p.write_bytes(box(b'ftyp',b'isom')+box(b'moov',box(b'mvhd',data)))
                 original=p.read_bytes();self.assertAlmostEqual(movie_duration(p),65.432);self.assertEqual(p.read_bytes(),original)

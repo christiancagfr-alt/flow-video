@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,7 +29,7 @@ def _parsed(rows, **selection):
 
 class FlowMasterV8Tests(unittest.TestCase):
     def setUp(self):
-        self._dir = tempfile.TemporaryDirectory()
+        self._dir = DatabaseTemporaryDirectory()
         missing = Path(self._dir.name) / "missing.md"
         self._patch = patch.object(v8, "instruction_path", return_value=missing)
         self._patch.start()
@@ -136,7 +137,7 @@ class FlowMasterV8Tests(unittest.TestCase):
         self.assertNotIn("基础模板", text)
 
     def test_instruction_file_replaces_one_sentence_and_keeps_ids(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             path = Path(folder) / "flow_master_v8.md"
             path.write_text(
                 "## 手-mic\n测试握麦不换手\n"
@@ -163,7 +164,7 @@ class FlowMasterV8Tests(unittest.TestCase):
                 self.assertIn("拿麦的手一直握着麦", v8.section("手-missing", v8._HANDS["mic"]))
 
     def test_edited_file_is_not_replaced_and_bad_seam_stays_text(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             path = Path(folder) / "flow_master_v8.md"
             with patch.object(v8, "instruction_path", return_value=path):
                 v8._FILE_CACHE.update(path="", mtime=None, sections=None)

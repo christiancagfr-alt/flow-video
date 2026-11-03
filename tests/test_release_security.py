@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 """Regression checks for the November 2026 release security boundaries."""
 import os
 import subprocess
@@ -23,7 +24,7 @@ class ReleaseSecurityTests(unittest.TestCase):
 
     def test_failed_key_health_never_persists_secret(self):
         from app.services import credential_pool
-        with tempfile.TemporaryDirectory() as tmp:
+        with DatabaseTemporaryDirectory() as tmp:
             path = Path(tmp) / 'health.json'
             secret = 'synthetic-test-value-123456789'
             with patch.object(credential_pool, '_health_path', return_value=path):
@@ -39,7 +40,7 @@ class ReleaseSecurityTests(unittest.TestCase):
 
     def test_windows_trash_uses_recycle_bin_and_preserves_on_failure(self):
         from app.services import clear_all_history as history
-        with tempfile.TemporaryDirectory() as tmp:
+        with DatabaseTemporaryDirectory() as tmp:
             file = Path(tmp) / 'clip.mp4'
             file.write_bytes(b'test')
             with patch.object(history, 'os', SimpleNamespace(name='nt')), \
@@ -51,7 +52,7 @@ class ReleaseSecurityTests(unittest.TestCase):
             self.assertTrue(file.exists())
 
     def test_installer_checksum_rejects_under_optimized_python(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with DatabaseTemporaryDirectory() as tmp:
             file = Path(tmp) / 'corrupt.exe'
             file.write_bytes(b'not-an-installer')
             code = '''import runpy,sys,subprocess,psutil

@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,7 +18,7 @@ class EyeMaterialsTests(unittest.TestCase):
         from app.services import pre_gpt_pipeline as intake
         from app.services.material_assignment import manual_modes
         from PIL import Image
-        with tempfile.TemporaryDirectory() as folder, patch.object(intake,'DB_FILE',Path(folder)/'intake.db'):
+        with DatabaseTemporaryDirectory() as folder, patch.object(intake,'DB_FILE',Path(folder)/'intake.db'):
             root=Path(folder);photo=root/'photo.png';Image.new('RGB',(8,8),'red').save(photo)
             con=intake.init_db()
             con.execute("INSERT INTO groups_tbl(group_key,local_dir,talking_count) VALUES('g',?,1)",(str(root),))
@@ -79,7 +80,7 @@ class EyeMaterialsTests(unittest.TestCase):
         self.assertEqual(tasks[0]['mode'],'TALKING')
 
     def test_picture_folder_and_filename_modes(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             root=Path(folder);pictures=root/'素材';pictures.mkdir()
             self.assertEqual(material_folder(root),pictures)
             self.assertEqual(material_folder(pictures),pictures)
@@ -87,7 +88,7 @@ class EyeMaterialsTests(unittest.TestCase):
         self.assertEqual(image_mode('photo.png',None,'PRAYING'),'PRAYING')
 
     def test_saved_modes_require_matching_text(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(database,'DB_PATH',Path(folder)/'test.db'), patch('app.core.work_dates.video_work_date',return_value='2026-10-09'):
+        with DatabaseTemporaryDirectory() as folder, patch.object(database,'DB_PATH',Path(folder)/'test.db'), patch('app.core.work_dates.video_work_date',return_value='2026-10-09'):
             with database.connect() as con:
                 con.execute('CREATE TABLE flow_segments(id INTEGER,video_id INTEGER,seg_seq INTEGER,foreign_text TEXT)')
                 con.execute('CREATE TABLE app_settings(key TEXT PRIMARY KEY,value TEXT)')
@@ -102,7 +103,7 @@ class ProductionIntegrationTests(unittest.TestCase):
     def test_reflow_and_dispatch_keep_color_modes(self):
         from app.core import repository as repo, work_dates
         from app.services import sheet_style, reflow_rules
-        with tempfile.TemporaryDirectory() as folder, patch.object(database,'DB_PATH',Path(folder)/'test.db'), patch('app.core.work_dates.active',return_value='2026-10-09'):
+        with DatabaseTemporaryDirectory() as folder, patch.object(database,'DB_PATH',Path(folder)/'test.db'), patch('app.core.work_dates.active',return_value='2026-10-09'):
             database.init_db()
             rid=repo.find_or_create_recipient('recipient','ZB','test','20261009')
             hid=repo.find_or_create_host(rid,'host')
@@ -123,7 +124,7 @@ class LegacyColorTests(unittest.TestCase):
     def test_backfill_preserves_old_punctuation_and_ids(self):
         from app.core import repository as repo
         from app.services import sheet_style
-        with tempfile.TemporaryDirectory() as folder, patch.object(database,'DB_PATH',Path(folder)/'test.db'):
+        with DatabaseTemporaryDirectory() as folder, patch.object(database,'DB_PATH',Path(folder)/'test.db'):
             database.init_db()
             rid=repo.find_or_create_recipient('r','ZB','test','20261009')
             hid=repo.find_or_create_host(rid,'h')

@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import tempfile,unittest,wave
 from pathlib import Path
 from app.services.asr_gaps import uncovered_intervals,audible_gaps,insert_gap_words
@@ -10,7 +11,7 @@ class GapTests(unittest.TestCase):
     def test_audible_gap_distinguished_from_silence(self):
         import math,struct
         rate=16000
-        with tempfile.TemporaryDirectory() as directory:
+        with DatabaseTemporaryDirectory() as directory:
             file=Path(directory)/'audio.wav'
             with wave.open(str(file),'wb') as wav:
                 wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(rate)

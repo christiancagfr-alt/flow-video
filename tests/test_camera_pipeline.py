@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import sys, unittest, tempfile, types
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -43,7 +44,7 @@ class MotionTests(unittest.TestCase):
 
 class PipelineTests(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory();self.old=database.DB_PATH;database.DB_PATH=Path(self.tmp.name)/'test.db'
+        self.tmp=DatabaseTemporaryDirectory();self.old=database.DB_PATH;database.DB_PATH=Path(self.tmp.name)/'test.db'
         database.init_db();database.init_db()
         from app.core import repository as repo
         repo.set_setting('flow_download_root', self.tmp.name)

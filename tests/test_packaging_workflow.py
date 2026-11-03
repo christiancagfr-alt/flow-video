@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import os,tempfile,unittest,json
 from pathlib import Path
 from unittest.mock import patch
@@ -11,7 +12,7 @@ APP=QApplication.instance() or QApplication([])
 
 class PackagingWorkflowTests(unittest.TestCase):
     def test_merge_and_edit_keep_type_confirmation(self):
-        with tempfile.TemporaryDirectory() as folder,patch.object(database,'DB_PATH',Path(folder)/'test.db'):
+        with DatabaseTemporaryDirectory() as folder,patch.object(database,'DB_PATH',Path(folder)/'test.db'):
             database.init_db()
             with database.connect() as con:
                 con.execute("INSERT INTO recipients(id,name,work_date) VALUES(1,'test','2026-10-12')")
@@ -38,7 +39,7 @@ class PackagingWorkflowTests(unittest.TestCase):
 
     def test_clear_does_not_reimport_same_export_or_remove_video(self):
         from app.ui.packaging_page import PackagingPage
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             source=Path(folder)/'output.mp4';source.write_bytes(b'original')
             row={'id':123,'edit_output_path':str(source),'original_script':'Original task text','production_script':'','script':''}
             page=PackagingPage();page._settings=QSettings(str(Path(folder)/'ui.ini'),QSettings.IniFormat)
@@ -65,7 +66,7 @@ class PackagingWorkflowTests(unittest.TestCase):
 
     def test_watermark_preview_updates_position_and_opacity(self):
         from app.ui.packaging_watermark_preview import WatermarkPreview
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             path=Path(folder)/'logo.png';im=QImage(20,20,QImage.Format_RGBA8888);im.fill(QColor('red'));im.save(str(path))
             view=WatermarkPreview(None);view.resize(100,100)
             item={'path':str(path),'scale':20,'opacity':100,'margin':0,'position':'右上'}

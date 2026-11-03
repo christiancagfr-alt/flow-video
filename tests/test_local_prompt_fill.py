@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import os
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 import unittest,tempfile
@@ -11,7 +12,7 @@ APP=QApplication.instance() or QApplication([])
 
 class LocalFillTests(unittest.TestCase):
     def setUp(self):
-        self.folder=tempfile.TemporaryDirectory();self.dbpatch=patch.object(database,'DB_PATH',Path(self.folder.name)/'studio.db');self.dbpatch.start()
+        self.folder=DatabaseTemporaryDirectory();self.dbpatch=patch.object(database,'DB_PATH',Path(self.folder.name)/'studio.db');self.dbpatch.start()
         database.init_db()
         rid=repo.find_or_create_recipient('r','ZB','t','20261009');self.hid=repo.find_or_create_host(rid,'h')
         vid=repo.add_video_to_host(self.hid,original_script='Hello. Amen.');repo.sync_flow_segments(vid,['Hello.','Amen.'])

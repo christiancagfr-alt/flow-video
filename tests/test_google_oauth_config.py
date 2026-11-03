@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import json
 import tempfile
 import unittest
@@ -6,7 +7,7 @@ from app.services.google_oauth_config import load_desktop_config
 
 class OAuthConfigTests(unittest.TestCase):
     def test_types_and_bom(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             path=Path(folder)/'credentials.json'
             path.write_text(json.dumps({'type':'service_account','private_key':'must-not-appear'}))
             with self.assertRaisesRegex(ValueError,'服务账号') as error:load_desktop_config(path)
@@ -19,7 +20,7 @@ class OAuthConfigTests(unittest.TestCase):
             self.assertEqual(load_desktop_config(path),good)
 
     def test_rejects_non_google_authentication_endpoints(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             path=Path(folder)/'client.json'
             for key in ('auth_uri','token_uri'):
                 for url in ('http://accounts.google.com/token','https://accounts.google.com.evil.test/token','https://user@accounts.google.com/token','https://127.0.0.1/token'):

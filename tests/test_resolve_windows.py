@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import importlib.util
 import os
 from pathlib import Path
@@ -15,7 +16,7 @@ runtime=importlib.util.module_from_spec(spec);spec.loader.exec_module(runtime)
 class WindowsLuaTests(unittest.TestCase):
     def setUp(self):
         from lupa.luajit21 import LuaRuntime
-        self.temp=tempfile.TemporaryDirectory(prefix='flow-win-lua-')
+        self.temp=DatabaseTemporaryDirectory(prefix='flow-win-lua-')
         self.root=Path(self.temp.name)
         for p in (BASE/'davinci_autoedit_v0_5_0').glob('*.lua'): shutil.copy2(p,self.root/p.name)
         helper=BASE/'scripts/windows_resolve_runtime.py'
@@ -112,7 +113,7 @@ class CommandTests(unittest.TestCase):
 class ResolveDiscoveryTests(unittest.TestCase):
     def test_custom_install_folder_and_stale_configuration(self):
         from app.services import resolve_windows_paths as paths
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             exe=Path(folder)/'Resolve.exe';exe.write_bytes(b'test')
             with patch.object(paths,'registry_candidates',return_value=iter([folder])):
                 self.assertEqual(paths.find_executable(str(Path(folder)/'missing.exe')),exe)
@@ -122,7 +123,7 @@ class ResolveDiscoveryTests(unittest.TestCase):
     @unittest.skipUnless(os.name=='nt','Windows script installation')
     def test_helper_installed_outside_resolve_script_menu(self):
         from app.services import resolve_daily as daily
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             root=Path(folder);menu=root/'Scripts/Utility/FlowStudioAuto';menu.mkdir(parents=True)
             legacy=menu/'windows_resolve_runtime.py';legacy.write_text('old internal helper')
             with patch.object(daily,'script_dir',return_value=menu),patch.object(daily,'bridge_root',return_value=root/'bridge'),patch.object(daily,'snapshot',return_value={'alive':False}):
@@ -139,7 +140,7 @@ class WhisperRangeTests(unittest.TestCase):
         from types import SimpleNamespace
         spec=importlib.util.spec_from_file_location('whisper_runner', BASE/'scripts/run_batch_whisper.py')
         runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             root=Path(folder);wav=root/'audio.wav';output=root/'retry'
             with wave.open(str(wav),'wb') as audio:
                 audio.setnchannels(1);audio.setsampwidth(2);audio.setframerate(16000);audio.writeframes(bytes(16000*2*3))

@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import copy
 import json
 import os
@@ -20,7 +21,7 @@ class NativePackagingTests(unittest.TestCase):
         self.assertAlmostEqual(payload['totalDuration'],176.87)
 
     def test_gaps_keep_subtitle_timing(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             work=Path(folder)
             payload={'fps':25,'mainDuration':4}
             layers=[{'path':str(work/'a.png'),'start':25,'duration':25},
@@ -55,7 +56,7 @@ class NativePackagingTests(unittest.TestCase):
         self.assertTrue(any(opaque(x,y) for y in range(band['top']+80,band['top']+band['height']-80) for x in range(200,880,40)))
 
     def test_graph_retains_intro_outro_audio_and_input_order(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             p={'source':'main.mp4','mainDuration':3,'fps':25,'width':720,'height':1280,
                'intro':{'enabled':True,'path':'intro.png','duration':1},
                'outro':{'enabled':True,'path':'outro.mp4','duration':2}}
@@ -69,7 +70,7 @@ class NativePackagingTests(unittest.TestCase):
             self.assertEqual(command[command.index('-filter_complex_threads')+1],'1')
 
     def test_preview_consumes_audio_output(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             with patch.object(native,'find_ffmpeg',return_value='ffmpeg'),patch.object(native,'probe_media',return_value={'audio':False}):
                 command,_=native.build_command({'source':'main.mp4','mainDuration':3},'preview.png',Path(folder),[],preview_frame=30)
             self.assertIn('[finala]anullsink',(Path(folder)/'graph.txt').read_text('utf-8'))

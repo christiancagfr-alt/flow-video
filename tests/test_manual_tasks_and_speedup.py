@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import os
 import sqlite3
 import subprocess
@@ -41,7 +42,7 @@ class ManualTaskAndSpeedupTests(unittest.TestCase):
         cls.qapp = QApplication.instance() or QApplication([])
 
     def test_dialog_starts_completely_empty_with_no_qc_reference(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with DatabaseTemporaryDirectory() as tmp:
             tmp_root = Path(tmp)
             test_studio = tmp_root / "studio.db"
             with patch.object(studio_db, "DB_PATH", test_studio):
@@ -69,7 +70,7 @@ class ManualTaskAndSpeedupTests(unittest.TestCase):
                     dlg.close()
 
     def test_google_sheets_bulk_paste_multiline_html_colors_fill_down_and_undo(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with DatabaseTemporaryDirectory() as tmp:
             tmp_root = Path(tmp)
             test_studio = tmp_root / "studio.db"
             with patch.object(studio_db, "DB_PATH", test_studio):
@@ -127,7 +128,7 @@ class ManualTaskAndSpeedupTests(unittest.TestCase):
                     dlg.close()
 
     def test_import_manual_tasks_end_to_end_and_sheet_sync_coexistence(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with DatabaseTemporaryDirectory() as tmp:
             tmp_root = Path(tmp)
             test_studio = tmp_root / "studio.db"
             test_intake = tmp_root / "pre_gpt_pipeline.sqlite3"
@@ -422,7 +423,7 @@ assert(resQueries == 2, "Resolution cache should query 2 MediaPoolItems instead 
 assert(renderSettingsCalls == 2, "Merged SetRenderSettings should run 1 call per video (2 total), got " .. tostring(renderSettingsCalls))
 print("LUA_FAST_PATH_TESTS_OK")
 '''
-        with tempfile.TemporaryDirectory() as tmp:
+        with DatabaseTemporaryDirectory() as tmp:
             env = dict(os.environ, FS_TEST_TMP=tmp, FS_TEST_BRIDGE_DIR=str(BASE / "davinci_autoedit_v0_5_0"))
             proc = subprocess.run([str(FUSCRIPT), "-x", lua_code], capture_output=True, text=True, env=env)
             combined = (proc.stdout or "") + "\n" + (proc.stderr or "")

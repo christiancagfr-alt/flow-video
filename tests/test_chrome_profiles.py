@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,7 +24,7 @@ class ChromeProfileTests(unittest.TestCase):
         self.assertFalse(valid_profile_directory('Profile/1'))
 
     def test_avatar_uses_a_local_picture_and_rejects_a_path(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with DatabaseTemporaryDirectory() as folder:
             root = Path(folder)
             (root / 'Google Profile.ico').write_bytes(b'ico')
             self.assertTrue(profile_avatar_file(str(root)).endswith('Google Profile.ico'))

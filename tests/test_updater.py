@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import hashlib,io,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -22,7 +23,7 @@ class UpdateTests(unittest.TestCase):
         data=self.release();data['prerelease']=True;self.assertIsNone(updater.select_release(data,'win32','AMD64'))
     def test_download_integrity_and_cleanup(self):
         release=updater.select_release(self.release(),'win32','AMD64')
-        with tempfile.TemporaryDirectory() as folder,patch.object(updater,'data_dir',return_value=Path(folder)):
+        with DatabaseTemporaryDirectory() as folder,patch.object(updater,'data_dir',return_value=Path(folder)):
             response=io.BytesIO(b'evil');response.url='https://release-assets.githubusercontent.com/file'
             with patch.object(updater.urllib.request,'urlopen',return_value=response),self.assertRaises(ValueError):updater.download(release)
             self.assertEqual(list((Path(folder)/'updates').iterdir()),[])
@@ -33,7 +34,7 @@ class UpdateTests(unittest.TestCase):
             with self.assertRaises(ValueError):updater.verify(path,release)
     def test_cancel_never_installs_partial_download(self):
         release=updater.select_release(self.release(),'win32','AMD64')
-        with tempfile.TemporaryDirectory() as folder,patch.object(updater,'data_dir',return_value=Path(folder)):
+        with DatabaseTemporaryDirectory() as folder,patch.object(updater,'data_dir',return_value=Path(folder)):
             response=io.BytesIO(b'test');response.url='https://release-assets.githubusercontent.com/file'
             with patch.object(updater.urllib.request,'urlopen',return_value=response),self.assertRaises(InterruptedError):updater.download(release,cancelled=lambda:True)
             self.assertEqual(list((Path(folder)/'updates').iterdir()),[])

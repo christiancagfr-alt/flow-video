@@ -1,3 +1,4 @@
+from scripts.test_runtime import DatabaseTemporaryDirectory
 import os
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 import unittest,tempfile
@@ -12,7 +13,7 @@ from app.services.production_worker import ProductionWorker
 APP=QApplication.instance() or QApplication([])
 class ClipTransformTests(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory();self.p=patch.object(database,'DB_PATH',Path(self.tmp.name)/'test.db');self.p.start();database.init_db()
+        self.tmp=DatabaseTemporaryDirectory();self.p=patch.object(database,'DB_PATH',Path(self.tmp.name)/'test.db');self.p.start();database.init_db()
         rid=repo.find_or_create_recipient('r','ZB','t','20261009');hid=repo.find_or_create_host(rid,'h');self.vid=repo.add_video_to_host(hid,original_script='Hi')
         repo.sync_flow_segments(self.vid,['Hi']);self.sid=repo.list_prompt_tasks(host_id=hid,work_date='2026-10-09')[0]['segment_id']
         with database.connect() as con:
