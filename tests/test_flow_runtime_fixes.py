@@ -45,7 +45,8 @@ class RuntimeFixTests(unittest.TestCase):
     def test_queued_sibling_holds_slot_but_terminal_failure_releases(self):
         self.command()
         with database.connect() as con:con.execute("UPDATE flow_segments SET flow_status='失败' WHERE id=?",(self.ids[0],))
-        self.assertNotIn('CH1',repo.release_submitted_channel_commands())
+        with patch.object(repo, '_published_generation_commands', return_value={'cmd'}):
+            self.assertNotIn('CH1',repo.release_submitted_channel_commands())
         with database.connect() as con:con.execute("UPDATE flow_segments SET flow_status='失败'")
         self.assertIn('CH1',repo.release_submitted_channel_commands())
     def test_durable_submitted_dispatch_releases_legacy_status(self):

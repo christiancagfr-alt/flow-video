@@ -113,8 +113,13 @@ def _macos_sips_decode(path: str, mtime_ns: int, size: int):
     return image if not image.isNull() else None
 
 
-@lru_cache(maxsize=0)
-def _decode(path, mtime_ns, size):
+import threading
+
+_ASSET_LOCK = threading.RLock()
+
+
+@lru_cache(maxsize=256)
+def _decode_unlocked(path, mtime_ns, size):
     if size>MAX_BYTES:raise ImageAssetError('图片文件超过 30 MB')
     data=Path(path).read_bytes()
     buf=QBuffer();buf.setData(QByteArray(data));buf.open(QIODevice.ReadOnly)
@@ -133,6 +138,51 @@ def _decode(path, mtime_ns, size):
     kind='PNG' if image.hasAlphaChannel() else 'JPEG'
     if not image.save(out,kind,92):raise ImageAssetError('图片转换失败：'+path)
     return ('image/png' if kind=='PNG' else 'image/jpeg'),bytes(output),fmt
+
+
+def _decode(path, mtime_ns, size):
+    with _ASSET_LOCK:
+        return _decode_unlocked(path, mtime_ns, size)
+
+
+@lru_cache(maxsize=256)
+def _encode_gpt_data_url_unlocked(path, mtime_ns, size, detail='low'):
+    mime, raw_bytes, _fmt = _decode_unlocked(path, mtime_ns, size)
+    image = QImage.fromData(raw_bytes)
+    if not image.isNull():
+        from PySide6.QtCore import Qt
+        max_side = 768 if str(detail or 'low') == 'low' else 1536
+        w, h = image.width(), image.height()
+        if max(w, h) > max_side:
+            image = image.scaled(max_side, max_side, Qt.KeepAspectRatio, Qt.FastTransformation)
+        if image.hasAlphaChannel():
+            image = image.convertToFormat(QImage.Format_RGB888)
+        output = QByteArray()
+        out = QBuffer(output)
+        out.open(QIODevice.WriteOnly)
+        if image.save(out, 'JPEG', 85):
+            return 'data:image/jpeg;base64,' + base64.b64encode(bytes(output)).decode('ascii')
+    return 'data:' + mime + ';base64,' + base64.b64encode(raw_bytes).decode('ascii')
+
+
+def _encode_gpt_data_url(path, mtime_ns, size, detail='low'):
+    with _ASSET_LOCK:
+        return _encode_gpt_data_url_unlocked(path, mtime_ns, size, detail)
+
+
+def gpt_image_data_url(value, task_id='', detail='low'):
+    path = None
+    try:
+        path = resolve_path(value)
+        stat = path.stat()
+        url = _encode_gpt_data_url(str(path), stat.st_mtime_ns, stat.st_size, str(detail or 'low'))
+        log.info('[IMAGE_READY] task=%s path=%s exists=true detail=%s encoding=ok', task_id, path, detail)
+        return url
+    except Exception as exc:
+        log.error('[IMAGE_ERROR] task=%s asset=%s path=%s exists=%s encoding=failed request_contains_image=false error=%s', task_id, hashlib.sha256(str(value).encode()).hexdigest()[:16], path or '<unresolved>', bool(path and path.is_file()), type(exc).__name__)
+        if isinstance(exc, ImageAssetError):
+            raise
+        raise ImageAssetError('图片无法读取：' + str(path or '<未解析>')) from exc
 
 def resolve_image_asset(value, task_id=''):
     path=None

@@ -3,7 +3,51 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 import re
+import sqlite3
+import threading
 from . import database
+
+_SCOPED_TLS = threading.local()
+_TEMP_VIEW_NAMES = (
+    'recipients', 'hosts', 'videos', 'flow_segments',
+    'flow_outputs', 'flow_redo', 'flow_dispatches', 'qc_decisions',
+    'speech_analysis', 'local_qc_results', 'ai_qc_results',
+    'api_usage_log', 'prompt_submission_history',
+    'flow_channels', 'source_tasks', 'asset_jobs',
+)
+
+
+class _ScopedReadConnection(sqlite3.Connection):
+    pass
+
+
+def _open_scoped_ro_con(db_str: str) -> _ScopedReadConnection:
+    con = sqlite3.connect(db_str, timeout=10.0, factory=_ScopedReadConnection)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys = ON")
+    con.execute("PRAGMA busy_timeout = 10000")
+    con.execute("PRAGMA temp_store = MEMORY")
+    con.execute("PRAGMA cache_size = -16000")
+    con._in_use = False
+    con._rec_sig = None
+    con._rec_dates = {}
+    con._view_sig = None
+    return con
+
+
+def _build_temp_views(con, ids, tables):
+    members = ','.join(map(str, ids)) or 'NULL'
+    con.execute(f'CREATE TEMP VIEW recipients AS SELECT * FROM main.recipients WHERE id IN ({members})')
+    con.execute('CREATE TEMP VIEW hosts AS SELECT * FROM main.hosts WHERE recipient_id IN (SELECT id FROM temp.recipients)')
+    con.execute('CREATE TEMP VIEW videos AS SELECT * FROM main.videos WHERE host_id IN (SELECT id FROM temp.hosts)')
+    con.execute('CREATE TEMP VIEW flow_segments AS SELECT * FROM main.flow_segments WHERE video_id IN (SELECT id FROM temp.videos)')
+    for name in ('flow_outputs','flow_redo','flow_dispatches','qc_decisions','speech_analysis','local_qc_results','ai_qc_results','api_usage_log','prompt_submission_history'):
+        if name in tables:
+            key = 'flow_segment_id' if name == 'api_usage_log' else 'segment_id'
+            con.execute(f'CREATE TEMP VIEW {name} AS SELECT * FROM main.{name} WHERE {key} IN (SELECT id FROM temp.flow_segments)')
+    for name, key, parent in [('flow_channels','host_id','hosts'),('source_tasks','video_id','videos'),('asset_jobs','video_id','videos')]:
+        if name in tables:
+            con.execute(f'CREATE TEMP VIEW {name} AS SELECT * FROM main.{name} WHERE {key} IN (SELECT id FROM temp.{parent})')
 
 LEGACY='LEGACY'
 _active=None
@@ -100,30 +144,75 @@ def require_video_work_date(video_id, expected_date):
 
 @contextmanager
 def read_connection(work_date=None):
-    con=database.connect()
-    try:
-        if work_date is not None:
-            day=canonical(work_date) or (LEGACY if work_date==LEGACY else None)
-            if day is None: raise ValueError('无效工作日期')
-            ids=[int(k) for k,v in recipient_dates(con).items() if v==day]
-            # Temporary views exist only on this connection. No persistent schema,
-            # paths, IDs, or production rows change. Existing aggregate SQL is reused.
-            members=','.join(map(str,ids)) or 'NULL'
-            con.execute(f'CREATE TEMP VIEW recipients AS SELECT * FROM main.recipients WHERE id IN ({members})')
-            con.execute('CREATE TEMP VIEW hosts AS SELECT * FROM main.hosts WHERE recipient_id IN (SELECT id FROM temp.recipients)')
-            con.execute('CREATE TEMP VIEW videos AS SELECT * FROM main.videos WHERE host_id IN (SELECT id FROM temp.hosts)')
-            con.execute('CREATE TEMP VIEW flow_segments AS SELECT * FROM main.flow_segments WHERE video_id IN (SELECT id FROM temp.videos)')
-            tables={r[0] for r in con.execute("SELECT name FROM main.sqlite_master WHERE type='table'")}
-            for name in ('flow_outputs','flow_redo','flow_dispatches','qc_decisions','speech_analysis','local_qc_results','ai_qc_results','api_usage_log','prompt_submission_history'):
-                if name in tables:
-                    key='flow_segment_id' if name=='api_usage_log' else 'segment_id'
-                    con.execute(f'CREATE TEMP VIEW {name} AS SELECT * FROM main.{name} WHERE {key} IN (SELECT id FROM temp.flow_segments)')
-            for name,key,parent in [('flow_channels','host_id','hosts'),('source_tasks','video_id','videos'),('asset_jobs','video_id','videos')]:
-                if name in tables:con.execute(f'CREATE TEMP VIEW {name} AS SELECT * FROM main.{name} WHERE {key} IN (SELECT id FROM temp.{parent})')
+    if work_date is None:
+        with database.connect() as con:
+            yield con
+        return
+
+    day = canonical(work_date) or (LEGACY if work_date == LEGACY else None)
+    if day is None:
+        raise ValueError('无效工作日期')
+
+    db_str = str(database.DB_PATH)
+    handles = getattr(_SCOPED_TLS, 'handles', None)
+    if handles is None:
+        handles = {}
+        _SCOPED_TLS.handles = handles
+    ro_con = handles.get(db_str)
+
+    # Re-entrant nested read_connection on the same thread falls back to an isolated handle.
+    if ro_con is not None and getattr(ro_con, '_in_use', False):
+        con = database.connect()
+        try:
+            ids = [int(k) for k, v in recipient_dates(con).items() if v == day]
+            tables = {r[0] for r in con.execute("SELECT name FROM main.sqlite_master WHERE type='table'")}
+            _build_temp_views(con, ids, tables)
             con.execute('PRAGMA query_only=ON')
-        yield con
+            yield con
+        finally:
+            con.close()
+        return
+
+    if ro_con is None:
+        ro_con = _open_scoped_ro_con(db_str)
+        handles[db_str] = ro_con
+
+    ro_con._in_use = True
+    try:
+        rec_sig = tuple(
+            (int(r[0]), str(r[1] or ''), str(r[2] or ''))
+            for r in ro_con.execute("SELECT id, work_date, created_at FROM main.recipients ORDER BY id")
+        )
+        if rec_sig != ro_con._rec_sig or any(v == LEGACY and not str(r[1] or '') for r, v in zip(rec_sig, ro_con._rec_dates.values())):
+            ro_con._rec_dates = recipient_dates(ro_con)
+            ro_con._rec_sig = rec_sig
+        ids = tuple(int(k) for k, v in ro_con._rec_dates.items() if v == day)
+        schema_ver = int(ro_con.execute("PRAGMA main.schema_version").fetchone()[0] or 0)
+        target_sig = (day, ids, schema_ver)
+        if ro_con._view_sig != target_sig:
+            ro_con.execute('PRAGMA query_only=OFF')
+            for vname in _TEMP_VIEW_NAMES:
+                ro_con.execute(f'DROP VIEW IF EXISTS temp.{vname}')
+            tables = {r[0] for r in ro_con.execute("SELECT name FROM main.sqlite_master WHERE type='table'")}
+            _build_temp_views(ro_con, ids, tables)
+            ro_con.commit()
+            ro_con.execute('PRAGMA query_only=ON')
+            ro_con._view_sig = target_sig
+        yield ro_con
+    except Exception:
+        try:
+            ro_con.close()
+        except Exception:
+            pass
+        handles.pop(db_str, None)
+        raise
     finally:
-        con.close()
+        if handles.get(db_str) is ro_con:
+            try:
+                ro_con.rollback()
+            except Exception:
+                pass
+            ro_con._in_use = False
 
 def task_dates():
     with read_connection() as con:

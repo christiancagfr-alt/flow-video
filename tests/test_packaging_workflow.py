@@ -32,7 +32,9 @@ class PackagingWorkflowTests(unittest.TestCase):
             with database.connect() as con:
                 self.assertEqual(performance_types.choices(con,1)['1']['mode'],'PRAYING')
                 con.execute("UPDATE flow_segments SET generation_command='active' WHERE id=1")
-            with self.assertRaises(ValueError):repository.merge_prompt_segment(1,'next','TALKING')
+            with database.connect() as con:
+                with self.assertRaises(ValueError):repository._assert_prompt_copy_editable(con,1,allow_submitted=False)
+            self.assertTrue(repository.merge_prompt_segment(1,'next','TALKING'))  # Local UI permits submitted-copy edits.
 
     def test_clear_does_not_reimport_same_export_or_remove_video(self):
         from app.ui.packaging_page import PackagingPage
@@ -46,6 +48,8 @@ class PackagingWorkflowTests(unittest.TestCase):
                 self.assertEqual(page._project['videos'][str(source.resolve())]['source_script'],'Original task text')
                 page._clear_tasks();page.sync_edited_videos()
                 self.assertEqual(page._project['order'],[])
+                page.sync_edited_videos(manual=True)
+                self.assertEqual(page._project['order'],[str(source.resolve())])
                 self.assertEqual(source.read_bytes(),b'original')
             page.close();page.deleteLater()
 

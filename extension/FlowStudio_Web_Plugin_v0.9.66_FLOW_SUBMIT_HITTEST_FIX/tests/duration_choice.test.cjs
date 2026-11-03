@@ -1,7 +1,7 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 const src=fs.readFileSync(require('node:path').join(__dirname,'../page-engine.js'),'utf8');
 const start=src.indexOf('  function validateDuration('),end=src.indexOf('  async function execute(',start);
-const ctx=vm.createContext({});vm.runInContext(src.slice(start,end),ctx);
+const ctx=vm.createContext({});vm.runInContext(src.slice(src.indexOf('  function normalizeVideoModel('),src.indexOf('  function aspectValue('))+src.slice(start,end),ctx);
 assert.doesNotThrow(()=>vm.runInContext('validateDuration({needs_split:true,duration:8})',ctx));
 assert.doesNotThrow(()=>vm.runInContext('validateDuration({needs_split:true,force_submit:true,duration:8})',ctx));
 for(const duration of [4,6,8])assert.doesNotThrow(()=>vm.runInContext(`validateDuration({duration:${duration}})`,ctx));

@@ -7,7 +7,7 @@ ok(content.includes('now-last<35000'),'35s no-progress watchdog missing');
 ok(content.includes("state:'preparing'"),'preparing state missing');
 ok(content.includes("!state.uploadInFlight && !state.generationRunning && !state.scanInFlight"),'control heartbeat must not mask active work');
 const manifest=JSON.parse(fs.readFileSync(require('path').join(__dirname,'..','manifest.json'),'utf8'));
-if(['0.9.57','0.9.58','0.9.59','0.9.60','0.9.62'].includes(manifest.version)){
+if(['0.9.57','0.9.58','0.9.59','0.9.60','0.9.62','0.9.69'].includes(manifest.version)){
   ok(page.includes("material_binding_protection='disabled'"),'v0.9.57 must explicitly disable MATERIAL binding protection');
   console.log('PASS: upload watchdog preserved; v0.9.57 intentionally disables MATERIAL hard gate');
 }else{

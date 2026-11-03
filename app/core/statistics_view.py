@@ -139,7 +139,8 @@ def snapshot(work_date):
     with read_connection(work_date) as con:
         videos = [dict(r) for r in con.execute('''SELECT v.id video_id,v.edit_status,v.upload_status,
             r.id recipient_id,r.name recipient_name FROM videos v
-            JOIN hosts h ON h.id=v.host_id JOIN recipients r ON r.id=h.recipient_id''')]
+            JOIN hosts h ON h.id=v.host_id JOIN recipients r ON r.id=h.recipient_id
+            WHERE COALESCE(v.edit_status,'')<>'已放弃' AND COALESCE(v.status,'')<>'已放弃' ''')]
         segments = repo._current_edit_segments(con, [v['video_id'] for v in videos]) if videos else []
     return summarize(videos, segments)
 
@@ -216,7 +217,8 @@ def _load_day(work_date):
         videos=[dict(r) for r in con.execute('''SELECT v.id video_id,v.seq video_seq,v.edit_status,v.edit_output_path,
             v.upload_status,v.upload_confirm_mode,v.upload_confirmed_at,
             h.id host_id,h.name host_name,r.id recipient_id,r.name recipient_name,r.created_at recipient_created_at
-            FROM videos v JOIN hosts h ON h.id=v.host_id JOIN recipients r ON r.id=h.recipient_id''')]
+            FROM videos v JOIN hosts h ON h.id=v.host_id JOIN recipients r ON r.id=h.recipient_id
+            WHERE COALESCE(v.edit_status,'')<>'已放弃' AND COALESCE(v.status,'')<>'已放弃' ''')]
         segments=[dict(r) for r in con.execute('''SELECT fs.id,fs.video_id,fs.seg_seq,fs.prompt,fs.status,fs.model,
             fs.flow_status,fs.flow_error,fs.flow_attempts,fs.flow_retry_count,fs.generation_command,
             fs.flow_submitted_at,fs.flow_completed_at,fs.qc_status,fs.qc_note,fs.qc_reject_reason,fs.qc_decided_at,

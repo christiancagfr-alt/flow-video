@@ -138,7 +138,7 @@ class PipelineTests(unittest.TestCase):
         group={'segments':[{'segment_id':1,'video_id':1,'foreign_text':'stable camera'}], 'auto_action_match':False}
         with patch.object(ai,'get_api_key',return_value='test'),patch.object(ai,'_image_data_url',return_value='data:image/png;base64,dGVzdA=='),patch('urllib.request.urlopen',return_value=Response()):
             result=ai.generate_enhanced_prompts(model='test',core_prompt='stable camera',group=group,config={'camera_enabled':True,'camera_limit':1},preset_snapshot={})
-        self.assertIn('DIRECTION / AMOUNT:',result['prompts']['1'])
+        self.assertNotIn('DIRECTION / AMOUNT:',result['prompts']['1'])  # Local prompt policy omits the long camera block.
         self.assertIn('文案： stable camera',result['prompts']['1'])
         self.assertTrue(result['data']['VIDEO_PLAN'][0]['camera_motion']['requires_aux_image'])
     def test_missing_aux_plan_saves_text_without_retry(self):
@@ -160,7 +160,7 @@ class PipelineTests(unittest.TestCase):
         group={'segments':[{'segment_id':1,'video_id':1,'foreign_text':'stable camera'}], 'auto_action_match':False}
         with patch.object(ai,'get_api_key',return_value='test'),patch.object(ai,'_image_data_url',return_value='data:image/png;base64,dGVzdA=='),patch('urllib.request.urlopen',return_value=Response()):
             result=ai.generate_enhanced_prompts(model='test',core_prompt='stable camera',group=group,config={'camera_enabled':True,'camera_limit':1},preset_snapshot={})
-        self.assertIn('DIRECTION / AMOUNT:',result['prompts']['1'])
+        self.assertNotIn('DIRECTION / AMOUNT:',result['prompts']['1'])  # Local prompt policy omits the long camera block.
         self.assertIn('文案： stable camera',result['prompts']['1'])
         self.assertTrue(result['data']['VIDEO_PLAN'][0]['camera_motion']['requires_aux_image'])
         self.assertEqual(len(responses),1)

@@ -1,4 +1,5 @@
 """Read-only Sheets cell snapshots. Text and appearance have separate storage."""
+from collections import OrderedDict
 import copy
 import json
 from app.core.database import connect
@@ -22,7 +23,13 @@ def enrich(sheets, spreadsheet_id, title, parsed):
     columns = {key: parsed['header_map'][key] for key in ('中文内容', '外文内容') if parsed.get('header_map', {}).get(key) is not None}
     if not columns:
         return
-    start, end = min(t['表格行号'] for t in tasks), max(t['表格行号'] for t in tasks)
+    from app.services.eye_states import reference_mode
+    pending_tasks = [t for t in tasks if not t.get('_source_styles')]
+    if not pending_tasks:
+        for task in tasks:
+            task['模式'] = reference_mode(task['_source_styles'], task.get('模式', 'TALKING'))
+        return
+    start, end = min(t['表格行号'] for t in pending_tasks), max(t['表格行号'] for t in pending_tasks)
     quoted = title.replace("'", "''")
     ranges = [f"'{quoted}'!{letter(c)}{start}:{letter(c)}{end}" for c in columns.values()]
     response = sheets.spreadsheets().get(spreadsheetId=spreadsheet_id, ranges=ranges,
@@ -35,6 +42,9 @@ def enrich(sheets, spreadsheet_id, title, parsed):
                 for col_index, cell in enumerate(row.get('values', []), grid.get('startColumn', 0)):
                     cells[row_index + 1, col_index] = cell
     for task in tasks:
+        if task.get('_source_styles'):
+            task['模式'] = reference_mode(task['_source_styles'], task.get('模式', 'TALKING'))
+            continue
         styles = {}
         for key, col in columns.items():
             cell = copy.deepcopy(cells.get((task['表格行号'], col), {}))
@@ -44,17 +54,26 @@ def enrich(sheets, spreadsheet_id, title, parsed):
             styles[key] = {'text': text, 'base_mode': task.get('模式','TALKING'), 'cell': cell, 'defaults': props.get('defaultFormat', {}),
                            'theme': props.get('spreadsheetTheme', {})}
         task['_source_styles'] = styles
-        from app.services.eye_states import reference_mode
         task['模式'] = reference_mode(styles, task.get('模式', 'TALKING'))
 
 
+_snapshot_cache: "OrderedDict[int, tuple]" = OrderedDict()
+_ENSURED_STYLE_DBS: set[str] = set()
+
+
 def ensure_table(con):
+    db_key = getattr(con, '_pool_db_str', None)
+    if db_key and db_key in _ENSURED_STYLE_DBS:
+        return
     con.execute('CREATE TABLE IF NOT EXISTS video_source_styles(video_id INTEGER PRIMARY KEY, payload TEXT NOT NULL)')
+    if db_key:
+        _ENSURED_STYLE_DBS.add(db_key)
 
 
 def save_video(video_id, payload):
     if not payload:
         return
+    _snapshot_cache.pop(int(video_id), None)
     with connect() as con:
         ensure_table(con)
         previous = con.execute('SELECT payload FROM video_source_styles WHERE video_id=?', (video_id,)).fetchone()
@@ -108,6 +127,7 @@ def runs(snapshot):
 
 
 def mark_edited(video_id, key):
+    _snapshot_cache.pop(int(video_id), None)
     with connect() as con:
         ensure_table(con)
         row = con.execute('SELECT payload FROM video_source_styles WHERE video_id=?', (video_id,)).fetchone()
@@ -117,11 +137,21 @@ def mark_edited(video_id, key):
         con.execute('UPDATE video_source_styles SET payload=? WHERE video_id=?', (json.dumps(payload, ensure_ascii=False), video_id))
 
 
-def segment_snapshots(video_id):
-    source = load_video(video_id).get('外文内容', {})
-    if not source or source.get('local_override'): return {}
-    with connect() as con:
-        rows = con.execute('SELECT id,foreign_text FROM flow_segments WHERE video_id=? AND seg_seq<1000 ORDER BY seg_seq', (video_id,)).fetchall()
+def _compute_video_snapshots(video_id, raw_payload, rows):
+    if not raw_payload:
+        return {}
+    vid_int = int(video_id)
+    seg_sig = tuple((int(r['id']), str(r['foreign_text'] or '')) for r in rows)
+    cached = _snapshot_cache.get(vid_int)
+    if cached and cached[0] == raw_payload and cached[1] == seg_sig:
+        _snapshot_cache.move_to_end(vid_int)
+        return cached[2]
+    source = json.loads(raw_payload).get('外文内容', {})
+    if not source or source.get('local_override'):
+        _snapshot_cache[vid_int] = (raw_payload, seg_sig, {})
+        while len(_snapshot_cache) > 96:
+            _snapshot_cache.popitem(last=False)
+        return {}
     original = source.get('text', '')
     # Legacy speech splitting inserted punctuation at clip ends. Map those clips
     # only when the complete letter/digit sequence is identical to the source.
@@ -134,6 +164,7 @@ def segment_snapshots(video_id):
     utf16 = [0]
     for char in original: utf16.append(utf16[-1] + len(char.encode('utf-16-le'))//2)
     source_runs = list(runs(source))
+    base_cell = dict(source.get('cell', {}))
     result, offset = {}, 0
     for row in rows:
         text = row['foreign_text'] or ''
@@ -150,7 +181,47 @@ def segment_snapshots(video_id):
             destination += len(char.encode('utf-16-le'))//2
             if significant(char): index += 1
         offset = start + len(key)
-        snapshot = copy.deepcopy(source);snapshot['text']=text
-        snapshot['cell']['textFormatRuns']=entries
+        snapshot = {**source, 'text': text, 'cell': {**base_cell, 'textFormatRuns': entries}}
         result[row['id']] = snapshot
+    _snapshot_cache[int(video_id)] = (raw_payload, seg_sig, result)
+    while len(_snapshot_cache) > 96:
+        _snapshot_cache.popitem(last=False)
     return result
+
+
+def segment_snapshots(video_id):
+    vid = int(video_id)
+    with connect() as con:
+        ensure_table(con)
+        prow = con.execute('SELECT payload FROM video_source_styles WHERE video_id=?', (vid,)).fetchone()
+        if not prow or not prow[0]:
+            return {}
+        rows = con.execute('SELECT id,foreign_text FROM flow_segments WHERE video_id=? AND seg_seq<1000 ORDER BY seg_seq', (vid,)).fetchall()
+    return _compute_video_snapshots(vid, prow[0], rows)
+
+
+def segment_snapshots_for_videos(video_ids):
+    vids = sorted({int(v) for v in (video_ids or []) if v})
+    if not vids:
+        return {}
+    placeholders = ','.join('?' for _ in vids)
+    with connect() as con:
+        ensure_table(con)
+        prows = {int(r['video_id']): r['payload'] for r in con.execute(
+            f'SELECT video_id, payload FROM video_source_styles WHERE video_id IN ({placeholders})', vids
+        ).fetchall() if r['payload']}
+        if not prows:
+            return {}
+        active_vids = sorted(prows.keys())
+        ap = ','.join('?' for _ in active_vids)
+        seg_rows = con.execute(
+            f'SELECT id, video_id, foreign_text FROM flow_segments WHERE video_id IN ({ap}) AND seg_seq<1000 ORDER BY video_id, seg_seq',
+            active_vids,
+        ).fetchall()
+    by_vid = {}
+    for r in seg_rows:
+        by_vid.setdefault(int(r['video_id']), []).append(r)
+    out = {}
+    for vid, raw_payload in prows.items():
+        out.update(_compute_video_snapshots(vid, raw_payload, by_vid.get(vid, ())))
+    return out

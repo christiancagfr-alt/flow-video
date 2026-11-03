@@ -7,6 +7,7 @@ assert.match(source,/state\.generationCommand=executionKey/,'generation gate mus
 const a=source.indexOf('  function jobBaseIdentity('),b=source.indexOf('  function getExpectedNames(');
 const code=source.slice(a,b).replace(/function readStartedWaves[\s\S]*/,'');
 const ctx=vm.createContext({basename:p=>String(p||'').split(/[\\/]/).pop()});
+vm.runInContext(source.slice(source.indexOf('  function isOminiVideoModel('),source.indexOf('  function ',source.indexOf('  function isOminiVideoModel(')+3)),ctx);
 vm.runInContext(code,ctx);
 const j1={channel_key:'CH1',image_set_id:'set',command_id:'cmd',generation_count:1,tasks:[{segment_id:1,task_id:'01-01',image_path:'/a/1.jpg'},{segment_id:2,task_id:'01-02',image_path:'/a/2.jpg'}]};
 const j1Reordered={...j1,tasks:[j1.tasks[1],j1.tasks[0]]};

@@ -18,11 +18,17 @@ def save(output_id,values):
     v=validate(values)
     with connect() as con:
         schema(con);con.execute('BEGIN IMMEDIATE')
-        r=con.execute('SELECT fs.video_id FROM flow_outputs o JOIN flow_segments fs ON fs.id=o.segment_id WHERE o.id=?',(output_id,)).fetchone()
+        r=con.execute("SELECT fs.video_id,COALESCE(v.edit_status,'') edit_status,COALESCE(o.created_at,'') out_created FROM flow_outputs o JOIN flow_segments fs ON fs.id=o.segment_id JOIN videos v ON v.id=fs.video_id WHERE o.id=?",(output_id,)).fetchone()
         if not r:raise ValueError('视频版本已移除，请刷新')
         if con.execute("SELECT 1 FROM sqlite_master WHERE name='davinci_video_state'").fetchone():
-            busy=con.execute("SELECT 1 FROM davinci_video_state s JOIN davinci_batches b ON b.batch_id=s.batch_id WHERE s.video_id=? AND b.status<>'PROJECT_REBUILT'",(r[0],)).fetchone()
-            if busy:raise ValueError('该视频已进入达芬奇批次，请先在剪辑中心重建对应时间线后再调整，避免参数与时间线不一致')
+            busy=con.execute(
+                "SELECT 1 FROM davinci_video_state s JOIN davinci_batches b ON b.batch_id=s.batch_id "
+                "WHERE s.video_id=? AND b.status NOT IN ('COMPLETED','SKIPPED','PROJECT_REBUILT') "
+                "AND (?='' OR COALESCE(b.created_at,'')='' OR b.created_at>=?)",
+                (r[0],r[2],r[2]),
+            ).fetchone()
+            if busy and r[1] not in ('待准备','素材待齐','待剪辑','等待剪辑','需要画面处理','待导入DaVinci'):
+                raise ValueError('该视频已进入达芬奇批次，请先在剪辑中心重建对应时间线后再调整，避免参数与时间线不一致')
         con.execute('INSERT OR REPLACE INTO qc_clip_transforms VALUES(?,?,?,?,?,?)',(output_id,v['ZoomX'],v['Pan'],v['Tilt'],v['width'],v['height']))
     return v
 def for_source(segment_id,path):

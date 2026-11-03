@@ -23,19 +23,39 @@ def choices(con, video_id):
 def selected_mode(saved, row):
     value=saved.get(str(row['segment_id']),{})
     if not isinstance(value,dict):return None
-    if value.get('text')!=row['foreign_text']:return None
+    saved_txt=str(value.get('text') or '').strip()
+    row_txt=str(row['foreign_text'] or '').strip()
+    if saved_txt and saved_txt!=row_txt:
+        if re.findall(r'\w+',saved_txt.lower())!=re.findall(r'\w+',row_txt.lower()):
+            return None
     mode=value.get('mode')
     return mode if mode in ('TALKING','PRAYING') else None
 
 
-def _all_choices(con, video_dates=None):
+def _all_choices(con, video_dates=None, only_video_ids=None):
     import json
     from app.core import work_dates
-    settings=con.execute("SELECT key,value FROM app_settings WHERE key LIKE 'segment_eye_types:%'").fetchall()
-    if not settings:return {}
+    vids = sorted({int(v) for v in (only_video_ids or []) if v is not None}) if only_video_ids is not None else None
+    if vids is not None:
+        if not vids:
+            return {}
+        if len(vids) <= 400:
+            keys = [f'segment_eye_types:{vid}' for vid in vids]
+            placeholders = ','.join('?' for _ in keys)
+            settings = con.execute(f"SELECT key,value FROM app_settings WHERE key IN ({placeholders})", keys).fetchall()
+        else:
+            settings = con.execute("SELECT key,value FROM app_settings WHERE key LIKE 'segment_eye_types:%'").fetchall()
+    else:
+        settings = con.execute("SELECT key,value FROM app_settings WHERE key LIKE 'segment_eye_types:%'").fetchall()
+    if not settings:
+        return {}
     if video_dates is None:
-        dates=work_dates.recipient_dates(con)
-        video_dates={r['id']:dates.get(r['recipient_id']) for r in con.execute('SELECT v.id,h.recipient_id FROM main.videos v JOIN main.hosts h ON h.id=v.host_id')}
+        dates = work_dates.recipient_dates(con)
+        if vids is not None and len(vids) <= 400:
+            vp = ','.join('?' for _ in vids)
+            video_dates = {r['id']: dates.get(r['recipient_id']) for r in con.execute(f'SELECT v.id,h.recipient_id FROM main.videos v JOIN main.hosts h ON h.id=v.host_id WHERE v.id IN ({vp})', vids)}
+        else:
+            video_dates = {r['id']: dates.get(r['recipient_id']) for r in con.execute('SELECT v.id,h.recipient_id FROM main.videos v JOIN main.hosts h ON h.id=v.host_id')}
     result={}
     for row in settings:
         try:
@@ -49,7 +69,8 @@ def apply_choices(con, rows):
     """Batch metadata lookup; preserve sqlite.Row compatibility without per-row SQL."""
     import sqlite3
     if not rows:return rows
-    cache=_all_choices(con)
+    vids = [r['video_id'] for r in rows if r and r['video_id'] is not None]
+    cache=_all_choices(con, only_video_ids=vids)
     columns=list(rows[0].keys())+['segment_type_manual','segment_type_source']
     cursor=con.execute('SELECT '+','.join('NULL AS "'+k+'"' for k in columns))
     result=[]
@@ -76,9 +97,21 @@ def save_segment_types(video_id, lines, modes, day):
         con.execute('INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(f'segment_eye_types:{int(video_id)}',json.dumps(data,ensure_ascii=False)))
 
 
-def confirmed_videos(con, video_dates):
-    cache=_all_choices(con,video_dates);seen=set();unconfirmed=set()
-    for row in con.execute('SELECT id segment_id,video_id,foreign_text FROM flow_segments'):
-        vid=row['video_id'];seen.add(vid)
-        if not selected_mode(cache.get(vid,{}),row):unconfirmed.add(vid)
-    return seen-unconfirmed
+def confirmed_videos(con, video_dates, only_video_ids=None):
+    vids = sorted({int(v) for v in (only_video_ids or []) if v is not None}) if only_video_ids is not None else None
+    if vids is not None and not vids:
+        return set()
+    cache = _all_choices(con, video_dates, only_video_ids=vids)
+    seen = set()
+    unconfirmed = set()
+    if vids is not None and len(vids) <= 400:
+        vp = ','.join('?' for _ in vids)
+        rows = con.execute(f'SELECT id segment_id,video_id,foreign_text FROM flow_segments WHERE video_id IN ({vp})', vids)
+    else:
+        rows = con.execute('SELECT id segment_id,video_id,foreign_text FROM flow_segments')
+    for row in rows:
+        vid = row['video_id']
+        seen.add(vid)
+        if not selected_mode(cache.get(vid, {}), row):
+            unconfirmed.add(vid)
+    return seen - unconfirmed

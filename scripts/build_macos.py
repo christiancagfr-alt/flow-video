@@ -16,7 +16,8 @@ def main():
     name=f'cpython-3.13.16+20261009-{native}-apple-darwin-install_only_stripped.tar.gz'
     archive=build/name
     urllib.request.urlretrieve('https://github.com/astral-sh/python-build-standalone/releases/download/20261009/'+name,archive)
-    assert hashlib.sha256(archive.read_bytes()).hexdigest()==HASHES[args.arch], 'Python checksum mismatch'
+    if hashlib.sha256(archive.read_bytes()).hexdigest()!=HASHES[args.arch]:
+        raise ValueError('Python checksum mismatch')
     with tarfile.open(archive) as tar: tar.extractall(resources,filter='data')
     python=resources/'python/bin/python3'
     if args.arch=='x86_64':

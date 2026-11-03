@@ -64,7 +64,10 @@ class ContentScroll(QScrollArea):
     """Use content height until its cap; only then enable internal scrolling."""
     def __init__(self, cap, parent=None):
         super().__init__(parent)
-        self.cap=cap; self.pending=False
+        self.cap=cap; self.pending=False; self._in_fit=False
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self.fit_content)
         self.setObjectName('cardScroll')
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setWidgetResizable(True)
@@ -79,52 +82,96 @@ class ContentScroll(QScrollArea):
         self.schedule()
 
     def eventFilter(self, obj, event):
-        if event.type()==QEvent.Type.LayoutRequest: self.schedule()
+        if event.type()==QEvent.Type.LayoutRequest and not self._in_fit:
+            self.schedule()
         return super().eventFilter(obj,event)
 
     def resizeEvent(self, event):
-        super().resizeEvent(event); self.schedule()
+        super().resizeEvent(event)
+        if not self._in_fit:
+            self.schedule(resize=True)
 
-    def schedule(self):
-        if not self.pending:
+    def schedule(self, resize: bool = False):
+        if self._in_fit:
+            return
+        if resize:
+            if not self._fit_timer.isActive():
+                self._fit_timer.start(35)
+            return
+        if not self.pending and not self._fit_timer.isActive():
             self.pending=True; QTimer.singleShot(0,self.fit_content)
 
     def fit_content(self):
         from shiboken6 import isValid
-        if not isValid(self):return
-        self.pending=False
-        widget=self.widget()
-        if widget is None or widget.layout() is None: return
-        layout=widget.layout(); limit=max(1,int(self.cap()))
-        width=max(1,self.contentsRect().width())
-        def natural(w):
-            return max(0,layout.heightForWidth(w) if layout.hasHeightForWidth() else layout.sizeHint().height())
-        needed=natural(width)
-        if needed>limit:
-            width=max(1,width-self.verticalScrollBar().sizeHint().width())
+        if not isValid(self) or self._in_fit: return
+        self._fit_timer.stop()
+        self._in_fit = True
+        try:
+            widget=self.widget()
+            if widget is None or widget.layout() is None: return
+            layout=widget.layout(); limit=max(1,int(self.cap()))
+            width=max(1,self.contentsRect().width())
+            def natural(w):
+                return max(0,layout.heightForWidth(w) if layout.hasHeightForWidth() else layout.sizeHint().height())
             needed=natural(width)
-        widget.setMinimumHeight(needed)
-        self.setFixedHeight(min(limit,needed))
-        widget.resize(max(1,self.viewport().width()),max(needed,self.viewport().height()))
-        layout.setGeometry(widget.rect())
+            if needed>limit:
+                width=max(1,width-self.verticalScrollBar().sizeHint().width())
+                needed=natural(width)
+            target_h = min(limit, needed)
+            changed = False
+            if widget.minimumHeight() != needed:
+                widget.setMinimumHeight(needed)
+                changed = True
+            if self.minimumHeight() != target_h or self.maximumHeight() != target_h:
+                self.setFixedHeight(target_h)
+                changed = True
+            target_w = max(1, self.viewport().width())
+            target_wh = max(needed, self.viewport().height())
+            if widget.width() != target_w or widget.height() != target_wh:
+                widget.resize(target_w, target_wh)
+                changed = True
+            if changed:
+                layout.setGeometry(widget.rect())
+                parent=self.parentWidget()
+                if isinstance(parent,ContentPanel):
+                    parent.fit_content()
+        finally:
+            self._in_fit = False
+            self.pending = False
 
 
 class ContentPanel(QFrame):
     """Keep wrapping toolbars/sections at their current width's natural height."""
     def __init__(self, *args, floor=0, **kwargs):
         super().__init__(*args, **kwargs)
-        self.floor=floor; self.pending=False
+        self.floor=floor; self.pending=False; self._in_fit=False
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self.fit_content)
         self.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Fixed)
     def event(self,event):
         result=super().event(event)
-        if event.type() in (QEvent.Type.Resize,QEvent.Type.LayoutRequest,QEvent.Type.Show) and not self.pending:
+        if self._in_fit:
+            return result
+        et = event.type()
+        if et == QEvent.Type.Resize:
+            if not self._fit_timer.isActive():
+                self._fit_timer.start(35)
+        elif et in (QEvent.Type.LayoutRequest,QEvent.Type.Show) and not self.pending and not self._fit_timer.isActive():
             self.pending=True;QTimer.singleShot(0,self.fit_content)
         return result
     def fit_content(self):
         from shiboken6 import isValid
-        if not isValid(self):return
-        self.pending=False
-        layout=self.layout()
-        if layout:
-            height=layout.heightForWidth(self.width()) if layout.hasHeightForWidth() else layout.sizeHint().height()
-            self.setFixedHeight(max(self.floor,height))
+        if not isValid(self) or self._in_fit: return
+        self._fit_timer.stop()
+        self._in_fit = True
+        try:
+            layout=self.layout()
+            if layout:
+                height=layout.heightForWidth(self.width()) if layout.hasHeightForWidth() else layout.sizeHint().height()
+                target_h = max(self.floor, height)
+                if self.minimumHeight() != target_h or self.maximumHeight() != target_h:
+                    self.setFixedHeight(target_h)
+        finally:
+            self._in_fit = False
+            self.pending = False

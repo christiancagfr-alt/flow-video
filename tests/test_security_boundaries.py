@@ -173,7 +173,7 @@ class SecurityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             copied=module.copy_plugin(script.parents[1],folder)
             manifest=json.loads((Path(folder)/module.PLUGIN_REL/'manifest.json').read_text(encoding='utf-8'))
-            self.assertEqual(manifest['version'],'0.9.67')
+            self.assertEqual(manifest['version'],'0.9.69')
             self.assertTrue(copied)
             self.assertFalse((Path(folder)/module.PLUGIN_REL/'tests').exists())
 if __name__=='__main__':unittest.main()

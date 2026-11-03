@@ -181,8 +181,10 @@ def usable_credits(account, today):
     checked = str(account.get('credits_checked_at') or '')[:10]
     remaining = account.get('credits_remaining')
     quota = int(account.get('daily_quota') or DAILY_QUOTA)
-    if remaining is not None and remaining != '' and checked == today:
-        return max(0, int(remaining)), False
+    if remaining is not None and remaining != '':
+        rem = max(0, int(remaining))
+        if checked == today or rem > max(0, quota):
+            return rem, False
     return max(0, quota), True
 
 
@@ -908,8 +910,43 @@ def commit_use(account_id, generations):
     return get_account(account_id)
 
 
+def is_omni_task(task):
+    """Only Omni generations spend the tracked Flow credits."""
+    try:
+        value = task.get('video_model') or task.get('videoModel') or ''
+    except AttributeError:
+        value = ''
+    return repo.normalize_segment_video_model(value) == 'flow_omni'
+
+
+def count_omni(tasks):
+    return sum(1 for task in tasks or [] if is_omni_task(task))
+
+
 def apply_account_gate(tasks, rounds=1):
-    """Scheduler hook. No imported accounts leaves the original task list alone."""
+    """Scheduler hook. Only Omni videos are checked against (and charged to) account credits.
+
+    Non-Omni videos are never held, trimmed or charged, even when the account is short on credits.
+    """
+    tasks = list(tasks or [])
+    omni = [task for task in tasks if is_omni_task(task)]
+    if len(omni) != len(tasks):
+        if not omni:
+            return {'apply': False, 'hold': False, 'tasks': tasks, 'account_id': None, 'message': '', 'detail': ''}
+        decision = _gate_omni_only(omni, rounds)
+        if not decision.get('apply'):
+            return {**decision, 'tasks': tasks, 'hold': False}
+        allowed = {id(task) for task in (decision.get('tasks') or [])}
+        merged = [task for task in tasks if not is_omni_task(task) or id(task) in allowed]
+        decision = dict(decision)
+        if decision.get('hold'):
+            decision.update(hold=not merged, account_id=None)
+        decision['tasks'] = merged
+        return decision
+    return _gate_omni_only(tasks, rounds)
+
+
+def _gate_omni_only(tasks, rounds=1):
     tasks = list(tasks or [])
     if not rotation_enabled():
         return {'apply': False, 'hold': False, 'tasks': tasks, 'account_id': None, 'message': '', 'detail': ''}

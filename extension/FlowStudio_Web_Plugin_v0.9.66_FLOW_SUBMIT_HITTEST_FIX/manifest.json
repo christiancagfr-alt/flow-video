@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Flow Studio Web Plugin",
   "description": "Flow Studio：后台最小化自愈、按浏览器独立错峰、动态通道、Google任务源同步、持久事件队列；保留原上传/下载核心。支持 Chrome、Edge 和 Firefox 128+。",
-  "version": "0.9.67",
-  "version_name": "0.9.67 · 读取 Flow 点数 · Chrome / Edge / Firefox",
+  "version": "0.9.69",
+  "version_name": "0.9.69 · 支持已下载视频单选与批量纯直链重下 · Chrome / Edge / Firefox",
   "browser_specific_settings": {
     "gecko": {
       "id": "flow-studio-web@flowstudio.local",
@@ -16,6 +16,7 @@
   "minimum_chrome_version": "116",
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "tabs",
     "debugger",
     "downloads",

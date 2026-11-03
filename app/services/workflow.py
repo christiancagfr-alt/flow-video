@@ -51,12 +51,51 @@ def managed_download_path(path):
     try:
         path = Path(path).expanduser().resolve()
         roots = [Path.home() / 'Downloads']
-        for key in ('flow_channel_download_root', 'flow_download_root'):
+        for key in ('segment_output_root', 'flow_channel_download_root', 'flow_download_root'):
             value = repo.get_setting(key, '').strip()
             if value: roots.append(Path(value).expanduser())
         return any(path.is_relative_to(root.resolve()) and path != root.resolve() for root in roots)
     except (OSError, ValueError):
         return False
+
+
+def _relocate_to_expected_channel_path(path: Path, event: dict) -> Path:
+    """When Chrome overrides options.filename on a cross-domain redirect (e.g. saving
+    as ~/Downloads/videoplayback (N).mp4 instead of ~/Downloads/FlowStudio_Channels/CH1/...),
+    move and rename the file into its expected channel subfolder path."""
+    import os
+    import shutil
+    try:
+        rel_str = str(event.get('filename') or '').strip().lstrip('/\\')
+        if not rel_str:
+            return path
+        rel_path = Path(rel_str)
+        if rel_path.is_absolute() or '..' in rel_path.parts or len(rel_path.parts) < 2:
+            return path
+        if rel_path.suffix.lower() not in ('.mp4', '.mov', '.m4v', '.webm'):
+            return path
+        dl_root = Path.home() / 'Downloads'
+        ch_root_setting = repo.get_setting('flow_channel_download_root', '').strip()
+        if ch_root_setting and rel_path.parts[0] == 'FlowStudio_Channels':
+            target = Path(ch_root_setting).expanduser() / Path(*rel_path.parts[1:])
+        else:
+            target = dl_root / rel_path
+        src_resolved = path.expanduser().resolve()
+        dst_resolved = target.expanduser().resolve()
+        if src_resolved == dst_resolved:
+            return path
+        if not managed_download_path(src_resolved) or not src_resolved.is_file():
+            return path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(src_resolved, target)
+        except OSError:
+            shutil.move(str(src_resolved), str(target))
+        runtime_log.log('relocated_direct_download_to_channel', src=str(src_resolved), dst=str(target), segment_id=event.get('segment_id'))
+        return target
+    except Exception as exc:
+        runtime_log.log('relocate_direct_download_failed', level='WARNING', src=str(path), error=str(exc))
+        return path
 
 
 def _discard_obsolete_download_path(con, path_value, command_id, segment_id=0, exact_receipt=False):
@@ -115,13 +154,14 @@ def accept(event):
                     exact=bool(reported and Path(reported).is_absolute() and Path(reported).resolve()==Path(resolved_path).resolve())
                     _discard_obsolete_download_path(con,resolved_path,cmd,sid,exact_receipt=exact)
             return False
+        is_redownload = bool(str(event.get('redownload_request_id') or '').strip())
         # Upgrade only legacy completed records without a local file. Never revive a rejected attempt.
-        if row and cmd and not row['generation_command'] and row['flow_status']=='已完成' and not row['flow_output_path'] and not con.execute('SELECT 1 FROM flow_redo WHERE segment_id=?',(sid,)).fetchone() and row['host_id']==int(event.get('host_id') or 0):
+        if row and cmd and not row['generation_command'] and row['flow_status']=='已完成' and (not row['flow_output_path'] or is_redownload) and not con.execute('SELECT 1 FROM flow_redo WHERE segment_id=?',(sid,)).fetchone() and row['host_id']==int(event.get('host_id') or 0):
             con.execute('UPDATE flow_segments SET generation_command=? WHERE id=?',(cmd,sid))
             row=con.execute('''SELECT fs.*,v.host_id,v.seq video_seq,h.name host_name,r.name recipient_name,r.work_date FROM flow_segments fs JOIN videos v ON v.id=fs.video_id JOIN hosts h ON h.id=v.host_id JOIN recipients r ON r.id=h.recipient_id WHERE fs.id=?''',(sid,)).fetchone()
         if not row or not cmd or row['generation_command'] != cmd or row['host_id'] != int(event.get('host_id') or 0):
             con.execute('DELETE FROM flow_pending_downloads WHERE event_id=?', (key,))
-            if event.get('type') == 'video_download_completed' and resolved_path:
+            if event.get('type') == 'video_download_completed' and resolved_path and not is_redownload:
                 _discard_obsolete_download_path(con, resolved_path, cmd, sid)
             runtime_log.log('download_receipt_ignored', level='WARNING', segment_id=sid, command_id=cmd, reason='missing task or stale command/host')
             return False
@@ -139,7 +179,7 @@ def accept(event):
                 runtime_log.log('result_identity_conflict',level='ERROR',segment_id=sid,other_segment=conflict[0],command_id=cmd)
                 return False
             prior = con.execute('SELECT output_path FROM flow_outputs WHERE segment_id=? AND command_id=? AND media_id=?', (sid,cmd,media_key)).fetchone() if media_key else None
-            if prior and Path(prior['output_path']).is_file():
+            if not is_redownload and prior and Path(prior['output_path']).is_file():
                 con.execute('DELETE FROM flow_pending_downloads WHERE event_id=?', (key,))
                 return False
             # Chrome may report completion before a usable absolute filesystem path is
@@ -156,21 +196,24 @@ def accept(event):
             if not readable:
                 con.execute("INSERT INTO flow_pending_downloads(event_id,payload,last_attempt) VALUES(?,?,?) ON CONFLICT(event_id) DO UPDATE SET payload=excluded.payload,last_attempt=excluded.last_attempt",
                             (key,json.dumps(event,ensure_ascii=False),time.time()))
-                try:
-                    _mark_dispatch_with_connection(con, sid, cmd, int(event.get('round') or 1), 'downloading', '等待本地文件识别')
-                except Exception:
-                    pass
+                if not is_redownload:
+                    try:
+                        _mark_dispatch_with_connection(con, sid, cmd, int(event.get('round') or 1), 'downloading', '等待本地文件识别')
+                    except Exception:
+                        pass
                 runtime_log.log('plugin_download_completed_waiting_local_path', level='INFO', segment_id=sid,
-                                command_id=cmd, channel=event.get('channel_key',''), reported_path=local)
+                                command_id=cmd, channel=event.get('channel_key',''), reported_path=local, redownload=is_redownload)
             else:
                 con.execute('DELETE FROM flow_pending_downloads WHERE event_id=?', (key,))
                 # Browser receipts and the folder watcher may use /var vs /private/var
                 # aliases. Compare real paths before any QC/status write.
                 existing = next((r for r in con.execute('SELECT id,output_path FROM flow_outputs WHERE segment_id=? AND command_id=?', (sid,cmd)) if r['output_path'] and Path(r['output_path']).expanduser().resolve()==path.resolve()), None)
-                if existing:
+                if existing and not is_redownload:
                     return False
                 pool_mode = pool_enabled and bool(event.get('channel_key'))
-                if not pool_mode:
+                if pool_mode:
+                    path = _relocate_to_expected_channel_path(path, event)
+                else:
                     raw_channel = event.get('channel_id') or 0
                     try:
                         numeric_channel = int(raw_channel)
@@ -179,20 +222,27 @@ def accept(event):
                     if numeric_channel:
                         local = download_organizer.organize(str(path), dict(row), event)
                         path = Path(local)
+                    else:
+                        path = _relocate_to_expected_channel_path(path, event)
                 media = str(event.get('media_id') or event.get('download_id') or f"plugin:{event.get('channel_key','')}:{path.name}")
                 if media and not media.startswith('local:') and not media.startswith('plugin:'):
                     con.execute("DELETE FROM flow_outputs WHERE segment_id=? AND command_id=? AND (media_id LIKE 'local:%' OR media_id LIKE 'plugin:%')", (sid, cmd))
+                cur_qc = str(_row_get(row, 'qc_status', '待质检') or '待质检')
+                init_qc = cur_qc if is_redownload else '待质检'
                 con.execute('INSERT INTO flow_outputs (segment_id,command_id,media_id,output_path,qc_status) VALUES (?,?,?,?,?) ON CONFLICT(segment_id,command_id,media_id) DO UPDATE SET output_path=excluded.output_path',
-                            (sid,cmd,media,str(path),'待质检'))
-                if _row_get(row, 'qc_status', '待质检') != '通过':
+                            (sid,cmd,media,str(path),init_qc))
+                if is_redownload:
+                    con.execute("UPDATE flow_segments SET flow_status='已完成', flow_output_path=?, flow_output_url='', flow_error='' WHERE id=?",
+                                (str(path), sid))
+                elif cur_qc != '通过':
                     con.execute("UPDATE flow_segments SET flow_status='已完成', flow_output_path=?, flow_output_url='', qc_status='待质检', flow_error='', flow_completed_at=CURRENT_TIMESTAMP WHERE id=?",
                                 (str(path),sid))
                 try:
                     _mark_dispatch_with_connection(con, sid, cmd, int(event.get('round') or 1), 'detected', '')
                 except Exception:
                     pass
-                runtime_log.log('plugin_download_completed_entered_qc', segment_id=sid, command_id=cmd,
-                                channel=event.get('channel_key',''), path=str(path), size=path.stat().st_size)
+                runtime_log.log('plugin_redownload_completed' if is_redownload else 'plugin_download_completed_entered_qc',
+                                segment_id=sid, command_id=cmd, channel=event.get('channel_key',''), path=str(path), size=path.stat().st_size)
         elif row['flow_status'] != '已完成':
             dispatch_round = int(event.get('round') or 1)
             if typ == 'video_download_started':
@@ -202,18 +252,36 @@ def accept(event):
                 try: _mark_dispatch_with_connection(con, sid, cmd, dispatch_round, 'downloading', '')
                 except Exception: pass
             elif typ == 'video_download_failed':
-                status, error = '下载失败', str(event.get('error') or event.get('message') or 'Flow 未返回下载失败原因')
-                try: _mark_dispatch_with_connection(con, sid, cmd, dispatch_round, 'failed', error)
-                except Exception: pass
+                if bool(event.get('retrying')):
+                    status, error = row['flow_status'], ''
+                    try: _mark_dispatch_with_connection(con, sid, cmd, dispatch_round, 'downloading', str(event.get('message') or '下载中断，插件正在自动重试'))
+                    except Exception: pass
+                else:
+                    status, error = '下载失败', str(event.get('error') or event.get('message') or 'Flow 未返回下载失败原因')
+                    try: _mark_dispatch_with_connection(con, sid, cmd, dispatch_round, 'failed', error)
+                    except Exception: pass
             else:
                 state = str(event.get('state') or '')
+                raw_err = '\n'.join(dict.fromkeys(str(event.get(k)) for k in ('error','message') if event.get(k)))
+                if state == 'failed' and raw_err.startswith(('BRIDGE_TIMEOUT:FS_DOWNLOAD_RESERVE', 'BRIDGE_TIMEOUT:FS_DOWNLOAD_SUBMITTING')) and row['flow_status'] in ('待生成', '已准备'):
+                    # Local extension IPC timeout happened before any Flow submission click.
+                    # Return segment cleanly to 待生成 instead of stranding it as a failed generation.
+                    try:
+                        con.execute("UPDATE flow_dispatches SET status='cancelled', stage='CANCELLED', error=? WHERE segment_id=? AND command_id=? AND round_no=?",
+                                    ('本地插件预登记响应超时，已自动退回重派', sid, cmd, dispatch_round))
+                    except Exception:
+                        pass
+                    con.execute("UPDATE flow_segments SET generation_command='', flow_status='待生成', flow_error='' WHERE id=?", (sid,))
+                    runtime_log.log('local_reserve_timeout_requeued', level='WARNING', segment_id=sid, command_id=cmd, channel=event.get('channel_key',''), error=raw_err)
+                    con.execute('INSERT OR IGNORE INTO flow_receipts(event_id,payload) VALUES (?,?)', (key,json.dumps(event,ensure_ascii=False)))
+                    return True
                 # V0.13.5.85: only a *confirmed* Flow acceptance may become SUBMITTED.
                 # Older builds marked the dispatch submitted as soon as the plugin emitted
                 # `running`/`preparing` (before the Generate click/network acceptance).  The
                 # scheduler then released the channel slot and replaced the active Bridge job,
                 # leaving Studio rows as “已提交” even though Flow never started anything.
                 status = {'success':'生成中', 'running':'已准备', 'uncertain':'已准备', 'preparing':'已准备', 'failed':'失败'}.get(state,'已准备')
-                error = '\n'.join(dict.fromkeys(str(event.get(k)) for k in ('error','message') if event.get(k))) if status == '失败' else ''
+                error = raw_err if status == '失败' else ''
                 if status == '失败' and not error:error='Flow 未返回具体失败原因'
                 dispatch_status = 'submitted' if state == 'success' else ('failed' if state == 'failed' else 'queued')
                 try:
@@ -229,20 +297,35 @@ def accept(event):
             runtime_log.log('task_runtime_state', segment_id=sid, command_id=cmd, channel=event.get('channel_key',''), round=dispatch_round,
                             event_type=typ, state=event.get('state',''), flow_status=status, error=error)
         if typ=='generation_task_status' and event.get('state')=='failed' and row['flow_status']!='已完成':
-            # Flow "unusual activity" rejection just reported for this channel: not a task fault, do not count.
+            # Flow "unusual activity" rejection or local bridge IPC timeout: not a task fault, do not count.
+            _err_text = str(event.get('message') or event.get('error') or '生成失败')
             try:
                 from app.services import pause_control
                 _risk=pause_control.recent_unusual(str(event.get('channel_key') or row['flow_channel_key'] or ''))
             except Exception:
                 _risk=False
+            if _err_text.startswith('BRIDGE_TIMEOUT:FS_DOWNLOAD_'):
+                _risk = True
             inserted=0 if _risk else con.execute('INSERT OR IGNORE INTO flow_failure_attempts VALUES(?,?,?,?)',
-                (sid,cmd,str(event.get('message') or event.get('error') or '生成失败'),time.time())).rowcount
+                (sid,cmd,_err_text,time.time())).rowcount
             if inserted:
                 con.execute('INSERT OR IGNORE INTO flow_recovery(segment_id) VALUES(?)',(sid,))
                 con.execute('UPDATE flow_recovery SET failures=failures+1,blocked=CASE WHEN failures+1>=3 THEN 1 ELSE 0 END,notified=CASE WHEN failures<3 AND failures+1>=3 THEN 0 ELSE notified END,queued=0,preferred_channel=? WHERE segment_id=?',(str(event.get('channel_key') or row['flow_channel_key'] or ''),sid))
         elif typ=='video_download_completed' and readable:
             con.execute('DELETE FROM flow_recovery WHERE segment_id=?',(sid,))
         con.execute('INSERT OR IGNORE INTO flow_receipts(event_id,payload) VALUES (?,?)', (key,json.dumps(event,ensure_ascii=False)))
+    if typ == 'video_download_completed' and readable:
+        try:
+            from app.services import flow_redownload
+            flow_redownload.on_bridge_event(event, resolved_path=str(path))
+        except Exception:
+            pass
+    elif is_redownload:
+        try:
+            from app.services import flow_redownload
+            flow_redownload.on_bridge_event(event)
+        except Exception:
+            pass
     return readable if typ == 'video_download_completed' else True
 
 def review(ids, status, note=''):
@@ -310,23 +393,32 @@ def accept_channel_file(dispatch, path):
     p=Path(path).expanduser()
     if not p.is_file() or p.stat().st_size<=0:
         raise ValueError('通道下载文件不可读取：'+str(path))
+    rp=p.resolve()
     d=dict(dispatch); sid=int(d['segment_id']); cmd=str(d['command_id']); round_no=int(d.get('round_no') or 1)
+    stale=False
     with connect() as con:
+        if not con.in_transaction:
+            con.execute('BEGIN IMMEDIATE')
         row=con.execute('SELECT * FROM flow_segments WHERE id=?',(sid,)).fetchone()
         if selected_resubmission.obsolete(con,sid,cmd):
             _discard_obsolete_download_path(con,str(p),cmd,sid)
             return False
         if not row or str(row['generation_command'] or '')!=cmd:
-            repo.update_dispatch(int(d['id']),status='stale',download_path=str(p),error='任务命令已更新',detected=True)
-            runtime_log.log('channel_file_stale',level='WARNING',segment_id=sid,command_id=cmd,path=str(p))
-            return False
-        media=f"local:{d['channel_key']}:{p.name}"
-        if not con.execute('SELECT 1 FROM flow_outputs WHERE segment_id=? AND command_id=? AND output_path=?', (sid,cmd,str(p))).fetchone():
-            con.execute("INSERT OR IGNORE INTO flow_outputs(segment_id,command_id,media_id,output_path,qc_status) VALUES(?,?,?,?, '待质检')",
-                        (sid,cmd,media,str(p)))
-        if row['qc_status']!='通过':
-            con.execute("UPDATE flow_segments SET flow_status='已完成',flow_output_path=?,flow_output_url='',qc_status='待质检',flow_error='',flow_completed_at=CURRENT_TIMESTAMP WHERE id=?",
-                        (str(p),sid))
+            stale=True
+        else:
+            media=f"local:{d['channel_key']}:{p.name}"
+            existing=next((r for r in con.execute('SELECT id,output_path FROM flow_outputs WHERE segment_id=? AND command_id=?', (sid,cmd))
+                           if r['output_path'] and Path(r['output_path']).expanduser().resolve()==rp), None)
+            if not existing:
+                con.execute("INSERT OR IGNORE INTO flow_outputs(segment_id,command_id,media_id,output_path,qc_status) VALUES(?,?,?,?, '待质检')",
+                            (sid,cmd,media,str(p)))
+            if row['qc_status']!='通过':
+                con.execute("UPDATE flow_segments SET flow_status='已完成',flow_output_path=?,flow_output_url='',qc_status='待质检',flow_error='',flow_completed_at=CURRENT_TIMESTAMP WHERE id=?",
+                            (str(p),sid))
+    if stale:
+        repo.update_dispatch(int(d['id']),status='stale',download_path=str(p),error='任务命令已更新',detected=True)
+        runtime_log.log('channel_file_stale',level='WARNING',segment_id=sid,command_id=cmd,path=str(p))
+        return False
     repo.update_dispatch(int(d['id']),status='detected',download_path=str(p),error='',detected=True)
     runtime_log.log('channel_file_detected',segment_id=sid,channel=d['channel_key'],command_id=cmd,
                     round=round_no,task_name=d['task_name'],path=str(p),size=p.stat().st_size)
@@ -340,7 +432,7 @@ def resolve_download_path(event):
     if reported.startswith('file://'):
         reported = unquote(urlparse(reported).path)
     roots = [Path.home()/'Downloads']
-    for key in ('flow_channel_download_root','flow_download_root'):
+    for key in ('segment_output_root','flow_channel_download_root','flow_download_root'):
         value = repo.get_setting(key,'').strip()
         if value:
             roots.append(Path(value).expanduser())
@@ -488,16 +580,19 @@ def reconcile_video_qc(video_id, con_passed=None):
         }
 
         if active_count == expected_count and passed_count == expected_count and expected_count > 0:
-            # We are done!
-            if v_meta['edit_status'] in ('待准备', '等待片段', '素材待齐', '等待剪辑', '需要画面处理', '待剪辑'):
-                con.execute("UPDATE videos SET edit_status='待剪辑' WHERE id=? AND edit_status IN ('待准备', '等待片段', '素材待齐', '等待剪辑', '需要画面处理')", (video_id,))
-                ensure_auto_edit_task(con, video_id)
-            log('QC_COMPLETE_CHECK', **log_info, video_status_after='待剪辑', result='QC_DONE')
+            # 仅当视频仍处于剪辑前的上游等待状态时，才推进到“待剪辑”；绝不覆盖已导入/已剪辑/已导出等下游状态！
+            if str(v_meta['edit_status'] or '') in ('', '待准备', '等待片段', '素材待齐', '等待剪辑', '需要画面处理'):
+                con.execute("UPDATE videos SET edit_status='待剪辑' WHERE id=? AND COALESCE(edit_status, '') IN ('', '待准备', '等待片段', '素材待齐', '等待剪辑', '需要画面处理')", (video_id,))
+                if con.execute("SELECT 1 FROM sqlite_master WHERE name='davinci_video_state'").fetchone():
+                    con.execute("DELETE FROM davinci_video_state WHERE video_id=?", (video_id,))
+            log('QC_COMPLETE_CHECK', **log_info, video_status_after=v_meta['edit_status'] or '待剪辑', result='QC_DONE')
         else:
             reason = 'ACTIVE_SEGMENT_COUNT_MISMATCH' if active_count != expected_count else 'SEGMENT_NOT_PASSED'
-            # If it was marked as QC_DONE but now it's not, revert it to '素材待齐'
-            if v_meta['edit_status'] == '待剪辑':
-                con.execute("UPDATE videos SET edit_status='素材待齐' WHERE id=?", (video_id,))
+            # 仅当尚处于待剪辑阶段且片段被退回/未齐时，回退至等待片段；绝不破坏已剪辑/已导出的成品记录
+            if str(v_meta['edit_status'] or '') in ('待剪辑', '等待剪辑'):
+                con.execute("UPDATE videos SET edit_status='等待片段' WHERE id=?", (video_id,))
+                if con.execute("SELECT 1 FROM sqlite_master WHERE name='davinci_video_state'").fetchone():
+                    con.execute("DELETE FROM davinci_video_state WHERE video_id=?", (video_id,))
             log('QC_NOT_COMPLETE', **log_info, reason=reason)
             
     if con_passed:
@@ -508,14 +603,13 @@ def reconcile_video_qc(video_id, con_passed=None):
 
 def run_background_qc_reconcile():
     """
-    后台兜底检查，每 15-30s 执行，仅扫描 QC 队列中的任务
+    后台兜底检查，每 15-30s 执行，仅扫描尚未进入剪辑及下游阶段的 QC 队列任务
     """
     from app.core.database import connect
     with connect() as con:
-        # Find all videos currently in some active QC/rework phase but not yet 待剪辑 or 已剪辑
         videos = con.execute('''
             SELECT id FROM videos 
-            WHERE edit_status NOT IN ('待剪辑', '处理中', '已完成', '已发布')
+            WHERE COALESCE(edit_status, '') IN ('', '待准备', '等待片段', '素材待齐', '等待剪辑', '需要画面处理')
             AND EXISTS (SELECT 1 FROM flow_segments WHERE video_id=videos.id AND qc_status IN ('待质检', '退回', '通过'))
         ''').fetchall()
         

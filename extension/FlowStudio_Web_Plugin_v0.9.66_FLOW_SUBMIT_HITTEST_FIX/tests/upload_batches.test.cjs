@@ -16,6 +16,7 @@ const ctx=vm.createContext({
   syntheticDragUpload:async()=>({ok:false}),
   chrome:{runtime:{sendMessage:(m,cb)=>{batches.push(m.paths);cb({ok:true,method:'chrome_debugger'})}}}
 });
+Object.assign(ctx,{submitViaMainWorld:async()=>({media:[]}),recognizedMediaCount:()=>0,matchTasks:()=>{},allMissingImageNames:()=>ctx.missingImagePaths().names});
 vm.runInContext(method,ctx);
 (async()=>{
  await vm.runInContext('uploadMissing(true)',ctx);

@@ -6,7 +6,7 @@ const path=require('node:path');
 const root=path.resolve(__dirname,'..');
 const source=fs.readFileSync(path.join(root,'content.js'),'utf8');
 const start=source.indexOf('  function nativeClickNodeInfo');
-const end=source.indexOf("\n\n  chrome.runtime.onMessage.addListener",start);
+const end=source.indexOf("\n  chrome.runtime.onMessage.addListener",start);
 assert.ok(start>0 && end>start,'native click bridge block must exist');
 const bridge=source.slice(start,end);
 
@@ -62,6 +62,6 @@ async function runCase({underlyingGenerate=true}){
   assert.equal(bad.pointerEvents,'','plugin pointer-events must also be restored on mismatch');
 
   const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
-  assert.equal(manifest.version,'0.9.66');
+  assert.equal(manifest.version,'0.9.69');
   console.log('PASS v0.9.66 overlay bypass, hit-test, single click, and restoration');
 })().catch(e=>{console.error(e);process.exit(1);});

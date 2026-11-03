@@ -31,168 +31,12 @@ from app.services import flow_bridge
 from app.services import chrome_profiles
 from app.services import multi_channel
 from app.services import channel_pool, runtime_log, pipeline_orchestrator
+from app.services.flow_error_guide import diagnose_flow_error, translate_common_exception_cn
 from app.services.local_bridge import get_bridge
+from app.ui.resolve_error_dialog import EditingErrorDetailDialog
 
 
 DEFAULT_FLOW_URL = "https://labs.google/fx/tools/flow/"
-
-
-class FlowSettingsDialog(QDialog):
-    VIDEO_MODELS = [
-        ("Gemini Omni · 网页付费模型", "flow_omni"),
-        ("Veo 3.1 Lite · Low Priority", "veo_3_1_lite_low_priority"),
-        ("Veo 3.1 Lite", "veo_3_1_lite"),
-        ("Veo 3.1 Fast", "veo_3_1_fast"),
-        ("Veo 3.1 Quality", "veo_3_1_quality"),
-    ]
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Flow 设置 · Chrome Profile + 批量插件")
-        self.resize(720, 520)
-
-        outer = QVBoxLayout(self)
-
-        # Chrome profile
-        chrome_box = QFrame(objectName="card")
-        form = QFormLayout(chrome_box)
-
-        self.profile = CleanComboBox()
-        self.profiles = chrome_profiles.list_chrome_profiles()
-        saved_profile = repo.get_setting("chrome_profile_directory", "Default")
-        selected = 0
-        for i, p in enumerate(self.profiles):
-            detail = p["name"]
-            if p["email"]:
-                detail += f' · {p["email"]}'
-            self.profile.addItem(detail, p["directory"])
-            if p["directory"] == saved_profile:
-                selected = i
-        if self.profiles:
-            self.profile.setCurrentIndex(selected)
-        else:
-            self.profile.addItem("未检测到 Chrome Profile", "Default")
-
-        self.url = QLineEdit(repo.get_setting("flow_url", "https://flow.google.com/"))
-        self.bridge_port = QSpinBox()
-        self.bridge_port.setRange(1024, 65535)
-        try:
-            self.bridge_port.setValue(int(repo.get_setting("flow_bridge_port", "17831") or 17831))
-        except (TypeError, ValueError):
-            self.bridge_port.setValue(17831)
-        self.bridge_port.setToolTip("网页插件连接本机 Flow Studio Bridge 的端口；插件里必须填写相同端口。")
-        form.addRow("Chrome 身份", self.profile)
-        form.addRow("Flow 页面", self.url)
-        # form.addRow("本地 Bridge 端口", self.bridge_port)
-        self.bridge_port.hide()
-        chrome_box.setSizePolicy(QSizePolicy.Preferred,QSizePolicy.Maximum)
-        outer.addWidget(chrome_box)
-
-        # Plugin settings moved from extension UI
-        plugin_box = QFrame(objectName="card")
-        pf = QFormLayout(plugin_box)
-
-        self.interval = QSpinBox()
-        self.interval.setRange(1, 3600)
-        self.interval.setValue(int(repo.get_setting("flow_plugin_interval", "20") or 20))
-
-        self.aspect_ratio = CleanComboBox()
-        self.aspect_ratio.addItems(['9:16', '16:9'])
-        self.aspect_ratio.setCurrentText(repo.get_setting('flow_aspect_ratio','9:16'))
-        pf.addRow('画面比例', self.aspect_ratio)
-        self.interval_random = QSpinBox()
-        self.interval_random.setRange(0, 3600)
-        self.interval_random.setValue(int(repo.get_setting("flow_plugin_interval_random", "10") or 10))
-
-        self.max4 = QSpinBox(); self.max4.setRange(1, 9999)
-        self.max4.setValue(int(repo.get_setting("flow_plugin_max4", "40") or 40))
-        self.max6 = QSpinBox(); self.max6.setRange(1, 9999)
-        self.max6.setValue(int(repo.get_setting("flow_plugin_max6", "60") or 60))
-        self.max8 = QSpinBox(); self.max8.setRange(1, 9999)
-        self.max8.setValue(int(repo.get_setting("flow_plugin_max8", "80") or 80))
-
-        self.video_model = CleanComboBox()
-        saved_model = repo.get_setting("flow_plugin_video_model", "veo_3_1_lite_low_priority")
-        model_idx = next((i for i, (_, key) in enumerate(self.VIDEO_MODELS) if key == "veo_3_1_lite_low_priority"), 0)
-        for i, (label, value) in enumerate(self.VIDEO_MODELS):
-            self.video_model.addItem(label, value)
-            if value == saved_model:
-                model_idx = i
-        self.video_model.setCurrentIndex(model_idx)
-
-        self.download = QCheckBox("自动下载生成视频")
-        self.download.setChecked(repo.get_setting("flow_plugin_download", "1") != "0")
-
-        self.preview = QCheckBox("显示文本预览")
-        self.preview.setChecked(repo.get_setting("flow_plugin_preview", "1") != "0")
-
-        self.download_root = QLineEdit(repo.get_setting("flow_channel_download_root", str(Path.home()/"Downloads"/"FlowStudio_Channels")))
-        self.download_root_btn = QPushButton("选择…")
-        def choose_download_root():
-            folder=QFileDialog.getExistingDirectory(self,"选择通道下载根目录（包含 CH1/CH2/.../R1）",self.download_root.text().strip() or str(Path.home()/"Downloads"))
-            if folder: self.download_root.setText(folder)
-        self.download_root_btn.clicked.connect(choose_download_root)
-        dr=QWidget(); drl=QHBoxLayout(dr); drl.setContentsMargins(0,0,0,0); drl.addWidget(self.download_root,1); drl.addWidget(self.download_root_btn)
-
-        self.capture = QDoubleSpinBox()
-        self.capture.setRange(0.01, 1.0)
-        self.capture.setSingleStep(0.01)
-        self.capture.setDecimals(2)
-        self.capture.setValue(float(repo.get_setting("flow_plugin_capture", "0.95") or 0.95))
-
-        pf.addRow("生成间隔（秒）", self.interval)
-        pf.addRow("随机间隔（秒）", self.interval_random)
-        # pf.addRow("4秒最大字符", self.max4)
-        self.max4.hide()
-        # pf.addRow("6秒最大字符", self.max6)
-        self.max6.hide()
-        # pf.addRow("8秒最大字符", self.max8)
-        self.max8.hide()
-        pf.addRow("视频模型", self.video_model)
-        pf.addRow("下载", self.download)
-        pf.addRow("通道下载根目录", dr)
-        pf.addRow("文本预览", self.preview)
-        pf.addRow("视频截图位置 0~1", self.capture)
-        plugin_box.setSizePolicy(QSizePolicy.Preferred,QSizePolicy.Maximum)
-        outer.addWidget(plugin_box)
-        outer.addStretch(1)
-
-        # hint removed from UI
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.save)
-        buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
-
-    def save(self):
-        repo.set_setting("chrome_profile_directory", self.profile.currentData() or "Default")
-        repo.set_setting("flow_url", self.url.text().strip() or "https://flow.google.com/")
-        old_port = int(repo.get_setting("flow_bridge_port", "17831") or 17831)
-        new_port = int(self.bridge_port.value())
-        repo.set_setting("flow_bridge_port", str(new_port))
-        repo.set_setting("flow_aspect_ratio", self.aspect_ratio.currentText())
-        repo.set_setting("flow_plugin_interval", str(self.interval.value()))
-        repo.set_setting("flow_plugin_interval_random", str(self.interval_random.value()))
-        repo.set_setting("flow_plugin_max4", str(self.max4.value()))
-        repo.set_setting("flow_plugin_max6", str(self.max6.value()))
-        repo.set_setting("flow_plugin_max8", str(self.max8.value()))
-        repo.set_setting("flow_plugin_video_model", self.video_model.currentData())
-        repo.set_setting("flow_plugin_download", "1" if self.download.isChecked() else "0")
-        repo.set_setting("flow_channel_download_root", self.download_root.text().strip() or str(Path.home()/"Downloads"/"FlowStudio_Channels"))
-        repo.set_setting("flow_download_root", self.download_root.text().strip() or str(Path.home()/"Downloads"/"FlowStudio_Channels"))
-        repo.set_setting("flow_plugin_preview", "1" if self.preview.isChecked() else "0")
-        repo.set_setting("flow_plugin_capture", str(self.capture.value()))
-        if self.parent() and hasattr(self.parent(), "bridge") and new_port != old_port:
-            try:
-                self.parent().bridge.reconfigure_port(new_port)
-            except Exception as exc:
-                QMessageBox.critical(self, "Bridge 端口切换失败", str(exc))
-                return
-        if self.parent() and hasattr(self.parent(), "sync_bridge_config"):
-            self.parent().sync_bridge_config()
-            try: self.parent().bridge.touch_host_jobs()   # plugin applies new interval/random right away
-            except Exception: pass
-        self.accept()
 
 
 class FlowTaskPreviewDialog(QDialog):
@@ -211,9 +55,31 @@ class FlowTaskPreviewDialog(QDialog):
         layout.addWidget(info)
 
         if task["flow_error"]:
-            err = QLabel("失败原因：" + task["flow_error"], objectName="muted")
+            seg_code = f'{task["video_seq"]:02d}-{task["seg_seq"]:02d}'
+            err_info = diagnose_flow_error(
+                str(task["flow_error"] or ""),
+                status=str(task.get("flow_status") or "失败"),
+                channel_key=str(task.get("flow_channel_key") or ""),
+                host_name=str(task.get("host_name") or ""),
+                seg_code=seg_code,
+            )
+            err_row = QHBoxLayout()
+            err_row.setSpacing(8)
+            err = QLabel("⚠ " + err_info.inline_text, objectName="muted")
+            err.setProperty("isError", "true")
             err.setWordWrap(True)
-            layout.addWidget(err)
+            err_row.addWidget(err, 1)
+            detail_btn = QPushButton("查看详情", objectName="dvErrDetailBtn")
+            detail_btn.setCursor(Qt.PointingHandCursor)
+            detail_btn.clicked.connect(
+                lambda: EditingErrorDetailDialog(
+                    err_info,
+                    context_title=f'{task["recipient_name"]} · {task["host_name"]} · 片段 {seg_code}',
+                    parent=self,
+                ).exec()
+            )
+            err_row.addWidget(detail_btn, 0, Qt.AlignVCenter)
+            layout.addLayout(err_row)
 
         splitter = QSplitter(Qt.Vertical)
 
@@ -363,7 +229,7 @@ class MultiChannelDialog(QDialog):
         hint.setWordWrap(True); outer.addWidget(hint)
         top=QHBoxLayout(); top.addWidget(QLabel("普通通道"))
         self.count=QSpinBox(); self.count.setRange(1,2147483647); self.count.setValue(repo.flow_channel_count(self.host_id)); top.addWidget(self.count)
-        self.rework=QCheckBox("启用 R1 高速通道"); self.rework.setChecked(True if repo.flow_rework_enabled(self.host_id) else True); top.addWidget(self.rework)
+        self.rework=QCheckBox("启用 R1 高速通道"); self.rework.setChecked(bool(repo.flow_rework_enabled(self.host_id))); self.rework.hide(); top.addWidget(self.rework)
         top.addStretch(1); outer.addLayout(top)
         self.table=QTableWidget(); self.table.setColumnCount(4); self.table.setHorizontalHeaderLabels(["通道","用途","Flow集合链接","状态"])
         self.table.verticalHeader().setVisible(False); self.table.horizontalHeader().setSectionResizeMode(2,QHeaderView.Stretch)
@@ -505,47 +371,168 @@ class FlowBatchCenterPage(QWidget):
         layout = QVBoxLayout(self.page_content)
         layout.setContentsMargins(16,18,16,18)
         layout.setSpacing(12)
-        layout.setAlignment(Qt.AlignTop)
         self.page_scroll.setWidget(self.page_content)
         root_layout.addWidget(self.page_scroll)
 
-        # Header
-        header=ContentPanel()
-        top = WrappingRow(header,spacing=12)
-        title_block=QWidget(); tb = QVBoxLayout(title_block); tb.setContentsMargins(0,0,0,0)
+        # Header: clean left title + right-aligned Bridge/Port status capsule (no popup button)
+        header = QFrame(objectName="flowHeaderBar")
+        top = QHBoxLayout(header)
+        top.setContentsMargins(2, 0, 2, 2)
+        top.setSpacing(16)
+        title_block = QWidget()
+        tb = QVBoxLayout(title_block)
+        tb.setContentsMargins(0, 0, 0, 0)
+        tb.setSpacing(3)
         title = QLabel("Flow 生成中心")
         title.setStyleSheet("font-size:27px;font-weight:800;")
         sub = QLabel(
             "按接收人和主播管理批次 · 下载完成后自动进入视频质检",
             objectName="muted"
         )
-        tb.addWidget(title)
         sub.setWordWrap(True)
+        tb.addWidget(title)
         tb.addWidget(sub)
-        top.addWidget(title_block)
+        top.addWidget(title_block, 1)
 
-        self.bridge_status = QLabel("Bridge：检查中…", objectName="muted")
-        top.addWidget(self.bridge_status)
-        self.bridge_port_badge = QLabel(f"端口 {getattr(self.bridge, 'port', 17831)}", objectName="cardMeta")
-        self.bridge_port_badge.setToolTip("网页插件必须使用相同的本地 Bridge 端口")
-        top.addWidget(self.bridge_port_badge)
-
-        settings = QPushButton("⚙ Flow设置")
-        settings.clicked.connect(self.open_settings)
-        top.addWidget(settings)
+        self.bridge_capsule = QFrame(objectName="flowBridgeCapsule")
+        self.bridge_capsule.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        bc_lay = QHBoxLayout(self.bridge_capsule)
+        bc_lay.setContentsMargins(8, 6, 8, 6)
+        bc_lay.setSpacing(8)
+        self.bridge_status = QLabel("○ 等待插件连接", objectName="flowBridgeStatus")
+        self.bridge_status.setProperty("state", "waiting")
+        bc_lay.addWidget(self.bridge_status)
+        bc_sep = QFrame(objectName="flowHeaderSep")
+        bc_lay.addWidget(bc_sep)
+        port_val = getattr(self.bridge, "port", 17831)
+        self.bridge_port_badge = QLabel(f"端口 {port_val}", objectName="flowPortBadge")
+        self.bridge_port_badge.setToolTip(f"本地通信地址：127.0.0.1:{port_val}\n网页插件必须使用相同的本地 Bridge 端口")
+        bc_lay.addWidget(self.bridge_port_badge)
+        top.addWidget(self.bridge_capsule, 0, Qt.AlignVCenter | Qt.AlignRight)
 
         layout.addWidget(header)
 
-        # Production monitor: GPT submission is the authorization, so there is no Start button here.
-        prod=ContentPanel(objectName="topStrip"); pr=WrappingRow(prod); pr.setContentsMargins(14,10,14,10); pr.setSpacing(14)
-        self.visual_auto_state=QLabel("● 自动生产运行中",objectName="statusGood"); pr.addWidget(self.visual_auto_state)
-        self.visual_pause_btn=QPushButton("⏸ 暂停生产"); self.visual_pause_btn.clicked.connect(self.toggle_generation_pause); pr.addWidget(self.visual_pause_btn)
-        stop_btn=QPushButton("■ 停止生产",objectName="ghostDanger"); stop_btn.clicked.connect(self.stop_production); pr.addWidget(stop_btn)
-        self.visual_today=QLabel("今日完成 0 / 0",objectName="cardTitle"); pr.addWidget(self.visual_today)
+        # Production monitor + inline generation interval controls
+        prod = QFrame(objectName="topStrip")
+        pr = QHBoxLayout(prod)
+        pr.setContentsMargins(14, 9, 14, 9)
+        pr.setSpacing(12)
+        self.visual_auto_state = QLabel("● 自动生产运行中", objectName="statusGood")
+        pr.addWidget(self.visual_auto_state)
+        self.visual_pause_btn = QPushButton("⏸ 暂停生产")
+        self.visual_pause_btn.clicked.connect(self.toggle_generation_pause)
+        pr.addWidget(self.visual_pause_btn)
+        stop_btn = QPushButton("■ 停止生产", objectName="ghostDanger")
+        stop_btn.clicked.connect(self.stop_production)
+        pr.addWidget(stop_btn)
+        self.visual_today = QLabel("当日完成 0 / 0", objectName="cardTitle")
+        pr.addWidget(self.visual_today)
+        pr.addStretch(1)
+
+        from app.services import host_priority as _hp_init
+        first_three_on = _hp_init.first_three_videos_enabled()
+        first_videos_cnt = _hp_init.first_videos_per_host()
+        self.first_three_box = QFrame(objectName="flowFirstThreeBox")
+        self.first_three_box.setProperty("active", "true" if first_three_on else "false")
+        ft_lay = QHBoxLayout(self.first_three_box)
+        ft_lay.setContentsMargins(10, 4, 11, 4)
+        ft_lay.setSpacing(6)
+        self.first_three_videos_chk = QCheckBox("人物先生成", objectName="flowFirstThreeCheck")
+        self.first_three_videos_chk.setCursor(Qt.PointingHandCursor)
+        self.first_three_videos_chk.setChecked(first_three_on)
+        self.first_videos_count_spin = QSpinBox(objectName="flowInlineSpin")
+        self.first_videos_count_spin.setRange(1, 99)
+        self.first_videos_count_spin.setSuffix(" 个")
+        self.first_videos_count_spin.setMinimumWidth(72)
+        self.first_videos_count_spin.setValue(first_videos_cnt)
+        self.first_three_tail_lbl = QLabel("完整视频", objectName="flowFirstThreeTail")
+        self.first_three_tail_lbl.setCursor(Qt.PointingHandCursor)
+        _ft_tip = (
+            "选中后：所有人物默认自动先生成各自前 N 个完整视频的全部片段（可自由调节个数 1～99），"
+            "全部派发完成后再按顺序生成剩余视频；\n"
+            "手动点击「优先生成」仍保持原有功能（该人物全部视频最优先）。"
+        )
+        for _w in (self.first_three_box, self.first_three_videos_chk, self.first_videos_count_spin, self.first_three_tail_lbl):
+            _w.setToolTip(_ft_tip)
+        self.first_three_videos_chk.toggled.connect(self._on_first_three_videos_toggled)
+        self._first_videos_count_timer = QTimer(self)
+        self._first_videos_count_timer.setSingleShot(True)
+        self._first_videos_count_timer.setInterval(200)
+        self._first_videos_count_timer.timeout.connect(self._save_first_videos_count)
+        self.first_videos_count_spin.valueChanged.connect(lambda _v: self._first_videos_count_timer.start())
+        self.first_three_tail_lbl.mousePressEvent = lambda ev: (
+            self.first_three_videos_chk.toggle() if ev.button() == Qt.LeftButton else None
+        )
+        self.first_three_box.mousePressEvent = lambda ev: (
+            self.first_three_videos_chk.toggle()
+            if ev.button() == Qt.LeftButton and not self.first_videos_count_spin.geometry().contains(ev.position().toPoint())
+            else None
+        )
+        ft_lay.addWidget(self.first_three_videos_chk)
+        ft_lay.addWidget(self.first_videos_count_spin)
+        ft_lay.addWidget(self.first_three_tail_lbl)
+        pr.addWidget(self.first_three_box, 0, Qt.AlignVCenter)
+
+        interval_group = QFrame(objectName="flowIntervalGroup")
+        ig_lay = QHBoxLayout(interval_group)
+        ig_lay.setContentsMargins(10, 4, 10, 4)
+        ig_lay.setSpacing(8)
+        ig_lay.addWidget(QLabel("生成间隔", objectName="flowIntervalLabel"))
+        self.plugin_interval_spin = QSpinBox(objectName="flowInlineSpin")
+        self.plugin_interval_spin.setRange(1, 3600)
+        self.plugin_interval_spin.setSuffix(" 秒")
+        self.plugin_interval_spin.setMinimumWidth(88)
+        try:
+            saved_iv = int(repo.get_setting("flow_plugin_interval", "20") or 20)
+        except (TypeError, ValueError):
+            saved_iv = 20
+        self.plugin_interval_spin.setValue(max(1, min(3600, saved_iv)))
+        self.plugin_interval_spin.setToolTip("每条任务提交后的基础等待间隔（1～3600 秒），修改后自动保存并实时同步给插件")
+        ig_lay.addWidget(self.plugin_interval_spin)
+
+        ig_lay.addWidget(QFrame(objectName="flowHeaderSep"))
+
+        ig_lay.addWidget(QLabel("随机间隔", objectName="flowIntervalLabel"))
+        self.plugin_interval_random_spin = QSpinBox(objectName="flowInlineSpin")
+        self.plugin_interval_random_spin.setRange(0, 3600)
+        self.plugin_interval_random_spin.setSuffix(" 秒")
+        self.plugin_interval_random_spin.setMinimumWidth(88)
+        try:
+            saved_rnd = int(repo.get_setting("flow_plugin_interval_random", "10") or 10)
+        except (TypeError, ValueError):
+            saved_rnd = 10
+        self.plugin_interval_random_spin.setValue(max(0, min(3600, saved_rnd)))
+        self.plugin_interval_random_spin.setToolTip("在基础间隔上额外附加的随机浮动秒数（0～3600 秒），修改后自动保存并实时同步给插件")
+        ig_lay.addWidget(self.plugin_interval_random_spin)
+
+        self._interval_save_timer = QTimer(self)
+        self._interval_save_timer.setSingleShot(True)
+        self._interval_save_timer.setInterval(250)
+        self._interval_save_timer.timeout.connect(self._save_plugin_intervals)
+        self.plugin_interval_spin.valueChanged.connect(lambda _v: self._interval_save_timer.start())
+        self.plugin_interval_random_spin.valueChanged.connect(lambda _v: self._interval_save_timer.start())
+
+        pr.addWidget(interval_group, 0, Qt.AlignVCenter)
         layout.addWidget(prod)
 
-        state_strip=ContentPanel(objectName="topStrip",floor=44); ss=WrappingRow(state_strip); ss.setContentsMargins(14,8,14,8); ss.setSpacing(26)
-        self.visual_running=QLabel("生成中 0",objectName="statusInfo"); self.visual_downloading=QLabel("下载完成 0",objectName="statusGood"); self.visual_failed=QLabel("异常 0",objectName="statusBad"); self.visual_rework=QLabel("返工 0",objectName="statusWarn")
+        state_strip=ContentPanel(objectName="topStrip",floor=44); ss=WrappingRow(state_strip); ss.setContentsMargins(14,8,14,8); ss.setSpacing(16)
+        self.visual_running=QPushButton("● 生成中 0 ›",objectName="statRunningBtn")
+        self.visual_running.setCursor(Qt.PointingHandCursor)
+        self.visual_running.setFocusPolicy(Qt.NoFocus)
+        self.visual_running.setToolTip("点击打开「运行任务与异常重试」，查看实时生成耗时、一键勾选疑似卡住任务并批量重置重试")
+        self.visual_running.clicked.connect(lambda: self.show_runtime_tasks("all"))
+        self.visual_downloading=QPushButton("✓ 下载完成 0 ›",objectName="statDoneBtn")
+        self.visual_downloading.setCursor(Qt.PointingHandCursor)
+        self.visual_downloading.setFocusPolicy(Qt.NoFocus)
+        self.visual_downloading.setToolTip("点击打开「下载完成管理」，按主播卡片分类查看已下载视频，支持单选/批量重新下载（不改提示词、不重生成）")
+        self.visual_downloading.clicked.connect(self.show_downloaded_tasks)
+        self.visual_failed=QPushButton("⚠ 异常 0 ›",objectName="statFailedBtn")
+        self.visual_failed.setProperty("zero", "true")
+        self.visual_failed.setCursor(Qt.PointingHandCursor)
+        self.visual_failed.setFocusPolicy(Qt.NoFocus)
+        self.visual_failed.setToolTip("点击打开「运行任务与异常重试」，按主播查看异常、卡住及运行中任务并批量重置重试")
+        self.visual_failed.clicked.connect(lambda: self.show_runtime_tasks("all"))
+        self.visual_rework=QLabel("返工 0",objectName="statusWarn")
         for w in (self.visual_running,self.visual_downloading,self.visual_failed,self.visual_rework): ss.addWidget(w)
         state_strip.setMinimumHeight(44); layout.addWidget(state_strip)
 
@@ -555,7 +542,6 @@ class FlowBatchCenterPage(QWidget):
         channel_actions=WrappingRow()
         self.channel_add_browser=CleanComboBox(); self.channel_add_browser.addItem('浏览器A','A'); channel_actions.addWidget(self.channel_add_browser)
         self.add_normal_btn=QPushButton('＋ 添加普通通道',objectName='channelAddNormalBtn'); self.add_normal_btn.clicked.connect(self.add_normal_channel); channel_actions.addWidget(self.add_normal_btn)
-        runtime_btn=QPushButton('运行任务 / 重试',objectName='channelRuntimeRetryBtn'); runtime_btn.clicked.connect(self.show_runtime_tasks); channel_actions.addWidget(runtime_btn)
         browser_add=QPushButton('＋ 添加浏览器',objectName='channelAddBrowserBtn'); browser_add.clicked.connect(self.add_browser_group_ui); channel_actions.addWidget(browser_add)
         chv.addLayout(channel_actions)
         chbody=QHBoxLayout(); chbody.setSpacing(10)
@@ -567,12 +553,57 @@ class FlowBatchCenterPage(QWidget):
         self.visual_rework_card.hide()
         chv.addLayout(chbody); layout.addWidget(ch_section)
 
-        # Recipient/host production progress: same visual grammar as Task Center, but no editing controls.
-        progress_section=ContentPanel(objectName="pageCard"); psv=QVBoxLayout(progress_section); psv.setContentsMargins(14,12,14,12); psv.setSpacing(8); psv.addWidget(QLabel("生产进度",objectName="sectionTitle"))
-        self.visual_progress_scroll=ContentScroll(lambda: max(160,self.height()//2))
+        # Recipient/host production progress: stretches to the bottom of the viewport so there is no dead blank gap.
+        progress_section=QFrame(objectName="pageCard")
+        progress_section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        psv=QVBoxLayout(progress_section); psv.setContentsMargins(14,12,14,12); psv.setSpacing(10)
+        self._prog_filter_mode = "all"
+        self._manual_recipient_collapse = {}
+        self._prog_filter_btns = {}
+        ph_row = QHBoxLayout(); ph_row.setContentsMargins(0, 0, 0, 0); ph_row.setSpacing(6)
+        ph_row.addWidget(QLabel("生产进度", objectName="sectionTitle"))
+        ph_row.addSpacing(6)
+        for _mode, _init_txt in (
+            ("all", "全部 0"),
+            ("running", "● 生成中 0"),
+            ("failed", "⚠ 异常 0"),
+            ("waiting", "⏳ 排队 0"),
+            ("done", "✓ 已完成 0"),
+        ):
+            _pill = QPushButton(_init_txt, objectName="flowProgFilterPill")
+            _pill.setCheckable(True)
+            _pill.setChecked(_mode == "all")
+            _pill.setProperty("pillKind", _mode)
+            _pill.setCursor(Qt.PointingHandCursor)
+            _pill.setFocusPolicy(Qt.NoFocus)
+            _pill.clicked.connect(lambda _=False, m=_mode: self._set_prog_filter_mode(m))
+            self._prog_filter_btns[_mode] = _pill
+            ph_row.addWidget(_pill)
+        ph_row.addStretch(1)
+        self.auto_collapse_done_chk = QCheckBox("已完成分组自动收起", objectName="flowAutoCollapseCheck")
+        self.auto_collapse_done_chk.setCursor(Qt.PointingHandCursor)
+        self.auto_collapse_done_chk.setToolTip("勾选后，所有主播任务 100% 完成的接收人分组会自动折叠并排在底部；点击分组标题可随时展开或收起")
+        try:
+            _auto_col = str(repo.get_setting("flow_progress_auto_collapse_done", "1") or "1").strip() != "0"
+        except Exception:
+            _auto_col = True
+        self.auto_collapse_done_chk.blockSignals(True)
+        self.auto_collapse_done_chk.setChecked(_auto_col)
+        self.auto_collapse_done_chk.blockSignals(False)
+        self.auto_collapse_done_chk.toggled.connect(self._on_auto_collapse_done_toggled)
+        ph_row.addWidget(self.auto_collapse_done_chk)
+        psv.addLayout(ph_row)
+        self.visual_progress_scroll=QScrollArea(objectName="cardScroll")
+        self.visual_progress_scroll.setFrameShape(QFrame.NoFrame)
+        self.visual_progress_scroll.setWidgetResizable(True)
+        self.visual_progress_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.visual_progress_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.visual_progress_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.visual_progress_scroll.setMinimumHeight(180)
+        self.visual_progress_scroll.schedule = lambda *_a, **_kw: None
         self.visual_progress_content=QWidget(objectName="flowProductionProgressContent")
         self.visual_progress_layout=QVBoxLayout(self.visual_progress_content); self.visual_progress_layout.setContentsMargins(0,0,0,0); self.visual_progress_layout.setSpacing(10); self.visual_progress_layout.setAlignment(Qt.AlignTop)
-        self.visual_progress_scroll.setWidget(self.visual_progress_content); psv.addWidget(self.visual_progress_scroll); layout.addWidget(progress_section)
+        self.visual_progress_scroll.setWidget(self.visual_progress_content); psv.addWidget(self.visual_progress_scroll, 1); layout.addWidget(progress_section, 1)
         self.channel_section=ch_section; self.progress_section=progress_section
 
 
@@ -660,6 +691,7 @@ class FlowBatchCenterPage(QWidget):
         channel_top.addWidget(add_channel)
         self.fast_channel_btn = QPushButton("切换当前高速通道")
         self.fast_channel_btn.clicked.connect(self.toggle_current_fast_channel)
+        self.fast_channel_btn.hide()
         channel_top.addWidget(self.fast_channel_btn)
         save_channels = QPushButton("保存通道")
         save_channels.clicked.connect(self.save_channel_pool)
@@ -829,7 +861,7 @@ class FlowBatchCenterPage(QWidget):
         split.addWidget(self.table)
         split.setStretchFactor(1, 1)
         split.setSizes([300, 1050])
-        layout.addWidget(split, 1)
+        layout.addWidget(split, 0)
         # Keep the mature management widgets alive for compatibility, but the confirmed
         # production UI is intentionally monitor-first. Technical configuration stays in dialogs/settings.
         for w in (filters, channel_card, overview_card, split, self.channel_summary_label):
@@ -846,8 +878,12 @@ class FlowBatchCenterPage(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self,'visual_channel_scroll'):
-            self.visual_channel_scroll.schedule()
+            self.visual_channel_scroll.schedule(resize=True)
             self.visual_progress_scroll.schedule()
+
+    def _is_window_resizing(self) -> bool:
+        pw = getattr(self, "parent_window", None)
+        return bool(pw is not None and hasattr(pw, "is_actively_resizing") and pw.is_actively_resizing())
 
     def _clear_visual_layout(self, layout):
         while layout.count():
@@ -874,8 +910,69 @@ class FlowBatchCenterPage(QWidget):
         from app.services import host_priority
         enabled=host_priority.toggle(day,host_id)
         runtime_log.log('host_generation_priority',work_date=day,host_id=host_id,enabled=enabled)
+        cache = getattr(self, '_view_cache', None)
+        if isinstance(cache, dict):
+            cache['priorities'] = host_priority.load(day)
+        self._view_dirty = True
         self._progress_signature=None
         self.refresh_visual_monitor()
+        self.auto_dispatch_tick()
+
+    def _set_prog_filter_mode(self, mode: str):
+        cur = getattr(self, "_prog_filter_mode", "all")
+        target = "all" if (mode != "all" and cur == mode) else mode
+        self._prog_filter_mode = target
+        for m, btn in getattr(self, "_prog_filter_btns", {}).items():
+            btn.blockSignals(True)
+            btn.setChecked(m == target)
+            btn.blockSignals(False)
+        self.refresh_visual_monitor()
+
+    def _on_auto_collapse_done_toggled(self, checked: bool):
+        try:
+            repo.set_setting("flow_progress_auto_collapse_done", "1" if checked else "0")
+        except Exception:
+            pass
+        if hasattr(self, "_manual_recipient_collapse"):
+            self._manual_recipient_collapse.clear()
+        self.refresh_visual_monitor()
+
+    def _refresh_first_three_box_style(self, enabled: bool):
+        if not hasattr(self, "first_three_box"):
+            return
+        self.first_three_box.setProperty("active", "true" if enabled else "false")
+        self.first_three_box.style().unpolish(self.first_three_box)
+        self.first_three_box.style().polish(self.first_three_box)
+        for attr in ("first_three_videos_chk", "first_three_tail_lbl", "first_videos_count_spin"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.style().unpolish(w)
+                w.style().polish(w)
+
+    def _on_first_three_videos_toggled(self, checked: bool):
+        from app.services import host_priority
+        enabled = host_priority.set_first_three_videos_enabled(bool(checked))
+        cnt = int(self.first_videos_count_spin.value()) if hasattr(self, "first_videos_count_spin") else host_priority.first_videos_per_host()
+        host_priority.set_first_videos_per_host(cnt)
+        self._refresh_first_three_box_style(enabled)
+        runtime_log.log(
+            "flow_first_three_videos_mode",
+            enabled=enabled,
+            limit=cnt,
+        )
+        self._view_dirty = True
+        self.auto_dispatch_tick()
+
+    def _save_first_videos_count(self):
+        if not hasattr(self, "first_videos_count_spin"):
+            return
+        from app.services import host_priority
+        cnt = host_priority.set_first_videos_per_host(int(self.first_videos_count_spin.value()))
+        enabled = bool(self.first_three_videos_chk.isChecked()) if hasattr(self, "first_three_videos_chk") else host_priority.first_three_videos_enabled()
+        runtime_log.log("flow_first_videos_count_updated", limit=cnt, enabled=enabled)
+        if enabled:
+            self._view_dirty = True
+            self.auto_dispatch_tick()
 
     @measured('flow_ui_refresh')
     def refresh_visual_monitor(self):
@@ -896,8 +993,13 @@ class FlowBatchCenterPage(QWidget):
         downloaded=sum(1 for t in tasks if str(t['flow_status'] or '')=='已完成')
         failed=sum(1 for t in tasks if str(t['flow_status'] or '') in ('失败','下载失败'))
         rework=sum(1 for t in tasks if int(t['flow_retry_count'] or 0)>0 and str(t['flow_status'] or '')!='已完成')
+        self._last_failed_stat = failed
         self.visual_today.setText(f"当日完成 {done} / {total}")
-        self.visual_running.setText(f"生成中 {running}"); self.visual_downloading.setText(f"下载完成 {downloaded}"); self.visual_failed.setText(f"异常 {failed}"); self.visual_rework.setText(f"返工 {rework}")
+        self.visual_running.setText(f"● 生成中 {running} ›"); self.visual_downloading.setText(f"✓ 下载完成 {downloaded} ›"); self.visual_failed.setText(f"⚠ 异常 {failed} ›"); self.visual_rework.setText(f"返工 {rework}")
+        want_zero = "false" if failed > 0 else "true"
+        if self.visual_failed.property("zero") != want_zero:
+            self.visual_failed.setProperty("zero", want_zero)
+            self.visual_failed.style().unpolish(self.visual_failed); self.visual_failed.style().polish(self.visual_failed)
         paused=bool(self.bridge.generation_control().get('paused'))
         if paused!=getattr(self,'_monitor_paused',None):
             self._monitor_paused=paused
@@ -955,9 +1057,14 @@ class FlowBatchCenterPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._sync_inline_interval_spins()
+        self.refresh_bridge_status(force=True)
         if hasattr(self, '_visual_timer'):
             self._visual_timer.start()
             self._view_dirty = True
+            # Right after a page switch, paint the fresh snapshot as soon as the
+            # background read finishes instead of waiting for the next 750 ms tick.
+            self._fast_apply_until = time.time() + 3.0
             self._flush_view()
 
     def hideEvent(self, event):
@@ -971,17 +1078,53 @@ class FlowBatchCenterPage(QWidget):
             self._view_dirty = True
             return
         self._view_pending = result
+        if self.isVisible() and time.time() < getattr(self, '_fast_apply_until', 0):
+            QTimer.singleShot(0, self._apply_pending_view)
 
-    def _flush_view(self):
-        if not self.isVisible(): return
+    def _apply_pending_view(self):
+        if not self.isVisible() or self._is_window_resizing(): return
         if self._view_pending is not None:
             snapshot, self._view_pending = self._view_pending, None
             if snapshot['key'] == self._view_key():
+                if time.time() < getattr(self, '_channel_override_until', 0) and getattr(self, '_channel_override_data', None):
+                    snapshot.update(self._channel_override_data)
                 self._view_cache = snapshot
                 self._apply_view(snapshot)
+
+    def _flush_view(self):
+        if not self.isVisible() or self._is_window_resizing(): return
+        self._apply_pending_view()
         if self._view_dirty:
             self._view_dirty = False
             self._view_reader.request(self._view_key())
+
+    def _sync_channel_cache_now(self):
+        self._view_dirty = True
+        self._view_pending = None
+        channels = [dict(c) for c in repo.list_channel_pool(enabled_only=True)]
+        summaries = {
+            str(c['channel_key']): dict(repo.channel_dispatch_summary(c['channel_key']))
+            for c in channels
+        }
+        groups = [dict(g) for g in repo.list_browser_groups(True)]
+        b_enabled = repo.browser_b_enabled()
+        self._channel_override_until = time.time() + 5.0
+        self._channel_override_data = {
+            'channels': channels,
+            'summaries': summaries,
+            'groups': groups,
+            'b_enabled': b_enabled,
+        }
+        cache = getattr(self, '_view_cache', None)
+        if not cache:
+            from app.services.flow_view_snapshot import read_snapshot
+            try:
+                self._view_cache = read_snapshot(self._view_key())
+                cache = self._view_cache
+            except Exception:
+                cache = None
+        if cache:
+            cache.update(self._channel_override_data)
 
     @measured('flow_ui_refresh')
     def _apply_view(self, snapshot):
@@ -989,6 +1132,18 @@ class FlowBatchCenterPage(QWidget):
         self.page_index = snapshot['page']
         self.page_label.setText(f"{snapshot['total']} 个片段 · {self.page_index+1}/{snapshot['pages']} 页 · 每页100条")
         self.task_rows = snapshot['rows']
+
+        if not self.table.isVisibleTo(self):
+            # The legacy task table is permanently hidden in the monitor-first UI.
+            # Keep task_rows current for actions, but skip building ~1,200 hidden
+            # cells/widgets on every page switch. It is rebuilt fully if ever shown.
+            self._task_table_ids = []
+            self.refresh_stats()
+            if not getattr(self,"_date_view_refresh",False):
+                self.refresh_channel_pool_table()
+                self.refresh_link_table()
+            self.refresh_visual_monitor()
+            return
 
         self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(self.task_rows))
@@ -1004,6 +1159,24 @@ class FlowBatchCenterPage(QWidget):
                 check.drag_moved_global.connect(self.update_fill_drag)
                 check.drag_finished.connect(self.finish_fill_drag)
                 self.table.setCellWidget(row, 0, check)
+            raw_ferr = str(task['flow_error'] or '').strip()
+            if raw_ferr:
+                ferr_info = diagnose_flow_error(
+                    raw_ferr,
+                    status=str(task.get('flow_status') or '失败'),
+                    channel_key=str(task.get('flow_channel_key') or ''),
+                    host_name=str(task.get('host_name') or ''),
+                    seg_code=f"{task['video_seq']:02d}-{task['seg_seq']:02d}",
+                )
+                ferr_text = ferr_info.inline_text
+                ferr_tip = (
+                    f"【中文诊断】{ferr_info.title}\n"
+                    f"【原因说明】{ferr_info.cause}\n"
+                    f"【建议解决】{ferr_info.solutions[0] if ferr_info.solutions else ''}\n"
+                    f"【内部错误码】{raw_ferr}"
+                )
+            else:
+                ferr_text, ferr_tip = '', ''
             values = (
                 (f"{task['video_seq']:02d}-{task['seg_seq']:02d}", ''),
                 (Path(task['image_path']).name if task['image_path'] else '无图片', ''),
@@ -1011,7 +1184,7 @@ class FlowBatchCenterPage(QWidget):
                 (task['prompt'] or '', task['prompt'] or ''),
                 (task['flow_status'] or '待生成', ''),
                 (str(task['flow_attempts'] or 0), ''),
-                (task['flow_error'] or '', task['flow_error'] or ''),
+                (ferr_text, ferr_tip),
                 (Path(task['flow_output_path']).name if task['flow_output_path'] else '', task['flow_output_path'] or ''),
                 (task['recipient_name'], ''), (task['host_name'], ''),
                 (task['flow_channel_key'] or '—', ''),
@@ -1950,10 +2123,16 @@ class FlowBatchCenterPage(QWidget):
 
         if task_changed:
             if self.isVisible():self.reload_tasks()
-            if self.parent_window and hasattr(self.parent_window, 'qc_page'):
-                self.parent_window.qc_page.mark_dirty()
-                if self.parent_window.davinci_page.isVisible():self.parent_window.davinci_page.reload()
-                if hasattr(self.parent_window, 'stats_page') and self.parent_window.stats_page.isVisible(): self.parent_window.stats_page.reload()
+            if self.parent_window:
+                qc_p = getattr(self.parent_window, 'qc_page', None)
+                if qc_p is not None:
+                    qc_p.mark_dirty()
+                dv_p = getattr(self.parent_window, 'davinci_page', None)
+                if dv_p is not None and dv_p.isVisible():
+                    dv_p.reload()
+                st_p = getattr(self.parent_window, 'stats_page', None)
+                if st_p is not None and st_p.isVisible():
+                    st_p.reload()
         elif changed and self.isVisible():
             self.refresh_link_table()
 
@@ -2657,6 +2836,54 @@ class FlowBatchCenterPage(QWidget):
             "capturePosition": float(repo.get_setting("flow_plugin_capture", "0.95") or 0.95),
         }
 
+    def _sync_inline_interval_spins(self):
+        if hasattr(self, "plugin_interval_spin") and not self.plugin_interval_spin.hasFocus():
+            try:
+                iv = max(1, min(3600, int(repo.get_setting("flow_plugin_interval", "20") or 20)))
+            except (TypeError, ValueError):
+                iv = 20
+            if self.plugin_interval_spin.value() != iv:
+                self.plugin_interval_spin.blockSignals(True)
+                self.plugin_interval_spin.setValue(iv)
+                self.plugin_interval_spin.blockSignals(False)
+        if hasattr(self, "plugin_interval_random_spin") and not self.plugin_interval_random_spin.hasFocus():
+            try:
+                rnd = max(0, min(3600, int(repo.get_setting("flow_plugin_interval_random", "10") or 10)))
+            except (TypeError, ValueError):
+                rnd = 10
+            if self.plugin_interval_random_spin.value() != rnd:
+                self.plugin_interval_random_spin.blockSignals(True)
+                self.plugin_interval_random_spin.setValue(rnd)
+                self.plugin_interval_random_spin.blockSignals(False)
+        if hasattr(self, "first_three_videos_chk"):
+            from app.services import host_priority
+            enabled = host_priority.first_three_videos_enabled()
+            if self.first_three_videos_chk.isChecked() != enabled:
+                self.first_three_videos_chk.blockSignals(True)
+                self.first_three_videos_chk.setChecked(enabled)
+                self.first_three_videos_chk.blockSignals(False)
+            if hasattr(self, "first_videos_count_spin") and not self.first_videos_count_spin.hasFocus():
+                cnt = host_priority.first_videos_per_host()
+                if self.first_videos_count_spin.value() != cnt:
+                    self.first_videos_count_spin.blockSignals(True)
+                    self.first_videos_count_spin.setValue(cnt)
+                    self.first_videos_count_spin.blockSignals(False)
+            self._refresh_first_three_box_style(enabled)
+
+    def _save_plugin_intervals(self):
+        if not hasattr(self, "plugin_interval_spin"):
+            return
+        iv = int(self.plugin_interval_spin.value())
+        rnd = int(self.plugin_interval_random_spin.value())
+        repo.set_setting("flow_plugin_interval", str(iv))
+        repo.set_setting("flow_plugin_interval_random", str(rnd))
+        self.sync_bridge_config()
+        try:
+            self.bridge.touch_host_jobs()
+        except Exception:
+            pass
+        runtime_log.log("flow_intervals_updated", interval=iv, interval_random=rnd)
+
     def sync_bridge_config(self):
         self.bridge.update_config({
             "profileDirectory": repo.get_setting("chrome_profile_directory", "Default") or "Default",
@@ -2664,16 +2891,51 @@ class FlowBatchCenterPage(QWidget):
             "pluginSettings": self.plugin_settings_payload(),
         })
 
-    def refresh_bridge_status(self):
-        if not self.isVisible(): return
-        cache=getattr(self,'_view_cache',None)
-        if not cache:return
-        status=self.bridge.status()
-        profile=cache['profile']
-        name=next((p['name'] for p in cache['profiles'] if p['directory']==profile),profile)
-        version=status.get('extension',{}).get('extensionVersion','')
-        self.bridge_status.setText(f"Bridge：{'● 已连接' if status['connected'] else '○ 等待插件'} · {name}"+(f' · v{version}' if version else ''))
-        if hasattr(self,'bridge_port_badge'):self.bridge_port_badge.setText(f"端口 {status.get('port',17831)}")
+    def refresh_bridge_status(self, force=False):
+        if not force and (not self.isVisible() or self._is_window_resizing()):
+            return
+        status = self.bridge.status()
+        connected = bool(status.get("connected"))
+        port = status.get("port", getattr(self.bridge, "port", 17831))
+        version = str((status.get("extension") or {}).get("extensionVersion") or "").strip()
+        state_key = "online" if connected else "waiting"
+        if connected:
+            label_text = f"● 插件已连接 · v{version}" if version else "● 插件已连接"
+        else:
+            label_text = "○ 等待插件连接"
+        geometry_changed = False
+        if self.bridge_status.property("state") != state_key:
+            self.bridge_status.setProperty("state", state_key)
+            self.bridge_status.style().unpolish(self.bridge_status)
+            self.bridge_status.style().polish(self.bridge_status)
+            geometry_changed = True
+        if self.bridge_status.text() != label_text:
+            self.bridge_status.setText(label_text)
+            geometry_changed = True
+        tip_lines = [
+            f"本地 Bridge：{'已连接' if connected else '等待网页插件连接'}",
+        ]
+        if version:
+            tip_lines.append(f"插件版本：v{version}")
+        tip_lines.append(f"通信端口：127.0.0.1:{port}")
+        self.bridge_status.setToolTip("\n".join(tip_lines))
+        if hasattr(self, "bridge_port_badge"):
+            port_text = f"端口 {port}"
+            if self.bridge_port_badge.text() != port_text:
+                self.bridge_port_badge.setText(port_text)
+                geometry_changed = True
+            self.bridge_port_badge.setToolTip(
+                f"本地通信地址：127.0.0.1:{port}\n网页插件必须使用相同的本地 Bridge 端口"
+            )
+        if geometry_changed:
+            self.bridge_status.updateGeometry()
+            if hasattr(self, "bridge_capsule"):
+                if self.bridge_capsule.layout():
+                    self.bridge_capsule.layout().activate()
+                self.bridge_capsule.updateGeometry()
+                parent = self.bridge_capsule.parentWidget()
+                if parent and parent.layout():
+                    parent.layout().activate()
 
     def request_progress_scan(self):
         """Ask every connected Flow page to rescan generation/download progress."""
@@ -2817,10 +3079,9 @@ class FlowBatchCenterPage(QWidget):
             QMessageBox.critical(self, "打开 Flow 失败", str(exc))
 
     def open_settings(self):
-        dlg = FlowSettingsDialog(self)
-        if dlg.exec():
-            self.sync_bridge_config()
-            self.refresh_bridge_status()
+        owner = self.parent_window or self.window()
+        if owner is not None and owner is not self and hasattr(owner, "open_settings"):
+            owner.open_settings()
 
     def copy_selected_for_plugin(self):
         tasks=self.require_selected()
@@ -3140,22 +3401,25 @@ class FlowBatchCenterPage(QWidget):
         runtime_log.log('browser_profile_saved',browser=gid,profile=profile)
         self.refresh_channel_pool_table()
 
-    @production_ui_action
     def add_browser_group_ui(self):
         gid=repo.add_browser_group(profile='Default',normal_count=0,fast_enabled=False)
         runtime_log.log('browser_group_added',browser=gid)
+        self._sync_channel_cache_now()
         self.refresh_channel_pool_table()
         idx=self.browser_pool_selector.findData(gid)
         if idx>=0:self.browser_pool_selector.setCurrentIndex(idx)
         if hasattr(self,'channel_add_browser'): self.channel_add_browser.setCurrentIndex(self.channel_add_browser.findData(gid))
 
-    @production_ui_action
     def toggle_current_fast_channel(self):
         gid=self._current_browser_group(); g=next((x for x in repo.list_browser_groups(True) if x['id']==gid),None)
         if not g:return
         repo.update_browser_group(gid,enabled=True,fast_enabled=not bool(g.get('fast_enabled')))
         runtime_log.log('browser_fast_toggled',browser=gid,enabled=not bool(g.get('fast_enabled')))
+        self._sync_channel_cache_now()
         self.refresh_channel_pool_table()
+        self.refresh_visual_monitor()
+        if hasattr(self,'visual_channel_scroll'): self.visual_channel_scroll.fit_content()
+        if hasattr(self,'channel_section'): self.channel_section.fit_content()
 
     @production_ui_action
     def _save_pool_link(self,key,edit):
@@ -3174,24 +3438,34 @@ class FlowBatchCenterPage(QWidget):
         if hi<lo:
             lo,hi=hi,lo;self.dispatch_stagger_min.setValue(lo);self.dispatch_stagger_max.setValue(hi)
         repo.set_setting('flow_dispatch_stagger_min',str(lo));repo.set_setting('flow_dispatch_stagger_max',str(hi))
-        channel_pool.ensure_defaults();self.refresh_channel_pool_table()
+        channel_pool.ensure_defaults()
+        self._sync_channel_cache_now()
+        self.refresh_channel_pool_table()
         runtime_log.log('channel_pool_saved',stagger_min=lo,stagger_max=hi,
                         browsers=repo.list_browser_groups(True),enabled_channels=[str(c['channel_key']) for c in repo.list_channel_pool(enabled_only=True)])
         QMessageBox.information(self,'通道设置','已保存。不同浏览器并行；10～15秒错峰仅在各浏览器内部独立运行。')
 
-    @production_ui_action
     def add_normal_channel(self):
         gid=self._current_browser_group()
-        repo.add_pool_channel(gid,'normal')
-        runtime_log.log('channel_added',browser=gid,role='normal')
+        new_key=repo.add_pool_channel(gid,'normal')
+        if hasattr(self,'_pending_removed_channels') and self._pending_removed_channels:
+            self._pending_removed_channels.pop(str(new_key),None)
+        runtime_log.log('channel_added',browser=gid,role='normal',channel=new_key)
+        self._sync_channel_cache_now()
         self.refresh_channel_pool_table(); self.refresh_visual_monitor()
+        if hasattr(self,'visual_channel_scroll'): self.visual_channel_scroll.fit_content()
+        if hasattr(self,'channel_section'): self.channel_section.fit_content()
 
-    @production_ui_action
     def add_fast_channel(self):
         gid=self._current_browser_group()
-        repo.add_pool_channel(gid,'fast')
-        runtime_log.log('channel_added',browser=gid,role='fast')
+        new_key=repo.add_pool_channel(gid,'fast')
+        if hasattr(self,'_pending_removed_channels') and self._pending_removed_channels:
+            self._pending_removed_channels.pop(str(new_key),None)
+        runtime_log.log('channel_added',browser=gid,role='fast',channel=new_key)
+        self._sync_channel_cache_now()
         self.refresh_channel_pool_table(); self.refresh_visual_monitor()
+        if hasattr(self,'visual_channel_scroll'): self.visual_channel_scroll.fit_content()
+        if hasattr(self,'channel_section'): self.channel_section.fit_content()
 
     def open_channel_link(self,key):
         channel=repo.get_channel_pool(channel_key=key)
@@ -3271,6 +3545,8 @@ class FlowBatchCenterPage(QWidget):
                 elif item.text()!=text:item.setText(text)
 
     def refresh_live_connection_states(self):
+        if self._is_window_resizing():
+            return
         now = time.monotonic()
         if now - getattr(self, '_last_watchdog_tick', 0) > 10:
             self._last_watchdog_tick = now
@@ -3295,7 +3571,10 @@ class FlowBatchCenterPage(QWidget):
 
             out.append(t)
             
-        return out
+        from app.services import host_priority
+        day_val = work_dates.active()
+        all_rows = rows if (rid is None and hid is None) else [dict(t) for t in repo.list_flow_tasks(None, None, '全部', work_date=day_val)]
+        return host_priority.apply(out, all_rows, day_val)
 
     def _make_pool_job(self,ch,tasks,command_id,generation_count=None,execute_upload=False,dispatch_tasks=False,retry_only=False,work_date=None):
 
@@ -3527,9 +3806,13 @@ class FlowBatchCenterPage(QWidget):
             self._download_scan_future = None
         if changed:
             self.reload_tasks(); self.refresh_channel_pool_table()
-            if self.parent_window and hasattr(self.parent_window,'qc_page'):
-                self.parent_window.qc_page.mark_dirty()
-                if self.parent_window.davinci_page.isVisible():self.parent_window.davinci_page.reload()
+            if self.parent_window:
+                qc_p = getattr(self.parent_window, 'qc_page', None)
+                if qc_p is not None:
+                    qc_p.mark_dirty()
+                dv_p = getattr(self.parent_window, 'davinci_page', None)
+                if dv_p is not None and dv_p.isVisible():
+                    dv_p.reload()
 
 
     @production_ui_action
@@ -3547,7 +3830,10 @@ class FlowBatchCenterPage(QWidget):
                 try:self.bridge.cancel_host_commands(commands)
                 except Exception as exc:runtime_log.log('remove_channel_bridge_cancel_failed',level='WARNING',channel=key,error=str(exc))
             runtime_log.log('channel_removed_tasks_transferred',channel=key,commands=commands,segments=result.get('segments',[]))
+            self._sync_channel_cache_now()
             self.sync_bridge_config();self.refresh_visual_monitor();self.refresh_channel_pool_table()
+            if hasattr(self,'visual_channel_scroll'): self.visual_channel_scroll.fit_content()
+            if hasattr(self,'channel_section'): self.channel_section.fit_content()
         except Exception as exc:
             pend.pop(key,None)
             entry=(getattr(self,'_monitor_channels',None) or {}).get(key)
@@ -3569,11 +3855,27 @@ class FlowBatchCenterPage(QWidget):
                         segment_ids=[int(r[0]) for r in rows],count=len(rows),
                         message='累计生成失败 3 次，已停止自动重试；请在运行任务 / 重试中人工处理')
 
-    def show_runtime_tasks(self):
+    def show_runtime_tasks(self, initial_filter="all"):
+        filt = initial_filter if isinstance(initial_filter, str) else "all"
         if getattr(self, "_runtime_dialog", None) is not None:
+            if filt:
+                self._runtime_dialog.set_initial_filter(filt)
             self._runtime_dialog.show(); self._runtime_dialog.raise_(); self._runtime_dialog.activateWindow()
+            self._runtime_dialog.refresh(force=True)
             return
         from app.ui.runtime_tasks import RuntimeTasksDialog
-        dialog=RuntimeTasksDialog(self);dialog.setAttribute(Qt.WA_DeleteOnClose);dialog.show()
+        dialog=RuntimeTasksDialog(self, initial_filter=filt);dialog.setAttribute(Qt.WA_DeleteOnClose);dialog.show()
         self._runtime_dialog=dialog
         dialog.destroyed.connect(lambda: setattr(self, "_runtime_dialog", None))
+
+    def show_downloaded_tasks(self):
+        if getattr(self, "_downloaded_dialog", None) is not None:
+            self._downloaded_dialog.show(); self._downloaded_dialog.raise_(); self._downloaded_dialog.activateWindow()
+            self._downloaded_dialog.refresh_data(force=True)
+            return
+        from app.ui.downloaded_videos_dialog import DownloadedVideosDialog
+        dialog = DownloadedVideosDialog(self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.show()
+        self._downloaded_dialog = dialog
+        dialog.destroyed.connect(lambda: setattr(self, "_downloaded_dialog", None))

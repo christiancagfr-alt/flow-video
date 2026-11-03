@@ -26,7 +26,7 @@ def compatibility_reason(payload):
     # Do not silently approximate legacy CSS animation/typography with ASS.
     if payload.get('captions') and not payload.get('reelsStyle'):
         return '原有 CSS 字幕样式；选择 Reels 字幕样式后可使用快速渲染'
-    if (payload.get('reelsStyle') or {}).get('free_animation') in ('持续向上滚动', '中间固定滚动', '自定义区域滚动'):
+    if (payload.get('reelsStyle') or {}).get('free_animation') in ('持续向上滚动', '中间固定滚动'):
         return '连续滚动字幕'
     if (payload.get('watermark') or {}).get('enabled'):
         return '旧版水印'
@@ -79,7 +79,7 @@ def title_image(title, width, height, work):
 
 def encoder_args(ffmpeg, codec, hardware=True):
     if codec=='prores':return ['-c:v','prores_ks','-profile:v','3','-pix_fmt','yuv422p10le','-threads','2'],'ProRes HQ'
-    if codec=='vp9':return ['-c:v','libvpx-vp9','-crf','18','-b:v','0','-row-mt','1','-threads','2'],'VP9'
+    if codec=='vp9':return ['-c:v','libvpx-vp9','-pix_fmt','yuv420p','-crf','18','-b:v','0','-row-mt','1','-threads','2'],'VP9'
     if hardware:
         candidate=['-c:v','h264_nvenc','-preset','p5','-rc','vbr','-cq','16','-b:v','0','-pix_fmt','yuv420p']
         try:
@@ -156,7 +156,7 @@ def build_command(payload, output, work, encoding, preview_frame=None):
         pieces.append(f'[{video}][{alabel}]');audio.append(seconds)
     filters.append(''.join(pieces)+f'concat=n={len(pieces)}:v=1:a=1[finalv][finala]')
     graph=work/'graph.txt';graph.write_text(';\n'.join(filters),'utf-8')
-    command.extend(['-filter_complex_script',str(graph),'-map','[finalv]'])
+    command.extend(['-/filter_complex',str(graph),'-map','[finalv]'])
     if preview_frame is not None:
         command.extend(['-ss',str(max(0,int(preview_frame))/fps),'-frames:v','1','-update','1','-an','-c:v','png','-threads','1'])
         # An unmapped complex audio output must be explicitly consumed.

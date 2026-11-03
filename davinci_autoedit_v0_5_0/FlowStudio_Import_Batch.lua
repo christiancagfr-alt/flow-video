@@ -1,6 +1,7 @@
 local platformSource=debug.getinfo(1,'S').source:sub(2):gsub('\\','/')
 local platform=assert(loadfile(platformSource:match('^(.*)/[^/]+$')..'/FlowStudio_Platform.lua'))()
 local os,io,loadfile=platform.os,platform.io,platform.loadfile
+if jit and jit.off then pcall(jit.off) end
 -- FlowStudio Import Batch - simple append mode.
 -- Rule: ignore all earlier timeline content/markers. Find only the last yellow Flow Studio
 -- import marker, use its recorded video end as the anchor, then append the new batch after
@@ -21,6 +22,40 @@ end
 
 local function number(v,label)
     local n=tonumber(v);assert(n and n==math.floor(n),'INVALID_INTEGER: '..label);return n
+end
+
+-- Resolve can briefly return nil / a fractional value right after AppendToTimeline (e.g. while it is saving).
+-- Re-read a few times, accept values within 0.01 of an integer, and report the raw value if it never settles.
+local ffiOK,ffiMod=pcall(require,'ffi')
+if ffiOK and ffiMod and not platform.windows then
+    pcall(function() ffiMod.cdef[[ int usleep(unsigned int usec); ]] end)
+end
+local function fastSleep(sec)
+    local s=tonumber(sec) or 0
+    if s<=0 then return end
+    if ffiOK and ffiMod and not platform.windows then
+        if pcall(function() ffiMod.C.usleep(math.floor(s*1000000)) end) then return end
+    end
+    if os.clock then local t=os.clock();while os.clock()-t<s do end end
+end
+
+local function clipFrame(clip,method,label)
+    local last
+    for attempt=1,8 do
+        local ok,v=pcall(function() return clip[method](clip) end)
+        local n=ok and tonumber(v) or nil
+        last=ok and tostring(v) or ('error: '..tostring(v))
+        if n and n==n and math.abs(n)~=math.huge then
+            local r=math.floor(n+0.5)
+            if math.abs(n-r)<0.01 then return r end
+        end
+        fastSleep(0.05)
+    end
+    error('INVALID_INTEGER: '..label..' (Resolve returned '..tostring(last)..')')
+end
+
+local function float(v,label)
+    local n=tonumber(v);assert(n and n==n and math.abs(n)~=math.huge,'INVALID_NUMBER: '..label);return n
 end
 
 local function tag(text)
@@ -72,14 +107,16 @@ local function run(app,job,report,rootOverride)
 
     local m=read(job.manifest_path)
     assert(m.batch_id==bid and m.work_date==job.work_date,'BATCH_DATE_MISMATCH')
-    assert(m.project_name=='FlowStudio-'..m.work_date and m.timeline_name=='MAIN-'..m.work_date,'TARGET_NAME_MISMATCH')
+    local expectedMain='MAIN-'..m.work_date
+    local slotSuffix=tostring(m.timeline_name or ''):match('^'..expectedMain:gsub('%-','%%-')..'%-(B%d+)$')
+    assert(m.project_name=='FlowStudio-'..m.work_date and (m.timeline_name==expectedMain or slotSuffix~=nil),'TARGET_NAME_MISMATCH')
     assert(m.group_gap_frames=='50','GROUP_GAP_MUST_BE_50_FRAMES')
 
     local pm=assert(app:GetProjectManager(),'PROJECT_MANAGER_UNAVAILABLE')
     local project=assert(pm:GetCurrentProject(),'PROJECT_NOT_OPEN')
     assert(project:GetName()==m.project_name,'PROJECT_MISMATCH: 请先唤醒当天项目')
     local timeline=assert(project:GetCurrentTimeline(),'TIMELINE_NOT_OPEN')
-    assert(timeline:GetName()==m.timeline_name,'TIMELINE_MISMATCH: 请先唤醒当天主时间线')
+    assert(timeline:GetName()==m.timeline_name,'TIMELINE_MISMATCH: 请先唤醒对应批次时间线')
     local origin=number(timeline:GetStartFrame(),'timeline origin')
 
     local function guard()
@@ -88,9 +125,21 @@ local function run(app,job,report,rootOverride)
         assert(current and current:GetName()==m.project_name and currentTimeline and currentTimeline:GetName()==m.timeline_name,'TARGET_CHANGED_DURING_IMPORT')
     end
 
+    local logDir=root..'/logs/'..bid
+    if not platform.windows then
+        os.execute("/bin/mkdir -p '"..tostring(logDir):gsub("'","'\\''").."' >/dev/null 2>&1")
+    end
+    local logPath=logDir..'/import.log'
+    local logBuf={}
+    local function flushLogs()
+        if #logBuf==0 then return end
+        local f=io.open(logPath,'a')
+        if f then f:write(table.concat(logBuf,'\n')..'\n');f:close() end
+        logBuf={}
+    end
     local function log(message)
-        local f=io.open(root..'/logs/'..bid..'/import.log','a')
-        if f then f:write(os.date('%Y-%m-%d %H:%M:%S')..' '..message..'\n');f:close() end
+        logBuf[#logBuf+1]=os.date('%Y-%m-%d %H:%M:%S')..' '..message
+        if #logBuf>=80 then flushLogs() end
     end
 
     local pool=assert(project:GetMediaPool(),'MEDIA_POOL_UNAVAILABLE')
@@ -98,11 +147,11 @@ local function run(app,job,report,rootOverride)
     local count=number(m.video_count,'video count');assert(count>0,'EMPTY_BATCH')
 
     local lockPath=root..'/pipeline.lock'
-    local lock=read(lockPath)
-    assert(not lock.batch_id or lock.batch_id==bid,'PIPELINE_LOCKED: 当前批次尚未结束')
-    assert(not lock.action or lock.action=='IMPORT_BATCH','PIPELINE_LOCKED: 当前批次正在剪辑')
 
+    local tlWidth=tonumber(timeline:GetSetting('timelineResolutionWidth'))
+    local tlHeight=tonumber(timeline:GetSetting('timelineResolutionHeight'))
     local videos,ids,segments={},{},{}
+    local allUniquePaths,seenGlobalPath={},{}
     -- Only validate the NEW batch itself. Old timeline IDs/markers are deliberately ignored.
     for i=1,count do
         local p='v'..i..'_'
@@ -123,10 +172,28 @@ local function run(app,job,report,rootOverride)
             local tp=p..'s'..j..'_transform_'
             if m[tp..'ZoomX'] then
                 transform={}
-                for _,key in ipairs({'ZoomX','ZoomY','Pan','Tilt','width','height'}) do transform[key]=number(m[tp..key],'transform '..key) end
-                assert(tonumber(timeline:GetSetting('timelineResolutionWidth'))==transform.width and tonumber(timeline:GetSetting('timelineResolutionHeight'))==transform.height,'TRANSFORM_TIMELINE_SIZE_MISMATCH: '..sid)
+                for _,key in ipairs({'ZoomX','ZoomY','Pan','Tilt'}) do transform[key]=float(m[tp..key],'transform '..key) end
+                for _,key in ipairs({'width','height'}) do transform[key]=number(m[tp..key],'transform '..key) end
+                if (tlWidth~=transform.width or tlHeight~=transform.height) and timeline.SetSetting and tlWidth and tlHeight and ((tlWidth==transform.height and tlHeight==transform.width) or (tlWidth>tlHeight and transform.width<transform.height)) then
+                    -- Timeline was in landscape mode (e.g. pure-16:9 batch or interrupted 16:9 export); restore portrait dimensions required by clip_transform.
+                    assert(timeline:SetSetting('useCustomSettings','1'),'TIMELINE_CUSTOM_SETTINGS_FAILED')
+                    if transform.width<=transform.height then
+                        assert(timeline:SetSetting('timelineResolutionWidth',tostring(transform.width)),'TIMELINE_RESOLUTION_FAILED')
+                        assert(timeline:SetSetting('timelineResolutionHeight',tostring(transform.height)),'TIMELINE_RESOLUTION_FAILED')
+                    else
+                        assert(timeline:SetSetting('timelineResolutionHeight',tostring(transform.height)),'TIMELINE_RESOLUTION_FAILED')
+                        assert(timeline:SetSetting('timelineResolutionWidth',tostring(transform.width)),'TIMELINE_RESOLUTION_FAILED')
+                    end
+                    tlWidth=tonumber(timeline:GetSetting('timelineResolutionWidth'))
+                    tlHeight=tonumber(timeline:GetSetting('timelineResolutionHeight'))
+                end
+                assert(tlWidth==transform.width and tlHeight==transform.height,'TRANSFORM_TIMELINE_SIZE_MISMATCH: '..sid)
             end
             v.parts[#v.parts+1]={id=sid,path=path,transform=transform}
+            if not seenGlobalPath[path] then
+                seenGlobalPath[path]=true
+                allUniquePaths[#allUniquePaths+1]=path
+            end
         end
         videos[#videos+1]=v
     end
@@ -139,69 +206,147 @@ local function run(app,job,report,rootOverride)
     end
 
     local lastEnd=lastImportMarkerEnd(timeline,origin)
+    if not lastEnd and timeline.SetSetting then
+        local allLand,landW,landH=true,nil,nil
+        for i=1,count do
+            local p='v'..i..'_'
+            local ew=tonumber(m[p..'export_width'])
+            local eh=tonumber(m[p..'export_height'])
+            local hasTransform=(m[p..'s1_transform_ZoomX']~=nil)
+            if not ew or not eh or ew<=eh or hasTransform then
+                allLand=false;break
+            end
+            if not landW or (ew*eh)>(landW*landH) then landW,landH=ew,eh end
+        end
+        if allLand and landW and landH and (tlWidth~=landW or tlHeight~=landH) then
+            pcall(function()
+                timeline:SetSetting('useCustomSettings','1')
+                timeline:SetSetting('timelineResolutionHeight',tostring(landH))
+                timeline:SetSetting('timelineResolutionWidth',tostring(landW))
+                tlWidth=tonumber(timeline:GetSetting('timelineResolutionWidth')) or tlWidth
+                tlHeight=tonumber(timeline:GetSetting('timelineResolutionHeight')) or tlHeight
+            end)
+        end
+    end
     local nextStart=lastEnd and (lastEnd+50) or origin
     log('APPEND_ANCHOR last_yellow_end='..tostring(lastEnd or 'NONE')..' next_start='..nextStart..' gap=50')
+    flushLogs()
 
-    write(lockPath,{batch_id=bid,action='IMPORT_BATCH',stage='IMPORTING'})
+    write(lockPath,{batch_id=bid,action='IMPORT_BATCH',work_date=m.work_date,stage='IMPORTING'})
     local result={batch_id=bid,status='IMPORTED',imported_count=0,skipped_count=0,video_count=count}
 
+    -- Switch to Deliver page during bulk import: hides both the Edit-page waveform/filmstrip canvas
+    -- AND the Media-page folder tree / thumbnail poster generator, eliminating UI redraw bottlenecks.
+    pcall(function()
+        if app.OpenPage then app:OpenPage('deliver') end
+    end)
+
     local ok,err=pcall(function()
-        for i,v in ipairs(videos) do
-            report('IMPORTING','正在导入剪辑素材 '..i..' / '..count,{batch_id=bid,current=i,total=count,video_id=v.id})
+        local rootFolder=assert(pool:GetRootFolder(),'MEDIA_ROOT_UNAVAILABLE')
+        local batchRoot=slotSuffix and ensureBin(pool,rootFolder,slotSuffix) or rootFolder
+        local batchBin=ensureBin(pool,batchRoot,'Batch_'..bid)
+        assert(pool:SetCurrentFolder(batchBin),'SET_MEDIA_FOLDER_FAILED')
+
+        -- Bulk ImportMedia across the entire batch into 1 flat batch bin (1-3 C++ transactions instead of 150+ serial transactions).
+        local mediaByPath={}
+        local CHUNK_SIZE=250
+        for idx=1,#allUniquePaths,CHUNK_SIZE do
             guard()
+            local chunk={}
+            local chunkEnd=math.min(#allUniquePaths,idx+CHUNK_SIZE-1)
+            for k=idx,chunkEnd do chunk[#chunk+1]=allUniquePaths[k] end
+            report('IMPORTING','正在极速批量入库媒体池 '..chunkEnd..' / '..#allUniquePaths..' 个片段',{batch_id=bid,current=0,total=count})
+            local batchImported=pool:ImportMedia(chunk)
+            local mappedCount=0
+            if type(batchImported)=='table' then
+                for _,it in ipairs(batchImported) do
+                    local okP,fp=pcall(function() return it:GetClipProperty('File Path') end)
+                    if okP and type(fp)=='string' and fp~='' then
+                        mediaByPath[fp]=it
+                        mediaByPath[platform.path(fp)]=it
+                        mappedCount=mappedCount+1
+                    end
+                end
+                if mappedCount==0 and #batchImported==#chunk then
+                    for k=1,#chunk do
+                        mediaByPath[chunk[k]]=batchImported[k]
+                        mediaByPath[platform.path(chunk[k])]=batchImported[k]
+                    end
+                end
+            end
+        end
 
-            local start,finish,sourceBatch=nextStart,nextStart,bid
-            local bin=ensureBin(pool,assert(pool:GetRootFolder()),v.recipient)
-            bin=ensureBin(pool,bin,v.host)
-            bin=ensureBin(pool,bin,string.format('%02d',v.seq))
-            assert(pool:SetCurrentFolder(bin),'SET_MEDIA_FOLDER_FAILED')
+        local scannedExisting=false
+        local function resolveMediaItem(path)
+            local norm=platform.path(path)
+            local hit=mediaByPath[path] or mediaByPath[norm]
+            if hit then return hit end
+            if not scannedExisting then
+                scannedExisting=true
+                pcall(function()
+                    for _,existing in ipairs(batchBin:GetClipList() or {}) do
+                        local fp=existing:GetClipProperty('File Path')
+                        if type(fp)=='string' and fp~='' then
+                            mediaByPath[fp]=existing
+                            mediaByPath[platform.path(fp)]=existing
+                        end
+                    end
+                end)
+                hit=mediaByPath[path] or mediaByPath[norm]
+                if hit then return hit end
+            end
+            local single=assert(pool:ImportMedia({path}),'MEDIA_IMPORT_FAILED: '..path)
+            hit=assert(single[1],'MEDIA_IMPORT_COUNT_MISMATCH')
+            mediaByPath[path]=hit
+            mediaByPath[norm]=hit
+            return hit
+        end
 
-            local media={}
-            for j,part in ipairs(v.parts) do
-                report('IMPORTING','读取素材 '..i..' / '..count..' · 片段 '..j..' / '..#v.parts,{batch_id=bid,current=i,total=count,video_id=v.id})
-                local imported=assert(pool:ImportMedia({part.path}),'MEDIA_IMPORT_FAILED: '..part.path)
-                assert(imported[1] and not imported[2],'MEDIA_IMPORT_COUNT_MISMATCH')
-                media[j]=imported[1]
+        write(base..'/progress.ini',{pending_video=videos[1].id,stage='BEFORE_APPEND',start_frame=nextStart})
+
+        for i,v in ipairs(videos) do
+            if i==1 or i==count or i%5==0 then
+                report('IMPORTING','正在极速铺设时间线 '..i..' / '..count..'（'..v.recipient..' · '..v.host..'）',{batch_id=bid,current=i,total=count,video_id=v.id})
+            end
+            if i==1 or i%15==0 then
+                guard()
             end
 
-            write(base..'/progress.ini',{pending_video=v.id,stage='BEFORE_APPEND',start_frame=start})
-            assert(timeline:AddMarker(
-                start-origin,'Yellow',
-                string.format('%02d | %s | %s',v.seq,v.recipient,v.host),
-                'Flow Studio 批次：'..bid,1,
-                custom(v.id,bid,'PENDING',start,start)
-            ),'RESERVE_MARKER_FAILED')
-            assert(pm:SaveProject(),'SAVE_RESERVATION_FAILED')
-
-            for j,item in ipairs(media) do
-                report('IMPORTING','视频 '..i..' / '..count..' · 片段 '..j..' / '..#media,{batch_id=bid,current=i,total=count,video_id=v.id})
-                guard()
-                log('APPEND video_id='..v.id..' segment_id='..v.parts[j].id..' recordFrame='..finish..' path='..v.parts[j].path)
+            local start,finish,sourceBatch=nextStart,nextStart,bid
+            for j,part in ipairs(v.parts) do
+                local item=resolveMediaItem(part.path)
+                log('APPEND video_id='..v.id..' segment_id='..part.id..' recordFrame='..finish..' path='..part.path)
                 local placed=assert(pool:AppendToTimeline({{mediaPoolItem=item,recordFrame=finish,trackIndex=1}}),'APPEND_FAILED')
                 local actualEnd=nil
-                local transform=v.parts[j].transform
+                local transform=part.transform
                 local transformApplied=false
                 for _,clip in ipairs(placed) do
-                    assert(number(clip:GetStart(),'actual start')==finish,'INSERT_POSITION_MISMATCH')
-                    actualEnd=math.max(actualEnd or finish,number(clip:GetEnd(),'actual end'))
+                    assert(clipFrame(clip,'GetStart','actual start')==finish,'INSERT_POSITION_MISMATCH')
+                    actualEnd=math.max(actualEnd or finish,clipFrame(clip,'GetEnd','actual end'))
                     if transform and clip:GetProperty('ZoomX')~=nil then
                         for _,key in ipairs({'ZoomX','ZoomY','Pan','Tilt'}) do
-                            assert(clip:SetProperty(key,transform[key]),'TRANSFORM_SET_FAILED: '..v.parts[j].id..' '..key)
-                            assert(math.abs(number(clip:GetProperty(key),'transform readback')-transform[key])<0.001,'TRANSFORM_VERIFY_FAILED: '..key)
+                            assert(clip:SetProperty(key,transform[key]),'TRANSFORM_SET_FAILED: '..part.id..' '..key)
+                            assert(math.abs(float(clip:GetProperty(key),'transform readback')-transform[key])<0.001,'TRANSFORM_VERIFY_FAILED: '..key)
                         end
                         transformApplied=true
                     end
                 end
                 assert(not transform or transformApplied,'TRANSFORM_VIDEO_CLIP_NOT_FOUND')
                 assert(actualEnd and actualEnd>finish,'INSERT_LENGTH_INVALID')
-                log('ACTUAL video_id='..v.id..' segment_id='..v.parts[j].id..' start='..finish..' end='..actualEnd)
+                log('ACTUAL video_id='..v.id..' segment_id='..part.id..' start='..finish..' end='..actualEnd)
                 finish=actualEnd
-                write(base..'/progress.ini',{pending_video=v.id,stage='APPENDED',segment_id=v.parts[j].id,start_frame=start,end_frame=finish})
             end
 
-            assert(timeline:UpdateMarkerCustomData(start-origin,custom(v.id,bid,'COMPLETE',start,finish)),'COMPLETE_MARKER_FAILED')
-            assert(pm:SaveProject(),'SAVE_IMPORTED_VIDEO_FAILED')
-            write(base..'/progress.ini',{pending_video='',stage='VIDEO_COMPLETE',video_id=v.id,end_frame=finish})
+            assert(timeline:AddMarker(
+                start-origin,'Yellow',
+                string.format('%02d | %s | %s',v.seq,v.recipient,v.host),
+                'Flow Studio 批次：'..bid,1,
+                custom(v.id,bid,'COMPLETE',start,finish)
+            ),'COMPLETE_MARKER_FAILED')
+
+            if i%40==0 then
+                collectgarbage('collect')
+            end
 
             result.imported_count=result.imported_count+1
             result[v.prefix..'id']=v.id
@@ -215,16 +360,22 @@ local function run(app,job,report,rootOverride)
             nextStart=finish+50
         end
 
+        write(base..'/progress.ini',{pending_video='',stage='VIDEO_COMPLETE',video_id=videos[count].id,end_frame=result.batch_end_frame or nextStart})
         guard()
         assert(pm:SaveProject(),'SAVE_BATCH_FAILED')
         log('IMPORTED append_only added='..result.imported_count..' anchor_end='..tostring(lastEnd or 'NONE')..' gap=50')
+        flushLogs()
         write(base..'/result.ini',result)
         os.remove(lockPath)
     end)
 
     if previousFolder then pcall(function() pool:SetCurrentFolder(previousFolder) end) end
+    pcall(function()
+        if app.OpenPage then app:OpenPage('edit') end
+    end)
     if not ok then
         log('ERROR '..tostring(err))
+        flushLogs()
         write(lockPath,{batch_id=bid,action='IMPORT_BATCH',work_date=m.work_date,stage='IMPORT_ERROR'})
         error(err)
     end

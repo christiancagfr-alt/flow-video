@@ -1,185 +1,80 @@
 #!/usr/bin/env python3
-"""Start the Flow Studio Bridge through Resolve's interactive Lua console."""
+"""Click a DaVinci Resolve Workspace script.
+
+Windows uses the menu bar directly and receives the script name as a Python
+argument. macOS used to read the name with JXA ``$.getenv(...).js``. On
+macOS 27 that ``.js`` read is undefined, so the menu search looks for an item
+named "undefined" and exits 3 with ``ERR:not_found:undefined``. The name is
+now embedded as a JSON string in the script itself. Linux has no auto-click.
+"""
 from __future__ import annotations
 import argparse
 import json
 import re
 import sys
-from pathlib import Path
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent
-sys.path.insert(0, str(_ROOT))
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from app.services import quiet_process as subprocess
 
 _TARGET_RE = re.compile(r'^[A-Za-z0-9_.-]{1,80}$')
-_MARKER = re.compile(r'OK:[^\r\n]*|ERR:[^\r\n]*')
-_CONSOLE_APPLESCRIPT = r'''
-property luaLine : __FLOWSTUDIO_LINE__
-on trace(message)
-  try
-    do shell script "printf %s " & quoted form of ((message as text) & linefeed) & " >> /tmp/flowstudio-menu-click.log"
-  end try
-end trace
-on isConsole(windowName)
-  set label to windowName as text
-  if label contains "Console" or label contains "console" or label contains "控制台" then return true
-  return false
-end isConsole
-on hasClearButton(procName, i)
-  set hit to false
-  tell application "System Events"
-    tell process procName
-      tell window i
-        set labels to {}
-        try
-          set labels to name of buttons
-        end try
-        try
-          set labels to labels & name of buttons of toolbar 1
-        end try
-        repeat with b in labels
-          set oneName to b as text
-          if oneName is "Cls" or oneName is "Clear" or oneName is "清除" then set hit to true
-        end repeat
-      end tell
-    end tell
-  end tell
-  return hit
-end hasClearButton
-on consoleIndex(procName)
-  set found to 0
-  tell application "System Events"
-    if exists process procName then
-      tell process procName
-        set totalCount to count of windows
-        repeat with i from 1 to totalCount
-          try
-            if my isConsole(name of window i as text) then set found to i as integer
-          end try
-          if found is not 0 then exit repeat
-        end repeat
-        if found is 0 then
-          repeat with i from 1 to totalCount
-            try
-              if my hasClearButton(procName, i) then set found to i as integer
-            end try
-            if found is not 0 then exit repeat
-          end repeat
-        end if
-      end tell
-    end if
-  end tell
-  return found
-end consoleIndex
-on windowNames(procName)
-  set seen to ""
-  tell application "System Events"
-    if exists process procName then
-      tell process procName
-        set totalCount to count of windows
-        if totalCount > 6 then set totalCount to 6
-        repeat with i from 1 to totalCount
-          set label to ""
-          try
-            set label to name of window i as text
-          end try
-          if label is "" then set label to "(空)"
-          if seen is not "" then set seen to seen & "|"
-          set seen to seen & label
-        end repeat
-      end tell
-    end if
-  end tell
-  return seen
-end windowNames
-set procName to "DaVinci Resolve"
-tell application "System Events"
-  if not (exists process procName) then set procName to "Resolve"
-  if not (exists process procName) then set procName to ""
-end tell
-if procName is "" then
-  my trace("NO_PROCESS")
-  return "ERR:no_process"
-end if
-tell application "System Events"
-  tell process procName to set frontmost to true
-end tell
-delay 0.4
-set idx to my consoleIndex(procName)
-if idx is 0 then
-  my trace("OPEN_CONSOLE")
-  tell application "System Events"
-    tell process procName
-      set opened to false
-      repeat with barName in {"工作区", "Workspace"}
-        try
-          click menu bar item barName of menu bar 1
-          delay 0.25
-        end try
-        repeat with itemName in {"控制台", "Console"}
-          try
-            click menu item itemName of menu 1 of menu bar item barName of menu bar 1
-            set opened to true
-            exit repeat
-          end try
-        end repeat
-        if opened then exit repeat
-      end repeat
-    end tell
-  end tell
-  delay 0.8
-  set idx to my consoleIndex(procName)
-end if
-if idx is 0 then
-  my trace("NO_CONSOLE " & my windowNames(procName))
-  return "ERR:no_console"
-end if
-tell application "System Events"
-  tell process procName
-    try
-      perform action "AXRaise" of window idx
-    end try
-    click window idx
-  end tell
-end tell
-delay 0.3
-set idx to my consoleIndex(procName)
-set frontName to ""
-set frontOk to false
-tell application "System Events"
-  try
-    set frontName to name of window 1 of process procName as text
-  end try
-end tell
-if my isConsole(frontName) then set frontOk to true
-if frontOk is false then
-  try
-    if my hasClearButton(procName, 1) then set frontOk to true
-  end try
-end if
-if frontOk is false then
-  my trace("FOCUS_FAIL " & frontName)
-  return "ERR:console_not_focused:" & frontName
-end if
-my trace("TYPE_DOFILE")
-try
-  set previousClip to the clipboard
-end try
-set the clipboard to luaLine
-delay 0.2
-tell application "System Events"
-  keystroke "v" using command down
-  delay 0.35
-  keystroke return
-end tell
-delay 0.15
-try
-  set the clipboard to previousClip
-end try
-my trace("DOFILE_SENT")
-return "OK:console"
+_MENU_JS = r'''
+(function() {
+  var target = __FLOWSTUDIO_TARGET__;
+  if (!target) { console.log('ERR:missing_target'); return; }
+  var se = Application('System Events');
+  var p;
+  try {
+    p = se.processes.byName('DaVinci Resolve');
+    if (!p.exists()) { console.log('ERR:no_process'); return; }
+  } catch(e) { console.log('ERR:no_process'); return; }
+  function n(x){ try { return String(x.name()); } catch(e) { return ''; } }
+  function walkMenu(menu, depth) {
+    if (depth > 7) return false;
+    var items = [];
+    try { items = menu.menuItems(); } catch(e) { return false; }
+    for (var i=0; i<items.length; i++) {
+      var it = items[i];
+      var name = n(it);
+      if (name === target || name === target + '.lua' || name.indexOf(target) >= 0) {
+        try { it.click(); console.log('OK:' + name); return true; } catch(e) {}
+      }
+      try {
+        var subs = it.menus();
+        for (var j=0; j<subs.length; j++) if (walkMenu(subs[j], depth+1)) return true;
+      } catch(e) {}
+    }
+    return false;
+  }
+  try {
+    p.frontmost = true;
+    delay(0.12);
+    var bars = p.menuBars();
+    if (!bars.length) throw 'no_menu_bar';
+    var top = bars[0].menuBarItems();
+    var workspace = null;
+    for (var i=0; i<top.length; i++) {
+      var name = n(top[i]);
+      if (name === 'Workspace' || name === '工作区') { workspace = top[i]; break; }
+    }
+    if (!workspace) throw 'workspace_not_found';
+    var menus = workspace.menus();
+    for (var m=0; m<menus.length; m++) {
+      try {
+        var wItems = menus[m].menuItems();
+        for (var wi=0; wi<wItems.length; wi++) {
+          var wName = n(wItems[wi]);
+          if (wName === 'Scripts' || wName === '脚本') {
+            var sMenus = wItems[wi].menus();
+            for (var si=0; si<sMenus.length; si++) {
+              if (walkMenu(sMenus[si], 1)) return;
+            }
+          }
+        }
+      } catch(e) {}
+      if (walkMenu(menus[m], 0)) return;
+    }
+    console.log('ERR:not_found:' + target);
+  } catch(e) { console.log('ERR:' + String(e)); }
+})();
 '''
 
 
@@ -190,102 +85,54 @@ def script_basename(script_name):
     return name
 
 
-def _applescript_string(value):
-    return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
+def macos_menu_source(script_name):
+    """JXA source that searches Workspace for this script. The name is a JSON literal."""
+    target = script_basename(script_name)
+    if not _TARGET_RE.fullmatch(target):
+        raise ValueError('达芬奇脚本名称无效。')
+    return _MENU_JS.replace('__FLOWSTUDIO_TARGET__', json.dumps(target))
 
 
-def macos_console_source(script_path):
-    """AppleScript that types dofile of this installed script into the Resolve console."""
-    path = str(script_path).replace('\\', '/')
-    name = path.rsplit('/', 1)[-1]
-    stem = name[:-4] if name.endswith('.lua') else name
-    if not path.startswith('/') or not path.endswith('.lua') or "'" in path or '\n' in path or not _TARGET_RE.fullmatch(stem):
-        raise ValueError('达芬奇脚本路径无效。')
-    line = "dofile('" + path + "')"
-    source = _CONSOLE_APPLESCRIPT.replace('__FLOWSTUDIO_LINE__', _applescript_string(line))
-    if '__FLOWSTUDIO_LINE__' in source:
-        raise ValueError('达芬奇脚本路径无效。')
-    return source
-
-
-def macos_osascript_command(script_name, script_path=None):
-    if script_path is None:
-        from app.services.resolve_daily import script_dir
-        script_path = script_dir() / str(script_name)
-    return ['/usr/bin/osascript', '-e', macos_console_source(script_path)]
-
-
-def macos_menu_status(stdout, stderr):
-    """Success is an OK: line. A click that starts Bridge returns before the script ends."""
-    text = ((stdout or '') + ('\n' + stderr if stderr else '')).strip()
-    ok_line = ''
-    err_line = ''
-    for match in _MARKER.finditer(text):
-        token = re.sub(r'\s*\(-?\d+\)\s*$', '', match.group(0)).strip()
-        if token.startswith('OK:'):
-            ok_line = token
-        elif token.startswith('ERR:'):
-            err_line = token
-    if ok_line:
-        return True, ok_line
-    if err_line:
-        return False, err_line
-    return False, text
-
-
-def macos_result(stdout, stderr, returncode):
-    ok, detail = macos_menu_status(stdout, stderr)
-    return {'ok': ok, 'output': detail, 'returncode': returncode}
-
-
-def load_windows_menu():
-    """Load the helper beside this file.
-
-    The packaged Python keeps a ._pth file, so it never adds the script folder
-    to sys.path. A bare import then fails after every restart.
-    """
-    from importlib.util import module_from_spec, spec_from_file_location
-    helper = _HERE / 'windows_resolve_runtime.py'
-    if not helper.is_file():
-        raise RuntimeError('找不到唤醒达芬奇所需的组件 windows_resolve_runtime.py')
-    spec = spec_from_file_location('flowstudio_windows_resolve_runtime', helper)
-    if spec is None or spec.loader is None:
-        raise RuntimeError('找不到唤醒达芬奇所需的组件 windows_resolve_runtime.py')
-    module = module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module.invoke_console_dofile
+def macos_osascript_command(script_name):
+    return ['/usr/bin/osascript', '-l', 'JavaScript', '-e', macos_menu_source(script_name)]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--script-name', required=True)
-    ap.add_argument('--script-path')
     args = ap.parse_args()
     if sys.platform.startswith('linux'):
         print(json.dumps({'ok':False,'error':'Linux 请在达芬奇 工作区 → 脚本 菜单手动运行对应脚本。'},ensure_ascii=False));return 1
     if sys.platform == 'win32':
         try:
-            if args.script_path:
-                script_path = Path(args.script_path).expanduser().resolve()
-            else:
-                from app.services.resolve_daily import script_dir
-                script_path = script_dir() / args.script_name
-            output = load_windows_menu()(args.script_name, script_path)
+            from windows_resolve_runtime import invoke_menu
+            output = invoke_menu(args.script_name)
             print(json.dumps({'ok': True, 'output': output}))
             return 0
         except Exception as exc:
             print(json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=True))
             return 1
     try:
-        command = macos_osascript_command(args.script_name, args.script_path)
+        command = macos_osascript_command(args.script_name)
     except ValueError as exc:
         print(json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False))
         return 1
     p = subprocess.run(command, capture_output=True, text=True)
-    result = macos_result(p.stdout, p.stderr, p.returncode)
-    print(json.dumps(result, ensure_ascii=False))
-    return 0 if result['ok'] else 1
+    out = ((p.stdout or '') + ('\n' + p.stderr if p.stderr else '')).strip()
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    ok = (p.returncode == 0 and any(ln.startswith('OK:') for ln in lines))
+    if ok:
+        rc = 0
+    elif p.returncode != 0:
+        rc = p.returncode
+    elif any('ERR:no_process' in ln for ln in lines):
+        rc = 2
+    elif any('ERR:not_found:' in ln for ln in lines):
+        rc = 3
+    else:
+        rc = 4
+    print(json.dumps({'ok': ok, 'output': out, 'returncode': rc}, ensure_ascii=False))
+    return rc
 
 
 if __name__ == '__main__':

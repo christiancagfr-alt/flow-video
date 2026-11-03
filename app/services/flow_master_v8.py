@@ -445,7 +445,10 @@ def eye_sentence(praying: bool, observation: dict) -> str:
     return section("眼睛-说话", _EYES["说话"])
 
 
-def seam_block(index: int, total: int, body: str, eyes: str, camera_id: str, camera_ids) -> str:
+def seam_block(index: int, total: int, body: str, eyes: str, camera_id: str, camera_ids,
+               global_index: int | None = None, global_total: int | None = None) -> str:
+    g_idx = index if global_index is None else int(global_index)
+    g_tot = total if global_total is None else int(global_total)
     lines = [_fill(section("接缝-开场", _SEAMS["开场"]), body=body, eyes=eyes)]
     if index > 0:
         previous = camera_ids[index - 1]
@@ -453,12 +456,16 @@ def seam_block(index: int, total: int, body: str, eyes: str, camera_id: str, cam
             lines.append(section("接缝-换向", _SEAMS["换向"]))
         else:
             lines.append(section("接缝-同向", _SEAMS["同向"]))
+    elif g_idx > 0:
+        lines.append(section("接缝-同向", _SEAMS["同向"]))
     if index + 1 < total:
         nxt = camera_ids[index + 1]
         if nxt != camera_id:
             lines.append(_fill(section("接缝-停稳", _SEAMS["停稳"]), body=body, eyes=eyes))
         else:
             lines.append(_fill(section("接缝-延续", _SEAMS["延续"]), body=body, eyes=eyes))
+    elif g_idx + 1 < g_tot:
+        lines.append(_fill(section("接缝-延续", _SEAMS["延续"]), body=body, eyes=eyes))
     return "".join(lines)
 
 
@@ -500,20 +507,31 @@ def _normalize_dynamic(raw: str, dialogue: str) -> str:
     return text.strip()
 
 
+import threading
+
+_VOICE_LOCK = threading.Lock()
+
+
 def _remember_voice(group, band: str) -> str:
     locked = str(group.get("locked_voice") or "").strip()
     if locked:
         return locked
-    sentence = voice_sentence(band)
     host_id = int(group.get("host_id") or 0)
-    if host_id:
-        repo.set_setting(voice_key(host_id), sentence)
-    return sentence
+    with _VOICE_LOCK:
+        if host_id:
+            existing = load_voice(host_id)
+            if existing:
+                group["locked_voice"] = existing
+                return existing
+        sentence = voice_sentence(band)
+        if host_id:
+            repo.set_setting(voice_key(host_id), sentence)
+        return sentence
 
 
 def assemble_prompt(*, dynamic: str, dialogue: str, observation: dict, index: int, total: int,
                     praying: bool, voice: str, camera_id: str, camera_ids, image_rule: str = "",
-                    segment_rule: str = "") -> str:
+                    segment_rule: str = "", global_index: int | None = None, global_total: int | None = None) -> str:
     action = chosen_action(observation)
     cameras = camera_by_id()
     camera = cameras.get(camera_id) or cameras["v8_hold"]
@@ -521,7 +539,7 @@ def assemble_prompt(*, dynamic: str, dialogue: str, observation: dict, index: in
     eyes = eye_sentence(praying, observation)
     parts = [
         section("外观锁", _REFERENCE),
-        seam_block(index, total, body, eyes, camera["id"], camera_ids),
+        seam_block(index, total, body, eyes, camera["id"], camera_ids, global_index=global_index, global_total=global_total),
         action["prompt"],
         camera["prompt"],
     ]
@@ -568,6 +586,8 @@ def complete_batch(parsed, group, segments) -> dict:
     prompts = {}
     ai_prompts = {}
     image_rule = str(group.get("image_rule") or "")
+    seg_offset = int(group.get("seg_offset") or 0)
+    video_total = int(group.get("video_total_segments") or len(segments))
     for index, seg in enumerate(segments):
         sid = str(seg["segment_id"])
         dialogue = str(seg.get("foreign_text") or "").strip()
@@ -586,6 +606,8 @@ def complete_batch(parsed, group, segments) -> dict:
             camera_ids=camera_ids,
             image_rule=image_rule,
             segment_rule=str(seg.get("segment_rule") or ""),
+            global_index=seg_offset + index,
+            global_total=video_total,
         )
     return {
         "prompts": prompts,

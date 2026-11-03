@@ -76,7 +76,7 @@ def apply(config,day,progress=None):
             if not video or work_dates.video_work_date(con,vid)!=day:
                 result['skipped']+=1;continue
             try:
-                rows=repo._assert_prompt_copy_editable(con,vid)
+                rows=repo._assert_prompt_copy_editable(con,vid,allow_submitted=False)
                 if any(r['qc_status']!='待质检' or r['flow_output_path'] or r['flow_output_url'] or r['status'] in ('生成中','处理中','请求中') for r in rows):
                     raise ValueError('片段已有活动或质检状态')
             except ValueError as exc:
@@ -105,7 +105,11 @@ def apply(config,day,progress=None):
             has_styles = con.execute("SELECT 1 FROM sqlite_master WHERE name='video_source_styles'").fetchone()
             style_row = con.execute('SELECT payload FROM video_source_styles WHERE video_id=?',(vid,)).fetchone() if has_styles else None
             snapshot = json.loads(style_row[0]).get('外文内容',{}) if style_row else {}
-            if snapshot and not snapshot.get('local_override') and ''.join(snapshot.get('text','').split()) == ''.join(source.split()):
+            orig_script = video['original_script'] or ''
+            if snapshot and not snapshot.get('local_override') and (
+                ''.join(snapshot.get('text','').split()) == ''.join(source.split())
+                or (orig_script and ''.join(snapshot.get('text','').split()) == ''.join(orig_script.split()))
+            ):
                 lines, color_modes, _, _ = eye_states.prepare(snapshot,lambda text:prepare_with_rules(text,config),video['performance_mode'])
             if [r['foreign_text'] for r in rows]==lines:
                 if color_modes: eye_states.save_modes(vid,lines,color_modes,con)

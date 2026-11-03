@@ -25,13 +25,7 @@ from app.core.default_prompt import DEFAULT_CORE_PROMPT
 from app.core.naming import final_filename
 from app.ui.styles import LIGHT, DARK, apply_control_palette
 from app.ui.spreadsheet import SpreadsheetTable
-from app.ui.prompt_center import PromptCenterPage
-from app.ui.flow_task_center import FlowBatchCenterPage
-from app.ui.downstream_pages import VideoQCPage, DaVinciPage, StatisticsPage
-from app.ui.packaging_page import PackagingPage
 from app.ui.task_intake_page import TaskIntakePage
-from app.ui.flow_accounts_page import FlowAccountsPage
-from app.ui.settings_page import SettingsPage
 from app.ui.modern_widgets import ClickableFrame
 from app.services.reflow_rules import prepare_configured_speech as prepare_swahili_speech
 from app.services.local_bridge import get_bridge
@@ -80,7 +74,54 @@ class CalendarDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 4, 0, 0)
+        self.clear_history_btn = QPushButton("🗑 清空所有历史记录")
+        self.clear_history_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_history_btn.setToolTip(
+            "将所有历史使用到的图片素材与生成好的 Flow 视频片段移入系统回收站，完整保留视频剪辑成品"
+        )
+        self.clear_history_btn.setStyleSheet(
+            "QPushButton {"
+            "  min-height: 32px; padding: 5px 14px; border-radius: 8px;"
+            "  background: #FEF2F2; color: #DC2626; border: 1px solid #FECACA;"
+            "  font-size: 12.5px; font-weight: 750;"
+            "}"
+            "QPushButton:hover {"
+            "  background: #DC2626; color: #FFFFFF; border-color: #B91C1C;"
+            "}"
+        )
+        self.clear_history_btn.clicked.connect(self.clear_all_history_records)
+        bottom_row.addWidget(self.clear_history_btn)
+        bottom_row.addStretch(1)
+        bottom_row.addWidget(buttons)
+        layout.addLayout(bottom_row)
+
+    def clear_all_history_records(self):
+        from app.services import clear_all_history
+        from app.ui.trash_cleanup_dialog import ConfirmHistoryClearDialog, TrashCleanupAnimationDialog
+
+        try:
+            plan = clear_all_history.preview()
+        except Exception as exc:
+            QMessageBox.warning(self, "清空历史记录", f"扫描历史记录失败：\n{exc}")
+            return
+
+        confirm_dlg = ConfirmHistoryClearDialog(plan, self)
+        if confirm_dlg.exec() != QDialog.Accepted:
+            return
+
+        anim_dlg = TrashCleanupAnimationDialog(plan, self)
+        anim_dlg.exec()
+
+        self.calendar.refresh_marks()
+        mw = self.parent()
+        if mw is not None and hasattr(mw, "set_work_date"):
+            try:
+                mw.set_work_date(work_dates.today())
+            except Exception:
+                pass
 
     def select_legacy(self):
         self.legacy_selected=True; self.accept()
@@ -320,27 +361,104 @@ class MainWindow(QMainWindow):
                 self.restoreGeometry(saved_geometry)
             except Exception:
                 pass
-        self.build()
+        # Apply stylesheet & palette BEFORE building widgets so Qt never repolishes
+        # the entire widget tree a second time right after construction.
         self.apply_saved_theme()
-        # All production pages already perform their initial load in their constructors.
-        # Mark that snapshot as current so the first sidebar visit does not rebuild it again.
+        self.build()
+        self.set_theme_button_state(getattr(self, "_applied_theme_name", "浅色"))
+        # Mark initial landing snapshot as current so the first show does not rebuild it again.
         initial_token = self._navigation_data_token()
-        for key in ("intake", "prompt", "flow", "qc", "davinci", "stats"):
-            self._nav_refresh_tokens[key] = initial_token
+        self._nav_refresh_tokens["intake"] = initial_token
         # Task Center is now the production home. The old overview dashboard is kept
         # only as an internal compatibility page for legacy calls.
         self.show_task_intake()
         self.date_timer=QTimer(self); self.date_timer.timeout.connect(self.check_work_day); self.date_timer.start(30000)
         
-        # --- Background QC Reconcile ---
+        # --- Background QC Reconcile & Rolling DB Auto-Maintenance ---
         self.qc_reconcile_timer = QTimer(self)
         self.qc_reconcile_timer.timeout.connect(self._background_qc_tick)
         self.qc_reconcile_timer.start(15000)
         QTimer.singleShot(2000, self._background_qc_tick)
-        # --- End Background QC ---
-        # Startup also scans today's selected workspace immediately instead of waiting
-        # for the first Flow-page timer tick or a plugin completion event.
-        QTimer.singleShot(500, self.flow_task_center.auto_dispatch_tick)
+        QTimer.singleShot(18000, self._trigger_auto_db_maintenance)
+        # --- End Background QC & Maintenance ---
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_post_show_warmed", False):
+            self._post_show_warmed = True
+            self._schedule_post_startup_warmup()
+
+    def _schedule_post_startup_warmup(self):
+        """Warm core background/next-step pages right after the first frame is painted."""
+        def _warm_flow():
+            flow = self._ensure_page("flow")
+            QTimer.singleShot(300, flow.auto_dispatch_tick)
+
+        QTimer.singleShot(80, _warm_flow)
+        QTimer.singleShot(220, lambda: self._ensure_page("prompt"))
+
+    def _ensure_page(self, key: str):
+        attr_map = {
+            "intake": "task_intake_page",
+            "prompt": "prompt_center",
+            "flow": "flow_task_center",
+            "accounts": "account_page",
+            "qc": "qc_page",
+            "davinci": "davinci_page",
+            "packaging": "packaging_page",
+            "components": "components_page",
+            "stats": "stats_page",
+            "settings": "settings_page",
+        }
+        attr = attr_map.get(key)
+        if not attr:
+            return None
+        existing = getattr(self, attr, None)
+        if existing is not None:
+            return existing
+
+        if key == "prompt":
+            from app.ui.prompt_center import PromptCenterPage
+            page = PromptCenterPage(self)
+        elif key == "flow":
+            from app.ui.flow_task_center import FlowBatchCenterPage
+            page = FlowBatchCenterPage(self)
+        elif key == "accounts":
+            from app.ui.flow_accounts_page import FlowAccountsPage
+            page = FlowAccountsPage(self)
+        elif key == "qc":
+            from app.ui.downstream_pages import VideoQCPage
+            page = VideoQCPage(self)
+        elif key == "davinci":
+            from app.ui.downstream_pages import DaVinciPage
+            page = DaVinciPage(self)
+        elif key == "packaging":
+            from app.ui.packaging_page import PackagingPage
+            page = PackagingPage(self)
+            self.packaging_sync_timer = QTimer(self)
+            self.packaging_sync_timer.setInterval(3000)
+            self.packaging_sync_timer.timeout.connect(self._on_packaging_sync_tick)
+            self.packaging_sync_timer.start()
+        elif key == "components":
+            from app.ui.packaging_components import PackagingComponentsPage
+            pkg = self._ensure_page("packaging")
+            page = PackagingComponentsPage(pkg, self)
+        elif key == "stats":
+            from app.ui.downstream_pages import StatisticsPage
+            page = StatisticsPage(self)
+        elif key == "settings":
+            from app.ui.settings_page import SettingsPage
+            page = SettingsPage(self.settings, self)
+        else:
+            return None
+
+        page.setMinimumWidth(0)
+        page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        setattr(self, attr, page)
+        self.stack.addWidget(page)
+        if key in ("prompt", "flow", "qc", "davinci", "stats"):
+            self._nav_refresh_tokens[key] = self._navigation_data_token()
+        return page
 
     def build(self):
         base = QWidget(objectName="appRoot")
@@ -371,10 +489,10 @@ class MainWindow(QMainWindow):
             ("⇩  任务中心", "intake"),
             ("✦  GPT 提示词", "prompt"),
             ("⤨  Flow 生成", "flow"),
-            ("☺  账号管理", "accounts"),
             ("✓  视频质检", "qc"),
             ("✂  自动剪辑", "davinci"),
             ("▣  视频包装", "packaging"),
+            ("☺  账号管理", "accounts"),
             ("⊞  组件管理", "components"),
             ("▥  数据统计", "stats"),
             ("⚙  系统设置", "settings"),
@@ -403,7 +521,7 @@ class MainWindow(QMainWindow):
                 b.clicked.connect(self.show_packaging_page)
                 self.nav_buttons["packaging"] = b
             elif action == "components":
-                b.clicked.connect(lambda:self._navigate('components',self.components_page))
+                b.clicked.connect(self.show_components_page)
                 self.nav_buttons['components']=b
             elif action == "stats":
                 b.clicked.connect(self.show_stats_page)
@@ -456,38 +574,103 @@ class MainWindow(QMainWindow):
         self.recipient_page = QWidget(objectName="pageRoot")
         self.host_page = QWidget(objectName="pageRoot")
         self.task_intake_page = TaskIntakePage(self)
-        self.prompt_center = PromptCenterPage(self)
-        self.flow_task_center = FlowBatchCenterPage(self)
-        self.account_page = FlowAccountsPage(self)
-        self.qc_page = VideoQCPage(self)
-        self.davinci_page = DaVinciPage(self)
-        self.packaging_page = PackagingPage(self)
-        from app.ui.packaging_components import PackagingComponentsPage
-        self.components_page = PackagingComponentsPage(self.packaging_page,self)
-        self.packaging_sync_timer=QTimer(self);self.packaging_sync_timer.setInterval(3000)
-        self.packaging_sync_timer.timeout.connect(self.packaging_page.sync_edited_videos)
-        self.packaging_sync_timer.start()
-        self.stack.addWidget(self.components_page)
-        self.stats_page = StatisticsPage(self)
-        self.settings_page = SettingsPage(self.settings, self)
         self.stack.addWidget(self.dashboard)
         self.stack.addWidget(self.recipient_page)
         self.stack.addWidget(self.host_page)
         self.stack.addWidget(self.task_intake_page)
-        self.stack.addWidget(self.prompt_center)
-        self.stack.addWidget(self.flow_task_center)
-        self.stack.addWidget(self.account_page)
-        self.stack.addWidget(self.qc_page)
-        self.stack.addWidget(self.davinci_page)
-        self.stack.addWidget(self.packaging_page)
-        self.stack.addWidget(self.stats_page)
-        self.stack.addWidget(self.settings_page)
         self.stack.setMinimumWidth(0)
-        for page in (self.dashboard, self.recipient_page, self.host_page, self.task_intake_page,
-                     self.prompt_center, self.flow_task_center, self.qc_page, self.davinci_page,
-                     self.packaging_page, self.stats_page, self.settings_page):
+        for page in (self.dashboard, self.recipient_page, self.host_page, self.task_intake_page):
             page.setMinimumWidth(0)
             page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+
+        # Antigravity 实时遥控通道（在主线程执行 UI 按钮/同步/刷新指令）
+        self._antigravity_cmd_timer = QTimer(self)
+        self._antigravity_cmd_timer.setInterval(1500)
+        self._antigravity_cmd_timer.timeout.connect(self._poll_antigravity_ui_cmd)
+        self._antigravity_cmd_timer.start()
+
+    def is_actively_resizing(self) -> bool:
+        return time.monotonic() < getattr(self, "_resize_active_until", 0.0)
+
+    def _on_packaging_sync_tick(self):
+        return
+
+    def _poll_antigravity_ui_cmd(self):
+        if self.is_actively_resizing():
+            return
+        raw = str(repo.get_setting("antigravity_ui_cmd", "") or "").strip()
+        if not raw:
+            return
+        repo.set_setting("antigravity_ui_cmd", "")
+        import json
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            payload = {"action": raw}
+        action = str(payload.get("action") or "").strip()
+        args = payload.get("args") or {}
+        result = {"ok": True, "action": action, "message": "已执行"}
+        try:
+            if action == "sync_sheet_tasks":
+                if hasattr(self, "show_task_intake"):
+                    self.show_task_intake()
+                if hasattr(self, "task_intake_page") and hasattr(self.task_intake_page, "sync_all"):
+                    QTimer.singleShot(50, self.task_intake_page.sync_all)
+                    result["message"] = "已在软件主界面触发「同步表格任务」"
+            elif action == "start_batch_gpt":
+                if hasattr(self, "show_prompt_center"):
+                    self.show_prompt_center()
+                prompt_page = self._ensure_page("prompt")
+                if prompt_page is not None:
+                    prompt_page.reload_tasks()
+                    if hasattr(prompt_page, "start_batch_generate"):
+                        QTimer.singleShot(50, prompt_page.start_batch_generate)
+                        result["message"] = "已在提示词中心触发批量 GPT 生产"
+            elif action == "wake_flow_dispatch":
+                flow_page = self._ensure_page("flow")
+                if flow_page is not None:
+                    flow_page.reload_tasks()
+                    QTimer.singleShot(50, flow_page.auto_dispatch_tick)
+                    result["message"] = "已唤醒 Flow 调度器并刷新任务面板"
+            elif action == "reload_all":
+                for page, method in (
+                    (getattr(self, "task_intake_page", None), "refresh"),
+                    (getattr(self, "prompt_center", None), "reload_tasks"),
+                    (getattr(self, "flow_task_center", None), "reload_tasks"),
+                    (getattr(self, "qc_page", None), "reload"),
+                    (getattr(self, "davinci_page", None), "reload"),
+                    (getattr(self, "stats_page", None), "reload"),
+                ):
+                    if page is not None and hasattr(page, method):
+                        getattr(page, method)()
+                result["message"] = "已刷新全软件所有页面数据"
+            elif action == "switch_page":
+                target = str(args.get("page") or "")
+                nav_map = {
+                    "dashboard": "show_dashboard",
+                    "intake": "show_task_intake",
+                    "prompt": "show_prompt_center",
+                    "flow": "show_flow_task_center",
+                    "qc": "show_qc",
+                    "davinci": "show_davinci",
+                    "stats": "show_stats",
+                    "settings": "show_settings",
+                }
+                fn_name = nav_map.get(target)
+                if fn_name and hasattr(self, fn_name):
+                    getattr(self, fn_name)()
+                    result["message"] = f"已切换到页面：{target}"
+            elif action == "set_work_date":
+                day = str(args.get("date") or "").strip()
+                if day:
+                    self.set_work_date(day)
+                    result["message"] = f"已切换工作日期到：{day}"
+        except Exception as exc:
+            result = {"ok": False, "action": action, "message": str(exc)}
+        try:
+            repo.set_setting("antigravity_ui_cmd_result", json.dumps(result, ensure_ascii=False))
+        except Exception:
+            pass
 
     def open_work_calendar(self):
         dialog=CalendarDialog(QDate.fromString(work_dates.active(),'yyyy-MM-dd'),self,workspace=True)
@@ -495,6 +678,8 @@ class MainWindow(QMainWindow):
             self.set_work_date(work_dates.LEGACY if dialog.legacy_selected else dialog.selected_date().toString('yyyy-MM-dd'))
 
     def _background_qc_tick(self):
+        if self.is_actively_resizing():
+            return
         # This scan used to run on the UI thread and froze menu clicks for about a second.
         lock = getattr(self, "_qc_reconcile_lock", None)
         if lock is None:
@@ -514,11 +699,19 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=work, name="qc-reconcile", daemon=True).start()
 
+    def _trigger_auto_db_maintenance(self):
+        try:
+            from app.services.db_auto_maintenance import trigger_background_maintenance
+            trigger_background_maintenance()
+        except Exception:
+            runtime_log.log("db_auto_maintenance", level="ERROR", message=traceback.format_exc())
+
     def check_work_day(self):
         current=work_dates.today()
         if current!=self._last_today:
             previous_today=self._last_today
             self._last_today=current
+            self._trigger_auto_db_maintenance()
             # Preserve the original date-isolation rule: only a window that was simply
             # following "today" rolls forward at midnight. An explicitly selected
             # historical date is never replaced because another date has unfinished work.
@@ -531,23 +724,40 @@ class MainWindow(QMainWindow):
         current=self.stack.currentWidget()
         self.current_recipient_id=None;self.current_host_id=None
         self.task_intake_page.selected_recipient='';self.task_intake_page.selected_group_key=''
-        self.flow_task_center.scope_key=None;self.flow_task_center.page_index=0
-        self.qc_page.qc_page_index=0;self.qc_page._rows_signature=None
-        self.qc_page._pending_video_source=None;self.qc_page.current_output=''
-        if self.qc_page.player:
-            self.qc_page.player.stop();self.qc_page.player.setSource(QUrl())
-        for page in (self.prompt_center,self.flow_task_center):page.checked_ids.clear()
-        # Explicit read refresh: no imports, job preparation, scans, or production calls.
-        for page,method in ((self.task_intake_page,'refresh'),(self.prompt_center,'reload_filters'),(self.flow_task_center,'reload_filters'),(self.qc_page,'reload'),(self.davinci_page,'reload'),(self.stats_page,'reload')):
+        flow = getattr(self, "flow_task_center", None)
+        if flow is not None:
+            flow.scope_key=None;flow.page_index=0
+        qc = getattr(self, "qc_page", None)
+        if qc is not None:
+            qc.qc_page_index=0;qc._rows_signature=None
+            qc._pending_video_source=None;qc.current_output=''
+            if qc.player:
+                qc.player.stop();qc.player.setSource(QUrl())
+        for page in (getattr(self, "prompt_center", None), flow):
+            if page is not None:
+                page.checked_ids.clear()
+        # Explicit read refresh: only refresh already-constructed pages; lazy pages load active date on creation.
+        refreshed_token = self._navigation_data_token()
+        for nav_key, page, method in (
+            ("intake", self.task_intake_page, 'refresh'),
+            ("prompt", getattr(self, "prompt_center", None), 'reload_filters'),
+            ("flow", flow, 'reload_filters'),
+            ("qc", qc, 'reload'),
+            ("davinci", getattr(self, "davinci_page", None), 'reload'),
+            ("stats", getattr(self, "stats_page", None), 'reload'),
+        ):
+            if page is None:
+                self._nav_refresh_tokens.pop(nav_key, None)
+                continue
             page._date_view_refresh=True
             try:getattr(page,method)()
             finally:page._date_view_refresh=False
-        refreshed_token = self._navigation_data_token()
-        for key in ("intake", "prompt", "flow", "qc", "davinci", "stats"):
-            self._nav_refresh_tokens[key] = refreshed_token
+            self._nav_refresh_tokens[nav_key] = refreshed_token
         # Switching the workspace date must immediately kick the Flow watchdog for
         # that exact date.  The regular 2-second timer remains as the continuous fallback.
-        QTimer.singleShot(0, self.flow_task_center.auto_dispatch_tick)
+        flow_ready = self._ensure_page("flow")
+        if flow_ready is not None:
+            QTimer.singleShot(0, flow_ready.auto_dispatch_tick)
         if current in (self.dashboard,self.recipient_page,self.host_page):self.show_dashboard()
 
     def _new_scroll_page_layout(self, page, min_width=760, margins=(24,20,24,20), spacing=12):
@@ -571,6 +781,7 @@ class MainWindow(QMainWindow):
         return layout, scroll, content
 
     def resizeEvent(self, event):
+        self._resize_active_until = time.monotonic() + 0.18
         super().resizeEvent(event)
         # Keep navigation usable while giving small windows enough workspace.
         if hasattr(self, 'sidebar'):
@@ -603,7 +814,8 @@ class MainWindow(QMainWindow):
         return str(self.settings.value("default_wrap", "18")).strip() or "18"
 
     def show_settings_page(self):
-        self._navigate("settings", self.settings_page, self.settings_page.reload, "reload")
+        page = self._ensure_page("settings")
+        self._navigate("settings", page, page.reload, "reload")
 
     def open_settings(self):
         self.show_settings_page()
@@ -716,6 +928,8 @@ class MainWindow(QMainWindow):
         return (work_dates.active(), tuple(stamps))
 
     def _navigation_key_for_widget(self, widget):
+        if widget is None:
+            return "detail"
         mapping = {
             # Recipient/host editor pages are Task Center sub-pages, not separate sidebar destinations.
             getattr(self, "dashboard", None): "intake",
@@ -728,6 +942,7 @@ class MainWindow(QMainWindow):
             getattr(self, "qc_page", None): "qc",
             getattr(self, "davinci_page", None): "davinci",
             getattr(self, "packaging_page", None): "packaging",
+            getattr(self, "components_page", None): "components",
             getattr(self, "stats_page", None): "stats",
             getattr(self, "settings_page", None): "settings",
         }
@@ -801,16 +1016,19 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, run_refresh)
 
     def show_flow_task_center(self):
-        self._navigate("flow", self.flow_task_center, self.flow_task_center.reload_filters, "reload_filters")
+        page = self._ensure_page("flow")
+        self._navigate("flow", page, page.reload_filters, "reload_filters")
 
     def show_accounts_page(self):
-        self._navigate("accounts", self.account_page, self.account_page.refresh, "refresh")
+        page = self._ensure_page("accounts")
+        self._navigate("accounts", page, page.refresh, "refresh")
 
     def show_task_intake(self):
         self._navigate("intake", self.task_intake_page, self.task_intake_page.refresh, "refresh")
 
     def show_prompt_center(self):
-        self._navigate("prompt", self.prompt_center, self.prompt_center.reload_filters, "reload_filters")
+        page = self._ensure_page("prompt")
+        self._navigate("prompt", page, page.refresh_if_changed, "refresh_if_changed")
 
 
     def open_updates(self):
@@ -866,21 +1084,29 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def show_qc_page(self):
+        page = self._ensure_page("qc")
         self._navigate(
-            "qc", self.qc_page,
-            lambda: self.qc_page._refresh_qc_data(force=False, preserve_player=True),
+            "qc", page,
+            lambda: page._refresh_qc_data(force=False, preserve_player=True),
             "qc_signature_refresh",
         )
 
     def show_davinci_page(self):
-        self._navigate("davinci", self.davinci_page, self.davinci_page.refresh_queue_if_changed, "queue_signature_refresh")
+        page = self._ensure_page("davinci")
+        self._navigate("davinci", page, page.refresh_queue_if_changed, "queue_signature_refresh")
 
     def show_packaging_page(self):
         # UI-only incremental page: switching here performs no DB / Flow / Resolve refresh.
-        self._navigate("packaging", self.packaging_page)
+        page = self._ensure_page("packaging")
+        self._navigate("packaging", page)
+
+    def show_components_page(self):
+        page = self._ensure_page("components")
+        self._navigate("components", page)
 
     def show_stats_page(self):
-        self._navigate("stats", self.stats_page, lambda: self.stats_page.reload(force=False), "analytics_refresh")
+        page = self._ensure_page("stats")
+        self._navigate("stats", page, lambda: page.reload(force=False), "analytics_refresh")
 
     def future_feature(self, name):
         QMessageBox.information(self, "下一阶段", f"{name} 已预留入口。\n\nV0.13.1 已升级为全局通道池调度：统一配置 CH 通道、R1 高速返工、精确任务命名、通道文件夹监听与详细日志。")

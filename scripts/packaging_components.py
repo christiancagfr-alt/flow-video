@@ -102,7 +102,7 @@ def main():
         raise SystemExit(install())
     elif action=='ffmpeg':
         from scripts.install_packaging_asr import main as install
-        raise SystemExit(install(['imageio-ffmpeg==0.6.0'],ROOT/'ffmpeg-libs'))
+        raise SystemExit(install(['imageio-ffmpeg==0.8.1'],ROOT/'ffmpeg-libs'))
     elif action=='remotion':
         print('准备 Node / npm…',flush=True)
         node=node_runtime();env=os.environ.copy();env['PATH']=str(node.parent)+os.pathsep+env.get('PATH','')
@@ -110,9 +110,10 @@ def main():
         npm=next((x for x in choices if x.is_file()),None)
         if not npm:raise ValueError('Node 已安装，但缺少 npm；请修复 Node 安装后重试。')
         folder=ROOT/'remotion';folder.mkdir(parents=True,exist_ok=True)
-        manifest={'private':True,'dependencies':{'remotion':'4.0.534','@remotion/cli':'4.0.534','react':'19.2.0','react-dom':'19.2.0'}}
-        (folder/'package.json').write_text(json.dumps(manifest),encoding='utf-8')
-        process.run([str(node),str(npm),'install','--registry=https://registry.npmjs.org','--cache',str(ROOT/'npm-cache')],cwd=folder,env=env,check=True,stdout=sys.stdout,stderr=sys.stderr)
+        locked=Path(__file__).resolve().parent/'remotion-runtime'
+        for name in ('package.json','package-lock.json'):
+            shutil.copy2(locked/name,folder/name)
+        process.run([str(node),str(npm),'ci','--registry=https://registry.npmjs.org','--cache',str(ROOT/'npm-cache')],cwd=folder,env=env,check=True,stdout=sys.stdout,stderr=sys.stderr)
         for attempt in range(3):
             try:
                 process.run([str(node),str(folder/'node_modules/@remotion/cli/remotion-cli.js'),'browser','ensure'],cwd=folder,env=env,check=True,stdout=sys.stdout,stderr=sys.stderr,timeout=300)

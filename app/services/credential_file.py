@@ -6,11 +6,15 @@ after a successful read-back. A locked or missing credential store raises
 CredentialStoreError and does not write plaintext.
 """
 import base64
+import copy
 import json
 import os
+import threading
 from pathlib import Path
 
 SERVICE = "com.flowstudio.google-oauth"
+_cache_lock = threading.Lock()
+_token_cache = {}
 
 
 class CredentialStoreError(RuntimeError):
@@ -70,6 +74,8 @@ def _save_keyring(path, text, vault):
 
 def save(path, text, vault="auto"):
     path = Path(path)
+    with _cache_lock:
+        _token_cache.clear()
     if vault == "auto" and os.name == "nt":
         _atomic_write(path, _dpapi_wrap(text))
         return
@@ -99,21 +105,47 @@ def _read_keyring(pointer, vault):
     return json.loads(stored)
 
 
+def _file_sig(path: Path):
+    try:
+        st = path.stat()
+        return (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    except Exception:
+        return None
+
+
 def load(path, vault="auto"):
     path = Path(path)
+    sig = _file_sig(path) if vault == "auto" else None
+    if sig is not None:
+        with _cache_lock:
+            cached = _token_cache.get(sig)
+            if cached is not None:
+                return copy.deepcopy(cached)
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict) and "windows_dpapi" in data:
         if os.name != "nt":
             raise ValueError("Windows credentials must be reauthorized on this platform")
         import win32crypt
         blob = base64.b64decode(data["windows_dpapi"])
-        return json.loads(win32crypt.CryptUnprotectData(blob, None, None, None, 1)[1].decode("utf-8"))
+        result = json.loads(win32crypt.CryptUnprotectData(blob, None, None, None, 1)[1].decode("utf-8"))
+        if sig is not None:
+            with _cache_lock:
+                _token_cache[sig] = copy.deepcopy(result)
+        return result
     if isinstance(data, dict) and "keyring" in data:
-        return _read_keyring(data, vault)
+        result = _read_keyring(data, vault)
+        if sig is not None:
+            with _cache_lock:
+                _token_cache[sig] = copy.deepcopy(result)
+        return result
     text = json.dumps(data, ensure_ascii=False)
     # Legacy plaintext. Persist to the secure store first; save() replaces the
     # file only after the credential store reads the same value back.
     save(path, text, vault=vault)
+    post_sig = _file_sig(path) if vault == "auto" else None
+    if post_sig is not None:
+        with _cache_lock:
+            _token_cache[post_sig] = copy.deepcopy(data)
     return data
 
 
@@ -131,6 +163,8 @@ def _delete_keyring(service, account, vault):
 
 def delete(path, vault="auto"):
     path = Path(path)
+    with _cache_lock:
+        _token_cache.clear()
     account = _account(path)
     service = SERVICE
     remove_vault = not (vault == "auto" and os.name == "nt")

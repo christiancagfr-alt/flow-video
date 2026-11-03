@@ -4,11 +4,11 @@ const content=fs.readFileSync(path.join(root,'content.js'),'utf8');
 const bg=fs.readFileSync(path.join(root,'background.js'),'utf8');
 const page=fs.readFileSync(path.join(root,'page-engine.js'),'utf8');
 const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
-assert.equal(manifest.version,'0.9.62','protocol/extension version must remain compatible');
+assert.equal(manifest.version,'0.9.69','protocol/extension version must remain compatible');
 assert.ok(content.includes('function requiredUploadStatus(media=state.media,job=state.job)'),'hard upload barrier helper missing');
 assert.ok(content.includes('const expected = getExpectedNames(state.job);'),'scanner must verify original complete image set');
 assert.ok(content.includes('const uploadPreflight=await confirmAllImagesInFlowBeforeSubmit(job);'),'live pre-submit image preflight missing');
-assert.ok(content.indexOf('const uploadPreflight=await confirmAllImagesInFlowBeforeSubmit(job);') < content.indexOf("{type:'FS_CLAIM_COMMAND',command_id:cmd}"),'upload preflight must run before command claim/submission');
+assert.ok(content.indexOf('const uploadPreflight=await confirmAllImagesInFlowBeforeSubmit(job);') < content.indexOf('const outcome=await runOneTask(job,t,round,index,totalRuns);'),'upload preflight must run before command claim/submission');
 assert.ok(content.includes('!uploadBarrierReady()'),'auto generation must be blocked until full upload barrier is ready');
 assert.ok(bg.includes("periodInMinutes:0.5"),'30-second MV3 fallback alarm missing');
 assert.ok(bg.includes("type:'FS_BACKGROUND_WAKE'"),'background wake message missing');
@@ -19,3 +19,5 @@ assert.ok(page.includes('navigator.locks?.request'),'Flow page freeze guard miss
 assert.ok(page.includes("typeof MessageChannel!=='undefined'"),'hidden timer chain breaker missing in MAIN world');
 assert.ok(content.includes("typeof MessageChannel!=='undefined'"),'hidden timer chain breaker missing in content world');
 console.log('PASS v0.9.62 incremental full-upload barrier + hidden/frozen background execution guard');
+
+assert.ok(content.includes('const allowed=await claimSegment(job.command_id,t.segment_id,false);'),'per-task ownership claim must remain');

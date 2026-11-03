@@ -11,9 +11,15 @@ def meets_2k(width, height):
     return min(width, height) >= 1024 and max(width, height) >= 2048
 
 
-def resolve(task):
+def resolve(task, plan_cache=None):
     task = dict(task)
-    plan = broll_presets.get_video_plan(str(task['video_id'])) or {}
+    vid_key = str(task['video_id'])
+    if plan_cache is not None and vid_key in plan_cache:
+        plan = plan_cache[vid_key] or {}
+    else:
+        plan = broll_presets.get_video_plan(vid_key) or {}
+        if plan_cache is not None:
+            plan_cache[vid_key] = plan
     item = next((x for x in plan.get('video_plan', []) if str(x.get('SEGMENT_ID')) == str(task['segment_id'])), {})
     binding = item.get('IMAGE_BINDING') or {}
     endpoint = binding.get('END_IMAGE')

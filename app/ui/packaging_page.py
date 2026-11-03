@@ -10,6 +10,7 @@ projects and invokes a user-managed local Remotion installation directly.
 import copy
 import html
 import json
+import os
 import re
 from pathlib import Path
 
@@ -74,6 +75,12 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         self._render_done = 0
         self._tree_items = {}
         self._engine_ok = False
+        self._deferred_player_path = ""
+        self._idle_saved_pos = 0
+        self._idle_unload_timer = QTimer(self)
+        self._idle_unload_timer.setSingleShot(True)
+        self._idle_unload_timer.setInterval(90000)
+        self._idle_unload_timer.timeout.connect(self._on_idle_unload)
         self._caption_presets = CaptionPresetLibrary()
         self._build_ui()
         self._set_color_button(self.caption_color_btn, "#FFFFFF")
@@ -119,8 +126,13 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         self.import_folder_btn = QPushButton("导入文件夹")
         self.import_folder_btn.clicked.connect(self._import_folder)
         self.import_folder_btn.hide()
-        self.import_video_btn.setText('导入');self.import_video_btn.clicked.disconnect()
-        imports=QMenu(self.import_video_btn);imports.addAction('导入视频',self._import_videos);imports.addAction('导入文件夹',self._import_folder);self.import_video_btn.setMenu(imports)
+        self.import_video_btn.setText('＋ 导入视频');self.import_video_btn.clicked.disconnect()
+        imports=QMenu(self.import_video_btn)
+        imports.addAction('📅 导入今天的视频',self._import_today_videos)
+        imports.addSeparator()
+        imports.addAction('🎬 导入外部视频文件…',self._import_videos)
+        imports.addAction('📁 导入外部视频文件夹…',self._import_folder)
+        self.import_video_btn.setMenu(imports)
         th.addWidget(self._vline())
         self.clear_tasks_btn = QPushButton("清空列表")
         self.clear_tasks_btn.clicked.connect(self._clear_tasks)
@@ -671,32 +683,82 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         paths = [str(p) for p in sorted(Path(folder).rglob("*")) if p.is_file() and p.suffix.lower() in VIDEO_EXTS]
         self._add_video_paths(paths)
 
-    def _add_video_paths(self, paths):
+    def _add_video_paths(self, paths, *, pre_resolved=False):
+        from app.services.packaging_tasks import resolved_path_str
         changed = False
         for raw in paths:
-            p = str(Path(raw).expanduser().resolve())
-            if not Path(p).is_file() or Path(p).suffix.lower() not in VIDEO_EXTS: continue
+            p = str(raw) if pre_resolved else resolved_path_str(raw)
+            if os.path.splitext(p)[1].lower() not in VIDEO_EXTS or not os.path.isfile(p): continue
             if p not in self._project["videos"]:
                 self._project["videos"][p] = self._default_state(p); self._project["order"].append(p); changed = True
         if changed: self._rebuild_tree(select_first=not bool(self._current_path))
 
-    def sync_edited_videos(self):
-        from app.services.packaging_tasks import edited_tasks,export_key
+    def _import_today_videos(self):
+        from app.core import work_dates
+        day = work_dates.active()
+        added, total = self.sync_edited_videos(work_date=day, manual=True)
+        if total == 0:
+            self.render_status.setText(f"工作日期 {day} 暂无已导出的自动剪辑视频")
+            QMessageBox.information(self, "导入今天的视频", f"当前工作日期（{day}）暂无已导出的自动剪辑成品视频。")
+        elif added > 0:
+            self.render_status.setText(f"已导入 {day} 的 {added} 个视频（共 {total} 个）")
+        else:
+            self.render_status.setText(f"{day} 的 {total} 个视频已在列表中")
+
+    def sync_edited_videos(self, work_date=None, manual=False):
+        import inspect
+        import stat as _stat
+        from app.core import work_dates
+        from app.services.packaging_tasks import edited_tasks, export_key, resolved_path_str
         from sqlite3 import Error as DatabaseError
         try:
-            dismissed=set(json.loads(self._settings.value('packaging/dismissed_exports','[]',type=str)))
-            for row in edited_tasks():
-                path=Path(row['edit_output_path']).expanduser().resolve()
-                if not path.is_file():continue
-                key=export_key(row)
-                if key in dismissed:continue
-                self._add_video_paths([str(path)])
-                state=self._project['videos'].get(str(path))
+            target_date = work_date or work_dates.active()
+            dismissed = set() if manual else set(json.loads(self._settings.value('packaging/dismissed_exports','[]',type=str)))
+            pending_paths=[]
+            meta_updates=[]
+            try:
+                sig = inspect.signature(edited_tasks)
+                rows = edited_tasks(target_date) if len(sig.parameters) > 0 else edited_tasks()
+            except (TypeError, ValueError):
+                rows = edited_tasks()
+            valid_total = 0
+            for row in rows:
+                p = resolved_path_str(row['edit_output_path'])
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
+                if not _stat.S_ISREG(st.st_mode):
+                    continue
+                valid_total += 1
+                key = export_key(row, mtime_ns=st.st_mtime_ns)
+                if key in dismissed:
+                    continue
+                if p not in self._project['videos']:
+                    pending_paths.append(p)
+                meta_updates.append((
+                    p,
+                    row['id'],
+                    key,
+                    row.get('original_script') or row.get('production_script') or row.get('script') or '',
+                ))
+            if pending_paths:
+                self._add_video_paths(pending_paths, pre_resolved=True)
+            for p, vid, key, src_script in meta_updates:
+                state = self._project['videos'].get(p)
                 if state is not None:
-                    state.update(source_video_id=row['id'],source_export_key=key,
-                        source_script=row.get('original_script') or row.get('production_script') or row.get('script') or '')
+                    state.update(source_video_id=vid, source_export_key=key, source_script=src_script)
+            if manual and meta_updates:
+                try:
+                    saved_dismissed = set(json.loads(self._settings.value('packaging/dismissed_exports','[]',type=str)))
+                    imported_keys = {k for _, _, k, _ in meta_updates}
+                    if saved_dismissed & imported_keys:
+                        self._settings.setValue('packaging/dismissed_exports', json.dumps(sorted(saved_dismissed - imported_keys)))
+                except (ValueError, TypeError):
+                    pass
+            return len(pending_paths), valid_total
         except (OSError,ValueError,TypeError,DatabaseError):
-            return
+            return 0, 0
 
     @staticmethod
     def _group_for_path(path: str):
@@ -751,10 +813,18 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         if self._current_path: self._capture_controls()
         self._current_path = path; state = self._project["videos"].get(path)
         if not state: return
+        self._idle_saved_pos = 0
         self.current_info.setText(f"当前片段：{Path(path).name}")
         self._load_state(state)
         if self.player:
-            self.player.setSource(QUrl.fromLocalFile(path)); self.player.play(); self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+            if self.isVisible():
+                self._deferred_player_path = ""
+                self.player.setSource(QUrl.fromLocalFile(path))
+                self.player.play(); self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+            else:
+                # Hidden page: defer decoding/IOSurface allocation until actually shown.
+                self._deferred_player_path = path
+                self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
 
     def _update_tree_status(self, path):
         if not path: return
@@ -1493,10 +1563,55 @@ class PackagingPage(PackagingReelsMixin, QWidget):
         for key, fn in (("Space",self._toggle_play),):
             sc=QShortcut(QKeySequence(key),self); sc.setContext(Qt.WidgetWithChildrenShortcut); sc.activated.connect(fn); self._shortcuts.append(sc)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, "_idle_unload_timer"):
+            self._idle_unload_timer.stop()
+        if self.player and getattr(self, "_deferred_player_path", ""):
+            deferred = self._deferred_player_path
+            saved_pos = int(getattr(self, "_idle_saved_pos", 0) or 0)
+            self._deferred_player_path = ""
+            self._idle_saved_pos = 0
+            try:
+                self.player.setSource(QUrl.fromLocalFile(deferred))
+                self.player.pause()
+                if saved_pos > 0:
+                    QTimer.singleShot(120, lambda p=saved_pos: self.player.setPosition(p) if self.player else None)
+                self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+            except Exception:
+                pass
+            self._update_preview_overlays()
+
+    def _on_idle_unload(self):
+        if self.isVisible():
+            return
+        if self.player and self._current_path:
+            try:
+                self._idle_saved_pos = int(self.player.position() or 0)
+            except Exception:
+                self._idle_saved_pos = 0
+            self._deferred_player_path = self._current_path
+            try:
+                self.player.stop()
+                self.player.setSource(QUrl())
+            except Exception:
+                pass
+        if hasattr(self, "preview_watermark") and self.preview_watermark is not None:
+            try:
+                self.preview_watermark.clear()
+            except Exception:
+                pass
+
     def hideEvent(self, event):
         if self.player:
             try:self.player.pause(); self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
             except Exception:pass
+        if hasattr(self, "preview_watermark") and self.preview_watermark is not None:
+            for w_player, _, _ in list(getattr(self.preview_watermark, "videos", {}).values()):
+                try: w_player.pause()
+                except Exception: pass
+        if hasattr(self, "_idle_unload_timer") and self._current_path:
+            self._idle_unload_timer.start()
         super().hideEvent(event)
 
     def closeEvent(self, event):

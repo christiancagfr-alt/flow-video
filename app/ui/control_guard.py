@@ -1,6 +1,6 @@
 """Prevent incidental scrolling from changing settings throughout the application."""
 from PySide6.QtCore import QObject, QEvent, Qt
-from PySide6.QtWidgets import QApplication, QAbstractSpinBox, QComboBox, QSlider, QWidget
+from PySide6.QtWidgets import QApplication, QAbstractSpinBox, QComboBox, QMenu, QSlider, QWidget
 
 
 class ControlGuard(QObject):
@@ -13,7 +13,14 @@ class ControlGuard(QObject):
     ))
 
     def eventFilter(self, obj, event):
-        if event.type() not in self._INTERESTING:
+        etype = event.type()
+        if etype == QEvent.Type.Polish:
+            if isinstance(obj, QMenu) and not obj.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
+                if not obj.isVisible():
+                    obj.setWindowFlags(obj.windowFlags() | Qt.WindowType.FramelessWindowHint)
+                obj.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            return False
+        if etype not in self._INTERESTING:
             return False
         control = obj
         while isinstance(control, QWidget) and not isinstance(control, (QAbstractSpinBox, QComboBox, QSlider)):

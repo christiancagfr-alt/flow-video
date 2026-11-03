@@ -130,17 +130,42 @@ def export_csv_url(sid, gid):
     return f"https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={gid}"
 
 
-def fetch_csv(url, timeout=30):
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": f"Mozilla/5.0 FlowStudioPreGPT/{VERSION}", "Accept": "text/csv,*/*"},
-    )
+def _fetch_csv_once(url, timeout=30, token=None):
+    headers = {"User-Agent": f"Mozilla/5.0 FlowStudioPreGPT/{VERSION}", "Accept": "text/csv,*/*"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read(30*1024*1024+1)
         if len(raw)>30*1024*1024:raise ValueError("表格下载超过 30 MB")
         status = getattr(r, "status", 200)
         ctype = r.headers.get("Content-Type", "")
     return status, ctype, raw
+
+
+def fetch_csv(url, timeout=30):
+    import urllib.error
+    try:
+        return _fetch_csv_once(url, timeout)
+    except urllib.error.HTTPError as e:
+        if e.code not in (401, 403):
+            raise
+        log.warning("公开链接读取表格失败（HTTP %s），改用已连接的 Google 账号读取", e.code)
+    # 表格共享为“受限”时，使用已授权的 Google OAuth 账号读取。
+    creds = google_creds(interactive=False)
+    if not creds:
+        raise PermissionError("该 Google 表格未公开（HTTP 401），请先在任务中心连接有权限的 Google 账号，或将表格共享改为“知道链接的任何人可查看”。")
+    try:
+        return _fetch_csv_once(url, timeout, token=creds.token)
+    except urllib.error.HTTPError as e:
+        if e.code not in (401, 403):
+            raise
+        email = ""
+        try:
+            email = google_account_info().get("email", "")
+        except Exception:
+            pass
+        raise PermissionError(f"当前连接的 Google 账号 {email or ''} 无权访问该表格（HTTP {e.code}）。请让表格所有者共享给该账号，或在任务中心切换 Google 账号。") from e
 
 
 def decode_bytes(raw):
@@ -174,6 +199,26 @@ def header_map(row):
 def classify_requirement(req):
     # 已确认规则：只有明确出现“闭眼”才是 PRAYING；其他全部 TALKING。
     return "PRAYING" if "闭眼" in str(req or "") else "TALKING"
+
+
+def _find_active_row_bounds(rows):
+    """Return 1-based (start_row, end_row) of task rows between START_MARKER and END_MARKER, or (None, None)."""
+    start = None
+    end = None
+    s_norm = norm(START_MARKER)
+    e_norm = norm(END_MARKER)
+    for ri, row in enumerate(rows):
+        exact = {norm(c) for c in row if norm(c)}
+        if start is None:
+            if s_norm in exact:
+                start = ri
+            continue
+        if e_norm in exact:
+            end = ri
+            break
+    if start is not None and end is not None and end > start + 1:
+        return start + 2, end
+    return None, None
 
 
 def parse_sheet_rows(rows, spec=None):
@@ -213,30 +258,42 @@ def _parse_template_rows(rows):
     if end is None:
         raise ValueError(f"找到“{START_MARKER}”后未找到“{END_MARKER}”")
 
-    tasks = []
-    for ri in range(start + 1, end):
-        row = rows[ri]
-        t = {"表格行号": ri + 1}
-        for h in READ_HEADERS:
-            ci = hmap[norm(h)]
-            t[h] = (row[ci] if h in ("中文内容", "外文内容") else row[ci].strip()) if ci < len(row) else ""
-        # 空说明/正常/睁眼/其他都为 TALKING；只有“闭眼”进 PRAYING。
-        t["模式"] = classify_requirement(t.get("需求说明"))
-        if any(norm(t.get(k, "")) for k in ("需求人员", "主播名称", "中文内容", "外文内容", "主播图片链接")):
-            tasks.append(t)
-
+    header_cols = {h: hmap[norm(h)] for h in READ_HEADERS}
+    col_letters = {h: col_letter(ci) for h, ci in header_cols.items() if ci is not None}
     opt_map = {}
     for h in WRITE_HEADERS:
         if norm(h) in hmap:
             opt_map[h] = hmap[norm(h)]
+    existing_claims = {}
+    a_ci = opt_map.get("作者")
+    s_ci = opt_map.get("制作情况")
+    src_ci = hmap.get(norm("素材来源"))
+
+    tasks = []
+    for ri in range(start + 1, end):
+        row = rows[ri]
+        t = {"表格行号": ri + 1, "_col_map": col_letters}
+        for h in READ_HEADERS:
+            ci = hmap[norm(h)]
+            t[h] = (row[ci] if h in ("中文内容", "外文内容") else row[ci].strip()) if ci < len(row) else ""
+        t["素材来源"] = row[src_ci].strip() if (src_ci is not None and src_ci < len(row)) else ""
+        # 空说明/正常/睁眼/其他都为 TALKING；只有“闭眼”进 PRAYING。
+        t["模式"] = classify_requirement(t.get("需求说明"))
+        if any(norm(t.get(k, "")) for k in ("需求人员", "主播名称", "中文内容", "外文内容", "主播图片链接")):
+            tasks.append(t)
+            if a_ci is not None and s_ci is not None:
+                a_val = row[a_ci].strip() if a_ci < len(row) else ""
+                s_val = row[s_ci].strip() if s_ci < len(row) else ""
+                existing_claims[ri + 1] = (a_val, s_val)
 
     return {
         "header_row": hidx + 1,
         "start_row": start + 1,
         "end_row": end + 1,
         "tasks": tasks,
-        "header_map": {h: hmap[norm(h)] for h in READ_HEADERS},
+        "header_map": header_cols,
         "write_header_map": opt_map,
+        "existing_claims": existing_claims,
     }
 
 
@@ -272,18 +329,28 @@ def _parse_custom_rows(rows, spec):
     if end is None:
         raise ValueError(f"找到“{START_MARKER}”后未找到“{END_MARKER}”")
 
+    header = {key: resolved[key] for key in READ_HEADERS if resolved.get(key) is not None}
+    col_letters = {key: col_letter(ci) for key, ci in header.items() if ci is not None}
+    write_map = {key: resolved[key] for key in WRITE_HEADERS if resolved.get(key) is not None}
+    existing_claims = {}
+    a_ci = write_map.get("作者")
+    s_ci = write_map.get("制作情况")
+
     tasks = []
     for ri in range(start + 1, end):
         row = rows[ri]
-        task = {"表格行号": ri + 1}
-        for header in READ_HEADERS:
-            task[header] = _cell(row, resolved.get(header), header in ("中文内容", "外文内容"))
+        task = {"表格行号": ri + 1, "_col_map": col_letters}
+        for hdr in READ_HEADERS:
+            task[hdr] = _cell(row, resolved.get(hdr), hdr in ("中文内容", "外文内容"))
+        task["素材来源"] = _cell(row, resolved.get("素材来源"), False)
         task["日期"] = normalize_date(_cell(row, resolved.get("日期"), False))
         task["模式"] = classify_requirement(task.get("需求说明"))
         if any(norm(task.get(key, "")) for key in ("需求人员", "主播名称", "中文内容", "外文内容", "主播图片链接")):
             tasks.append(task)
-    header = {key: resolved[key] for key in READ_HEADERS if resolved.get(key) is not None}
-    write_map = {key: resolved[key] for key in WRITE_HEADERS if resolved.get(key) is not None}
+            if a_ci is not None and s_ci is not None:
+                a_val = row[a_ci].strip() if a_ci < len(row) else ""
+                s_val = row[s_ci].strip() if s_ci < len(row) else ""
+                existing_claims[ri + 1] = (a_val, s_val)
     return {
         "header_row": start + 1,
         "start_row": start + 1,
@@ -291,6 +358,7 @@ def _parse_custom_rows(rows, spec):
         "tasks": tasks,
         "header_map": header,
         "write_header_map": write_map,
+        "existing_claims": existing_claims,
     }
 
 
@@ -357,6 +425,8 @@ def init_db():
         con.execute("ALTER TABLE tasks ADD COLUMN content_key TEXT NOT NULL DEFAULT ''")
     if "sheet_date" not in cols:
         con.execute("ALTER TABLE tasks ADD COLUMN sheet_date TEXT NOT NULL DEFAULT ''")
+    if "material_source" not in cols:
+        con.execute("ALTER TABLE tasks ADD COLUMN material_source TEXT NOT NULL DEFAULT ''")
     con.execute("CREATE INDEX IF NOT EXISTS idx_tasks_content_key ON tasks(spreadsheet_id,gid,content_key)")
     con.commit()
     return con
@@ -413,6 +483,9 @@ def task_content_key(recipient, anchor, chinese, foreign):
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:24]
 
 
+_LAST_CHANGED_GROUPS = set()
+
+
 def import_tasks(parsed, sid, gid):
     """幂等同步当前有效区间。
 
@@ -421,6 +494,7 @@ def import_tasks(parsed, sid, gid):
     - 同一主播出现多个不同 Drive 文件夹时，不拆组，标记冲突等待人工检查。
     - 保留离开任务区间的源记录及生产关联，按稳定内容身份处理移动与交换行。
     """
+    global _LAST_CHANGED_GROUPS
     now = datetime.now().isoformat(timespec="seconds")
     con = init_db()
     try:
@@ -428,18 +502,34 @@ def import_tasks(parsed, sid, gid):
         updated = 0
         unchanged = 0
         groups = {}
+        changed_groups = set()
         active_rows = set()
         con.execute("BEGIN IMMEDIATE")
         # Stage row positions to allow arbitrary row swaps without losing task IDs.
         prior = con.execute("SELECT recipient,anchor_name,chinese_text,foreign_text,requirement,mode,drive_url,drive_folder_id,group_key,content_key,sheet_row,id FROM tasks WHERE spreadsheet_id=? AND gid=? ORDER BY id", (sid,gid)).fetchall()
-        with studio_connect() as main:
-            for old_task in prior:
-                legacy_key=_source_task_key(sid,gid,old_task[9])
-                old_link=main.execute("SELECT video_id FROM source_tasks WHERE source_task_id=? AND source_row=?",(legacy_key,str(old_task[10]))).fetchone()
-                if old_link and old_link[0]:
-                    con.execute("INSERT OR IGNORE INTO production_links(task_id,video_id) VALUES(?,?)",(old_task[11],old_link[0]))
+        existing_links = dict(con.execute("SELECT task_id, video_id FROM production_links").fetchall())
+        unlinked_prior = [r for r in prior if r[11] not in existing_links]
+        if unlinked_prior:
+            with studio_connect() as main:
+                for old_task in unlinked_prior:
+                    legacy_key=_source_task_key(sid,gid,old_task[9])
+                    old_link=main.execute("SELECT video_id FROM source_tasks WHERE source_task_id=? AND source_row=?",(legacy_key,str(old_task[10]))).fetchone()
+                    if old_link and old_link[0]:
+                        con.execute("INSERT OR IGNORE INTO production_links(task_id,video_id) VALUES(?,?)",(old_task[11],old_link[0]))
+                        existing_links[old_task[11]] = old_link[0]
+        existing_styles = dict(con.execute("SELECT task_id, payload FROM task_source_styles").fetchall())
         used_ids=set()
         con.execute("UPDATE tasks SET sheet_row=-id WHERE spreadsheet_id=? AND gid=?", (sid,gid))
+        # Only the currently configured sheet/tab is "active". When the task sheet is switched
+        # (e.g. a copied spreadsheet with the same rows), rows from the previous sheet must leave
+        # the active area; otherwise they merge into the same recipient+host group, double the
+        # task count and keep the downloaded images, leaving the new rows "缺少图片".
+        retired_other = con.execute(
+            "UPDATE tasks SET sheet_row=-id WHERE sheet_row>0 AND spreadsheet_id<>'manual' AND NOT (spreadsheet_id=? AND gid=?)",
+            (sid, gid),
+        ).rowcount
+        if retired_other:
+            log.info("切换任务表格：已将 %d 条其它表格的旧任务移出当前任务区间（保留记录与生产关联）", retired_other)
     
         for t in parsed["tasks"]:
             sheet_row = int(t["表格行号"])
@@ -469,39 +559,45 @@ def import_tasks(parsed, sid, gid):
             if old is None:
                 old=next((r for r in prior if r[11] not in used_ids and r[9]==content_key and r[10]==sheet_row),None)
             moved=bool(old and old[10]!=sheet_row)
+            mat_source = str(t.get("素材来源") or "").strip()
+            task_id = None
             if old:
                 old_sig=tuple(old[:9])
                 old_row=-int(old[11]);used_ids.add(old[11])
+                task_id = int(old[11])
                 if old_sig == signature and not moved:
-                    con.execute("UPDATE tasks SET sheet_row=? WHERE id=?",(sheet_row,old[11]))
+                    con.execute("UPDATE tasks SET sheet_row=?,sheet_date=?,material_source=? WHERE id=?",(sheet_row,str(t.get("日期") or ""),mat_source,task_id))
                     unchanged += 1
                 else:
                     con.execute(
-                        """UPDATE tasks SET sheet_row=?,recipient=?,anchor_name=?,chinese_text=?,foreign_text=?,requirement=?,mode=?,drive_url=?,drive_folder_id=?,group_key=?,content_key=?,updated_at=?,created_at=CASE WHEN content_key<>? THEN ? ELSE created_at END
+                        """UPDATE tasks SET sheet_row=?,recipient=?,anchor_name=?,chinese_text=?,foreign_text=?,requirement=?,mode=?,drive_url=?,drive_folder_id=?,group_key=?,content_key=?,sheet_date=?,material_source=?,updated_at=?,created_at=CASE WHEN content_key<>? THEN ? ELSE created_at END
                            WHERE spreadsheet_id=? AND gid=? AND sheet_row=?""",
-                        (sheet_row,) + signature + (content_key,now,content_key,now,sid,gid,old_row),
+                        (sheet_row,) + signature + (content_key,str(t.get("日期") or ""),mat_source,now,content_key,now,sid,gid,old_row),
                     )
                     updated += 1
+                    changed_groups.add(gkey)
             else:
-                con.execute(
-                    """INSERT INTO tasks(spreadsheet_id,gid,sheet_row,recipient,anchor_name,chinese_text,foreign_text,requirement,mode,drive_url,drive_folder_id,group_key,content_key,status,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'IMPORTED',?,?)""",
-                    (sid, gid, sheet_row) + signature + (content_key, now, now),
+                cur = con.execute(
+                    """INSERT INTO tasks(spreadsheet_id,gid,sheet_row,recipient,anchor_name,chinese_text,foreign_text,requirement,mode,drive_url,drive_folder_id,group_key,content_key,sheet_date,material_source,status,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'IMPORTED',?,?)""",
+                    (sid, gid, sheet_row) + signature + (content_key, str(t.get("日期") or ""), mat_source, now, now),
                 )
+                task_id = int(cur.lastrowid)
                 imported += 1
-            con.execute(
-                "UPDATE tasks SET sheet_date=? WHERE spreadsheet_id=? AND gid=? AND sheet_row=?",
-                (str(t.get("日期") or ""), sid, gid, sheet_row),
-            )
+                changed_groups.add(gkey)
     
             if '_source_styles' in t:
-                task_id = con.execute('SELECT id FROM tasks WHERE spreadsheet_id=? AND gid=? AND sheet_row=?', (sid,gid,sheet_row)).fetchone()[0]
-                con.execute('INSERT INTO task_source_styles VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET payload=excluded.payload',
-                            (task_id, json.dumps(t['_source_styles'], ensure_ascii=False)))
-                link = con.execute('SELECT video_id FROM production_links WHERE task_id=?', (task_id,)).fetchone()
-                if link:
-                    from app.services.sheet_style import save_video
-                    save_video(link[0], t['_source_styles'])
+                if task_id is None:
+                    task_id = con.execute('SELECT id FROM tasks WHERE spreadsheet_id=? AND gid=? AND sheet_row=?', (sid,gid,sheet_row)).fetchone()[0]
+                style_json = json.dumps(t['_source_styles'], ensure_ascii=False)
+                if existing_styles.get(task_id) != style_json:
+                    con.execute('INSERT INTO task_source_styles VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET payload=excluded.payload',
+                                (task_id, style_json))
+                    existing_styles[task_id] = style_json
+                    vid = existing_links.get(task_id)
+                    if vid:
+                        from app.services.sheet_style import save_video
+                        save_video(vid, t['_source_styles'])
 
             g = groups.setdefault(gkey, {
                 "recipient": recipient,
@@ -513,7 +609,9 @@ def import_tasks(parsed, sid, gid):
                 g["drive_candidates"][canonical] = {"drive_url": drive_url, "folder_id": folder_id}
     
         # Source rows leaving the sheet are retained, including their stable identity.
-        con.execute("UPDATE intake_view_state SET hidden=0")
+        # Re-show only the day being synced into; other days the user cleared stay cleared.
+        from app.core import work_dates as _wd
+        con.execute("UPDATE intake_view_state SET hidden=0 WHERE day IN (?,?)", (_wd.active(), _wd.today()))
     
         settings = load_settings()
         root = Path(settings["local_root"]).expanduser()
@@ -529,29 +627,33 @@ def import_tasks(parsed, sid, gid):
                 drive_url = candidates[0]["drive_url"]
                 folder_id = candidates[0]["folder_id"]
                 old_group = con.execute(
-                    "SELECT drive_folder_id,talking_count,praying_count,status,message FROM groups_tbl WHERE group_key=?",
+                    "SELECT drive_folder_id,talking_count,praying_count,status,message,local_dir FROM groups_tbl WHERE group_key=?",
                     (gkey,),
                 ).fetchone()
                 if (old_group and str(old_group[0] or "") == str(folder_id or "")
                         and int(old_group[1] or 0) == int(counts.get("TALKING",0))
                         and int(old_group[2] or 0) == int(counts.get("PRAYING",0))
+                        and str(old_group[5] or "") == str(local_dir)
                         and str(old_group[3] or "") in {"READY_FOR_GPT","NEEDS_MANUAL_CLASSIFY","MATERIAL_SHORTAGE","ASSETS_DOWNLOADED"}):
                     status = str(old_group[3])
                     message = str(old_group[4] or "")
                 else:
                     status = "IMPORTED"
                     message = "已读取任务，等待素材同步"
+                    changed_groups.add(gkey)
             elif len(candidates) == 0:
                 drive_url = ""
                 folder_id = ""
                 status = "MATERIAL_LINK_MISSING"
                 message = "主播图片链接为空，请检查表格"
+                changed_groups.add(gkey)
             else:
                 drive_url = ""
                 folder_id = ""
                 status = "DRIVE_LINK_CONFLICT"
                 message = f"检测到 {len(candidates)} 个不同主播素材链接，请检查表格；不会拆成多个主播"
                 log.warning("主播素材链接冲突：%s / %s -> %s", g["recipient"], g["anchor"], [x["drive_url"] for x in candidates])
+                changed_groups.add(gkey)
     
             con.execute(
                 """INSERT INTO groups_tbl(group_key,recipient,anchor_name,drive_url,drive_folder_id,local_dir,talking_count,praying_count,status,message,updated_at)
@@ -563,7 +665,9 @@ def import_tasks(parsed, sid, gid):
         # Clean up stale groups that no longer have any active tasks in the sheet
         con.execute("DELETE FROM groups_tbl WHERE group_key NOT IN (SELECT DISTINCT group_key FROM tasks WHERE sheet_row > 0)")
 
-    
+        _LAST_CHANGED_GROUPS = set(changed_groups)
+        if isinstance(parsed, dict):
+            parsed["_changed_groups"] = list(changed_groups)
         con.commit()
         return imported, updated, unchanged, list(groups.keys())
     except Exception:
@@ -573,9 +677,9 @@ def import_tasks(parsed, sid, gid):
         con.close()
 
 
-def clear_current_tasks(bridge=None):
+def clear_current_tasks(bridge=None, day=None):
     from app.services.clear_day import clear_today
-    return clear_today(bridge)
+    return clear_today(bridge, day=day)
 
 
 def google_creds(interactive=False, force_account_picker=False):
@@ -663,20 +767,41 @@ def google_services(interactive=False, force_account_picker=False):
     return drive, sheets
 
 
+_ACCOUNT_INFO_CACHE = {"sig": None, "ts": 0.0, "info": None}
+_SHEET_TITLE_CACHE = {}
+_CLAIMED_ROWS_CACHE = set()
+
+
+def _token_file_sig():
+    try:
+        st = TOKEN_FILE.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except Exception:
+        return None
+
+
 @close_google_resources
-def google_account_info():
+def google_account_info(use_cache=True):
     """返回当前 OAuth 实际连接的 Google Drive 账号，便于核对私有文件夹权限。"""
+    sig = _token_file_sig()
+    if not sig:
+        return {"connected": False, "email": "", "display_name": ""}
+    now_ts = time.monotonic()
+    if use_cache and _ACCOUNT_INFO_CACHE["sig"] == sig and _ACCOUNT_INFO_CACHE["info"] and (now_ts - _ACCOUNT_INFO_CACHE["ts"]) < 600.0:
+        return dict(_ACCOUNT_INFO_CACHE["info"])
     drive, _ = google_services(interactive=False)
     if not drive:
         return {"connected": False, "email": "", "display_name": ""}
     try:
         info = drive.about().get(fields="user(displayName,emailAddress,permissionId)").execute().get("user", {})
-        return {
+        res = {
             "connected": True,
             "email": info.get("emailAddress", ""),
             "display_name": info.get("displayName", ""),
             "permission_id": info.get("permissionId", ""),
         }
+        _ACCOUNT_INFO_CACHE.update(sig=sig, ts=now_ts, info=res)
+        return dict(res)
     except Exception as e:
         log.exception("读取 Google 当前账号失败")
         return {"connected": True, "email": "", "display_name": "", "error": str(e)}
@@ -684,17 +809,24 @@ def google_account_info():
 
 def disconnect_google():
     from app.services.credential_file import delete
+    _ACCOUNT_INFO_CACHE.update(sig=None, ts=0.0, info=None)
     delete(TOKEN_FILE)
     log.warning("已清除 Google 登录令牌；下次将重新授权")
     return {"ok": True}
 
 def resolve_sheet_title(sheets, sid, gid):
-    meta = sheets.spreadsheets().get(spreadsheetId=sid, fields="sheets(properties(sheetId,title))").execute()
     igid = int(gid)
+    cache_key = (str(sid), igid)
+    cached = _SHEET_TITLE_CACHE.get(cache_key)
+    if cached:
+        return cached
+    meta = sheets.spreadsheets().get(spreadsheetId=sid, fields="sheets(properties(sheetId,title))").execute()
     for sh in meta.get("sheets", []):
         p = sh.get("properties", {})
         if int(p.get("sheetId", -1)) == igid:
-            return p.get("title")
+            title = p.get("title")
+            _SHEET_TITLE_CACHE[cache_key] = title
+            return title
     raise ValueError(f"Google Sheets API 中找不到 gid={gid} 对应工作表")
 
 
@@ -709,13 +841,26 @@ def writeback_claim(parsed, sid, gid):
     if "作者" not in wh or "制作情况" not in wh:
         log.warning("表格缺少 作者/制作情况 表头，本次跳过回写")
         return {"written": 0, "skipped": "缺少作者/制作情况表头"}
+    existing_claims = parsed.get("existing_claims") or {}
+    pending_tasks = []
+    for t in parsed["tasks"]:
+        r = t["表格行号"]
+        ck = task_content_key(t.get("需求人员", ""), t.get("主播名称", ""), t.get("中文内容", ""), t.get("外文内容", ""))
+        claim_sig = (str(sid), str(gid), int(r), ck, producer)
+        if existing_claims.get(r) == (producer, "制作中") or claim_sig in _CLAIMED_ROWS_CACHE:
+            _CLAIMED_ROWS_CACHE.add(claim_sig)
+            continue
+        pending_tasks.append((t, claim_sig))
+    if not pending_tasks:
+        log.info("全部 %d 条任务已在表格标记为 作者=%s / 制作情况=制作中，跳过重复回写", len(parsed["tasks"]), producer)
+        return {"written": 0, "already_claimed": len(parsed["tasks"])}
     _, sheets = google_services(interactive=False)
     if not sheets:
         log.warning("尚未连接 Google OAuth，本次任务可读取，但无法回写作者/制作情况")
         return {"written": 0, "skipped": "未连接Google OAuth"}
     title = resolve_sheet_title(sheets, sid, gid).replace("'", "''")
     data = []
-    for t in parsed["tasks"]:
+    for t, _ in pending_tasks:
         r = t["表格行号"]
         data.append({"range": f"'{title}'!{col_letter(wh['作者'])}{r}", "values": [[producer]]})
         data.append({"range": f"'{title}'!{col_letter(wh['制作情况'])}{r}", "values": [["制作中"]]})
@@ -725,8 +870,13 @@ def writeback_claim(parsed, sid, gid):
         spreadsheetId=sid,
         body={"valueInputOption": "RAW", "data": data},
     ).execute()
-    log.info("已回写 %d 条任务：作者=%s，制作情况=制作中", len(parsed["tasks"]), producer)
-    return {"written": len(parsed["tasks"])}
+    if len(_CLAIMED_ROWS_CACHE) > 8192:
+        _CLAIMED_ROWS_CACHE.clear()
+    for _, claim_sig in pending_tasks:
+        _CLAIMED_ROWS_CACHE.add(claim_sig)
+    log.info("已回写 %d 条新增/未标记任务（跳过已标记 %d 条）：作者=%s，制作情况=制作中",
+             len(pending_tasks), len(parsed["tasks"]) - len(pending_tasks), producer)
+    return {"written": len(pending_tasks)}
 
 
 def _google_http_reason(exc):
@@ -740,87 +890,128 @@ def _google_http_reason(exc):
     return status, reason or str(exc)
 
 
-@close_google_resources
-def download_drive_group(group_key, progress_callback=None):
-    from googleapiclient.errors import HttpError
-    _report_progress(progress_callback, 2, "连接 Google Drive", "正在检查 Google OAuth 与主播素材权限…")
-    drive, _ = google_services(interactive=False)
-    if not drive:
-        raise RuntimeError("尚未连接 Google OAuth。请先点击“连接 Google”。")
+def _build_authorized_session(creds, pool_size=12):
+    from google.auth.transport.requests import AuthorizedSession
+    from requests.adapters import HTTPAdapter
+    session = AuthorizedSession(creds)
+    adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=2)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
-    account = google_account_info()
-    account_email = account.get("email") or "未知账号"
-    con = init_db()
-    g = con.execute("SELECT recipient,anchor_name,drive_folder_id,local_dir,talking_count,praying_count,status FROM groups_tbl WHERE group_key=?", (group_key,)).fetchone()
-    if not g:
-        con.close(); raise ValueError("找不到主播任务组")
-    recipient, anchor, folder_id, local_dir, talk_n, pray_n, previous_status = g
-    if not folder_id:
-        con.close(); raise ValueError(f"主播 {anchor} 的表格单元格未检测到有效 Google Drive 链接")
-    local_dir = Path(local_dir)
-    source_dir = local_dir / "素材"
-    source_dir.mkdir(parents=True, exist_ok=True)
-    log.info("开始同步Drive素材：%s / %s folder=%s OAuth账号=%s", recipient, anchor, folder_id, account_email)
-    _report_progress(progress_callback, 7, "检查主播素材", f"{recipient} · {anchor} · 正在验证 Drive 文件夹")
 
-    # 先用 OAuth 身份直接验证文件夹是否可见/可读，避免把权限问题误报成“0张图片”。
+def _is_path_under_dir(path_val, base_dir: Path) -> bool:
     try:
-        folder_meta = drive.files().get(
-            fileId=folder_id,
-            fields="id,name,mimeType,driveId,capabilities(canDownload),owners(emailAddress,displayName),shortcutDetails",
-            supportsAllDrives=True,
-        ).execute()
-        log.info("Drive文件夹验证成功：name=%s mime=%s driveId=%s canDownload=%s canListChildren=%s",
-                 folder_meta.get("name"), folder_meta.get("mimeType"), folder_meta.get("driveId"),
-                 (folder_meta.get("capabilities") or {}).get("canDownload"),
-                 "n/a")
-        if folder_meta.get("mimeType") == "application/vnd.google-apps.shortcut":
-            sd = folder_meta.get("shortcutDetails") or {}
-            if sd.get("targetMimeType") == "application/vnd.google-apps.folder" and sd.get("targetId"):
-                log.info("主播链接是Drive文件夹快捷方式，自动解析 targetId=%s", sd.get("targetId"))
-                folder_id = sd.get("targetId")
-                folder_meta = drive.files().get(fileId=folder_id, fields="id,name,mimeType,driveId", supportsAllDrives=True).execute()
-        if folder_meta.get("mimeType") != "application/vnd.google-apps.folder":
-            raise ValueError("主播图片链接指向的不是 Google Drive 文件夹。")
-    except HttpError as e:
-        status, reason = _google_http_reason(e)
-        con.close()
-        if status == 401:
-            raise PermissionError(f"Google OAuth 登录已失效（401）。当前连接账号：{account_email}。请点击‘切换Google账号’重新授权。") from e
-        if status == 403:
-            raise PermissionError(f"Google Drive 权限不足（403）。当前连接账号：{account_email}。请确认这个邮箱拥有该主播文件夹的读取权限，或点击‘切换Google账号’。Google返回：{reason}") from e
-        if status == 404:
-            raise FileNotFoundError(f"Google Drive 文件夹不可见或不存在（404）。当前连接账号：{account_email}。如果文件夹只共享给指定邮箱，请切换到那个邮箱。") from e
-        if status == 429:
-            raise RuntimeError("Google Drive 请求过于频繁（429），请稍后重试。") from e
-        raise
+        p = Path(str(path_val or "")).expanduser().resolve()
+        b = base_dir.expanduser().resolve()
+        return p == b or b in p.parents
+    except Exception:
+        return False
 
-    _report_progress(progress_callback, 12, "读取主播素材", f"{recipient} · {anchor} · 正在列出 Drive 图片")
+
+def _verify_group_local_ready(con, group_key, status):
+    """Return True if all tasks and local assets for a READY_FOR_GPT or NEEDS_MANUAL_CLASSIFY group exist inside the group's current local_dir."""
+    if status not in ("READY_FOR_GPT", "NEEDS_MANUAL_CLASSIFY"):
+        return False
+    g_row = con.execute("SELECT local_dir, image_count FROM groups_tbl WHERE group_key=?", (group_key,)).fetchone()
+    if not g_row or not g_row[0]:
+        return False
+    base_dir = Path(str(g_row[0])).expanduser()
+    if not base_dir.is_dir():
+        return False
+    expected_img_count = int(g_row[1] or 0)
+    asset_rows = con.execute("SELECT local_path FROM assets WHERE group_key=?", (group_key,)).fetchall()
+    valid_assets = [
+        r[0] for r in asset_rows
+        if r[0] and _is_path_under_dir(r[0], base_dir) and is_valid_local_image(Path(str(r[0])).expanduser())
+    ]
+    if not valid_assets or (expected_img_count > 0 and len(valid_assets) < expected_img_count):
+        return False
+    task_rows = con.execute("SELECT status, matched_asset_path FROM tasks WHERE group_key=? AND sheet_row>0", (group_key,)).fetchall()
+    if not task_rows:
+        return False
+    if status == "READY_FOR_GPT":
+        for t_status, matched_path in task_rows:
+            if str(t_status or "") != "READY_FOR_GPT" or not matched_path:
+                return False
+            if not _is_path_under_dir(matched_path, base_dir):
+                return False
+            if not is_valid_local_image(Path(str(matched_path)).expanduser()):
+                return False
+    return True
+
+
+def _fetch_drive_folder_images_via_session(session, folder_id, recipient, anchor, account_email):
+    """Thread-safe REST verification & image listing for a Google Drive folder using AuthorizedSession."""
+    base_url = "https://www.googleapis.com/drive/v3/files"
+    meta_resp = session.get(
+        f"{base_url}/{urllib.parse.quote(str(folder_id))}",
+        params={
+            "fields": "id,name,mimeType,driveId,capabilities(canDownload),owners(emailAddress,displayName),shortcutDetails",
+            "supportsAllDrives": "true",
+        },
+        timeout=(10, 30),
+    )
+    if meta_resp.status_code != 200:
+        status = meta_resp.status_code
+        try:
+            reason = meta_resp.json().get("error", {}).get("message", "") or meta_resp.text
+        except Exception:
+            reason = meta_resp.text
+        if status == 401:
+            raise PermissionError(f"Google OAuth 登录已失效（401）。当前连接账号：{account_email}。请点击‘切换Google账号’重新授权。")
+        if status == 403:
+            raise PermissionError(f"Google Drive 权限不足（403）。当前连接账号：{account_email}。请确认这个邮箱拥有该主播文件夹的读取权限，或点击‘切换Google账号’。Google返回：{reason}")
+        if status == 404:
+            raise FileNotFoundError(f"Google Drive 文件夹不可见或不存在（404）。当前连接账号：{account_email}。如果文件夹只共享给指定邮箱，请切换到那个邮箱。")
+        if status == 429:
+            raise RuntimeError("Google Drive 请求过于频繁（429），请稍后重试。")
+        raise RuntimeError(f"验证 Google Drive 文件夹失败（HTTP {status}）：{reason}")
+
+    folder_meta = meta_resp.json()
+    if folder_meta.get("mimeType") == "application/vnd.google-apps.shortcut":
+        sd = folder_meta.get("shortcutDetails") or {}
+        if sd.get("targetMimeType") == "application/vnd.google-apps.folder" and sd.get("targetId"):
+            folder_id = sd.get("targetId")
+            meta_resp2 = session.get(
+                f"{base_url}/{urllib.parse.quote(str(folder_id))}",
+                params={"fields": "id,name,mimeType,driveId", "supportsAllDrives": "true"},
+                timeout=(10, 30),
+            )
+            if meta_resp2.status_code == 200:
+                folder_meta = meta_resp2.json()
+    if folder_meta.get("mimeType") != "application/vnd.google-apps.folder":
+        raise ValueError("主播图片链接指向的不是 Google Drive 文件夹。")
+
     files = []
     page_token = None
-    try:
-        while True:
-            resp = drive.files().list(
-                q=f"'{folder_id}' in parents and trashed=false",
-                fields="nextPageToken,files(id,name,mimeType,size,modifiedTime,md5Checksum,shortcutDetails)",
-                pageSize=1000,
-                pageToken=page_token,
-                orderBy="name",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
-            ).execute()
-            files.extend(resp.get("files", []))
-            page_token = resp.get("nextPageToken")
-            if not page_token:
-                break
-    except HttpError as e:
-        status, reason = _google_http_reason(e)
-        con.close()
-        if status in (401,403,404):
-            raise PermissionError(f"无法列出主播文件夹内容（HTTP {status}）。当前OAuth账号：{account_email}。Google返回：{reason}") from e
-        raise
+    while True:
+        params = {
+            "q": f"'{folder_id}' in parents and trashed=false",
+            "fields": "nextPageToken,files(id,name,mimeType,size,modifiedTime,md5Checksum,shortcutDetails)",
+            "pageSize": 1000,
+            "orderBy": "name",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        list_resp = session.get(base_url, params=params, timeout=(10, 30))
+        if list_resp.status_code != 200:
+            status = list_resp.status_code
+            try:
+                reason = list_resp.json().get("error", {}).get("message", "") or list_resp.text
+            except Exception:
+                reason = list_resp.text
+            if status in (401, 403, 404):
+                raise PermissionError(f"无法列出主播文件夹内容（HTTP {status}）。当前OAuth账号：{account_email}。Google返回：{reason}")
+            raise RuntimeError(f"列出主播文件夹失败（HTTP {status}）：{reason}")
+        payload = list_resp.json()
+        files.extend(payload.get("files", []))
+        page_token = payload.get("nextPageToken")
+        if not page_token:
+            break
 
-    # 支持 Drive 快捷方式：快捷方式指向图片时，下载真实 targetId。
     normalized = []
     for f in files:
         if f.get("mimeType") == "application/vnd.google-apps.shortcut":
@@ -834,69 +1025,323 @@ def download_drive_group(group_key, progress_callback=None):
                 normalized.append(nf)
             continue
         if f.get("mimeType") in IMAGE_MIMES or str(f.get("mimeType", "")).startswith("image/"):
-            nf = dict(f); nf["download_id"] = f.get("id"); normalized.append(nf)
+            nf = dict(f)
+            nf["download_id"] = f.get("id")
+            normalized.append(nf)
     image_files = sorted(
         (x for x in normalized if not is_ignored_system_path(Path(str(x.get("name") or "")))),
         key=lambda x: (x.get("name", "").lower(), x.get("id", ""))
     )
+    return {"folder_meta": folder_meta, "files": files, "image_files": image_files}
+
+
+def _download_single_image_streaming(session, download_id, dest: Path, name: str, account_email: str, on_chunk=None):
+    """Download a single Drive image in one continuous HTTP stream while computing SHA-256 on the fly."""
+    url = f"https://www.googleapis.com/drive/v3/files/{urllib.parse.quote(str(download_id))}"
+    params = {"alt": "media", "supportsAllDrives": "true"}
+    temp_dest = dest.with_name(f".{dest.name}.{threading.get_ident()}.part")
+    last_err = None
+    for attempt in range(3):
+        try:
+            with session.get(url, params=params, stream=True, timeout=(10, 60)) as resp:
+                if resp.status_code != 200:
+                    status = resp.status_code
+                    try:
+                        reason = resp.json().get("error", {}).get("message", "") or resp.text[:200]
+                    except Exception:
+                        reason = resp.text[:200]
+                    if status == 403 and attempt < 2 and any(
+                        k in str(reason).lower() for k in ("ratelimit", "rate limit", "userratelimitexceeded", "quota")
+                    ):
+                        time.sleep(1.0 * (attempt + 1))
+                        continue
+                    if status in (401, 403, 404):
+                        raise PermissionError(f"下载图片失败：{name}（HTTP {status}）。当前OAuth账号：{account_email}。Google返回：{reason}")
+                    if status in (429, 500, 502, 503, 504) and attempt < 2:
+                        time.sleep(0.4 * (attempt + 1))
+                        continue
+                    raise RuntimeError(f"下载图片失败：{name}（HTTP {status}）：{reason}")
+                h = hashlib.sha256()
+                with open(temp_dest, "wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=262144):
+                        if not chunk:
+                            continue
+                        fh.write(chunk)
+                        h.update(chunk)
+                        if on_chunk is not None:
+                            on_chunk(len(chunk))
+                temp_dest.replace(dest)
+                return h.hexdigest()
+        except PermissionError:
+            if temp_dest.exists():
+                try: temp_dest.unlink()
+                except Exception: pass
+            raise
+        except Exception as exc:
+            last_err = exc
+            if temp_dest.exists():
+                try: temp_dest.unlink()
+                except Exception: pass
+            if attempt < 2:
+                time.sleep(0.4 * (attempt + 1))
+            else:
+                raise last_err
+
+
+@close_google_resources
+def download_drive_group(group_key, progress_callback=None, prefetched=None, session=None):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from googleapiclient.errors import HttpError
+    _report_progress(progress_callback, 2, "连接 Google Drive", "正在检查 Google OAuth 与主播素材权限…")
+    creds = google_creds(interactive=False)
+    drive = None
+    if prefetched is None and session is None:
+        drive, _ = google_services(interactive=False)
+        if not drive and not creds:
+            raise RuntimeError("尚未连接 Google OAuth。请先点击“连接 Google”。")
+    elif not creds:
+        drive, _ = google_services(interactive=False)
+        if not drive:
+            raise RuntimeError("尚未连接 Google OAuth。请先点击“连接 Google”。")
+
+    account = google_account_info(use_cache=True)
+    account_email = account.get("email") or "未知账号"
+    con = init_db()
+    g = con.execute("SELECT recipient,anchor_name,drive_folder_id,local_dir,talking_count,praying_count,status FROM groups_tbl WHERE group_key=?", (group_key,)).fetchone()
+    if not g:
+        con.close(); raise ValueError("找不到主播任务组")
+    recipient, anchor, folder_id, local_dir, talk_n, pray_n, previous_status = g
+    if not folder_id:
+        con.close(); raise ValueError(f"主播 {anchor} 的表格单元格未检测到有效 Google Drive 链接")
+    local_dir = Path(local_dir)
+    source_dir = local_dir / "素材"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    log.info("开始同步Drive素材：%s / %s folder=%s OAuth账号=%s", recipient, anchor, folder_id, account_email)
+
+    if prefetched is not None:
+        folder_meta = prefetched["folder_meta"]
+        files = prefetched["files"]
+        image_files = prefetched["image_files"]
+    else:
+        _report_progress(progress_callback, 7, "检查主播素材", f"{recipient} · {anchor} · 正在验证 Drive 文件夹")
+        # 先用 OAuth 身份直接验证文件夹是否可见/可读，避免把权限问题误报成“0张图片”。
+        try:
+            folder_meta = drive.files().get(
+                fileId=folder_id,
+                fields="id,name,mimeType,driveId,capabilities(canDownload),owners(emailAddress,displayName),shortcutDetails",
+                supportsAllDrives=True,
+            ).execute()
+            log.info("Drive文件夹验证成功：name=%s mime=%s driveId=%s canDownload=%s canListChildren=%s",
+                     folder_meta.get("name"), folder_meta.get("mimeType"), folder_meta.get("driveId"),
+                     (folder_meta.get("capabilities") or {}).get("canDownload"),
+                     "n/a")
+            if folder_meta.get("mimeType") == "application/vnd.google-apps.shortcut":
+                sd = folder_meta.get("shortcutDetails") or {}
+                if sd.get("targetMimeType") == "application/vnd.google-apps.folder" and sd.get("targetId"):
+                    log.info("主播链接是Drive文件夹快捷方式，自动解析 targetId=%s", sd.get("targetId"))
+                    folder_id = sd.get("targetId")
+                    folder_meta = drive.files().get(fileId=folder_id, fields="id,name,mimeType,driveId", supportsAllDrives=True).execute()
+            if folder_meta.get("mimeType") != "application/vnd.google-apps.folder":
+                raise ValueError("主播图片链接指向的不是 Google Drive 文件夹。")
+        except HttpError as e:
+            status, reason = _google_http_reason(e)
+            con.close()
+            if status == 401:
+                raise PermissionError(f"Google OAuth 登录已失效（401）。当前连接账号：{account_email}。请点击‘切换Google账号’重新授权。") from e
+            if status == 403:
+                raise PermissionError(f"Google Drive 权限不足（403）。当前连接账号：{account_email}。请确认这个邮箱拥有该主播文件夹的读取权限，或点击‘切换Google账号’。Google返回：{reason}") from e
+            if status == 404:
+                raise FileNotFoundError(f"Google Drive 文件夹不可见或不存在（404）。当前连接账号：{account_email}。如果文件夹只共享给指定邮箱，请切换到那个邮箱。") from e
+            if status == 429:
+                raise RuntimeError("Google Drive 请求过于频繁（429），请稍后重试。") from e
+            raise
+
+        _report_progress(progress_callback, 12, "读取主播素材", f"{recipient} · {anchor} · 正在列出 Drive 图片")
+        files = []
+        page_token = None
+        try:
+            while True:
+                resp = drive.files().list(
+                    q=f"'{folder_id}' in parents and trashed=false",
+                    fields="nextPageToken,files(id,name,mimeType,size,modifiedTime,md5Checksum,shortcutDetails)",
+                    pageSize=1000,
+                    pageToken=page_token,
+                    orderBy="name",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                ).execute()
+                files.extend(resp.get("files", []))
+                page_token = resp.get("nextPageToken")
+                if not page_token:
+                    break
+        except HttpError as e:
+            status, reason = _google_http_reason(e)
+            con.close()
+            if status in (401,403,404):
+                raise PermissionError(f"无法列出主播文件夹内容（HTTP {status}）。当前OAuth账号：{account_email}。Google返回：{reason}") from e
+            raise
+
+        # 支持 Drive 快捷方式：快捷方式指向图片时，下载真实 targetId。
+        normalized = []
+        for f in files:
+            if f.get("mimeType") == "application/vnd.google-apps.shortcut":
+                sd = f.get("shortcutDetails") or {}
+                target_id = sd.get("targetId")
+                target_mime = sd.get("targetMimeType")
+                if target_id and (target_mime in IMAGE_MIMES or str(target_mime or "").startswith("image/")):
+                    nf = dict(f)
+                    nf["download_id"] = target_id
+                    nf["mimeType"] = target_mime
+                    normalized.append(nf)
+                continue
+            if f.get("mimeType") in IMAGE_MIMES or str(f.get("mimeType", "")).startswith("image/"):
+                nf = dict(f); nf["download_id"] = f.get("id"); normalized.append(nf)
+        image_files = sorted(
+            (x for x in normalized if not is_ignored_system_path(Path(str(x.get("name") or "")))),
+            key=lambda x: (x.get("name", "").lower(), x.get("id", ""))
+        )
+
     log.info("Drive文件=%d，图片=%d，OAuth账号=%s", len(files), len(image_files), account_email)
     _report_progress(progress_callback, 18, "准备下载素材", f"{recipient} · {anchor} · 共 {len(image_files)} 张图片")
 
     remote_ids = {str(x.get("id") or "") for x in image_files if x.get("id")}
-    existing_rows = con.execute("SELECT drive_file_id,local_path FROM assets WHERE group_key=?", (group_key,)).fetchall()
-    existing_ids = {str(x[0] or "") for x in existing_rows
-                    if x[0] and is_valid_local_image(Path(str(x[1] or "")).expanduser())}
-    if str(previous_status or "") == "READY_FOR_GPT" and remote_ids == existing_ids:
+    existing_rows = con.execute("SELECT drive_file_id,local_path,sha256 FROM assets WHERE group_key=?", (group_key,)).fetchall()
+    existing_valid = {
+        str(x[0]): (str(x[1]), str(x[2] or ""))
+        for x in existing_rows
+        if x[0] and _is_path_under_dir(x[1], local_dir) and is_valid_local_image(Path(str(x[1] or "")).expanduser())
+    }
+    existing_ids = set(existing_valid.keys())
+    if str(previous_status or "") == "READY_FOR_GPT" and remote_ids == existing_ids and _verify_group_local_ready(con, group_key, "READY_FOR_GPT"):
+        msg_row = con.execute("SELECT message FROM groups_tbl WHERE group_key=?", (group_key,)).fetchone()
         con.close()
         log.info("主播素材未变化且已 READY，跳过重新分类：%s / %s", recipient, anchor)
         _report_progress(progress_callback, 100, "主播素材已同步", f"{recipient} · {anchor} · 素材未变化，已沿用现有匹配")
-        return {**reconcile_group(group_key), "unchanged": True}
+        return {
+            "status": "READY_FOR_GPT",
+            "message": (msg_row[0] if msg_row and msg_row[0] else "素材未变化，已沿用现有匹配"),
+            "missing": 0,
+            "unchanged": True,
+        }
 
-    from googleapiclient.http import MediaIoBaseDownload
     total_images = max(1, len(image_files))
+    to_download = []
+    reserved_paths = {Path(v[0]).resolve() for v in existing_valid.values() if v[0]}
+    skipped_count = 0
+
     for idx, fmeta in enumerate(image_files, 1):
         fid = fmeta["id"]
         download_id = fmeta.get("download_id") or fid
         name = safe_name(fmeta.get("name") or f"image_{idx}", f"image_{idx}")
-        dest = source_dir / name
-        existing = con.execute("SELECT local_path,sha256 FROM assets WHERE group_key=? AND drive_file_id=?", (group_key, fid)).fetchone()
-        file_start = 20 + int(((idx - 1) / total_images) * 68)
-        file_end = 20 + int((idx / total_images) * 68)
-        _report_progress(progress_callback, file_start, "同步主播素材", f"{recipient} · {anchor} · 图片 {idx}/{len(image_files)}：{name}")
-        if existing and is_valid_local_image(Path(existing[0]).expanduser()):
-            log.info("[%d/%d] 已下载，跳过：%s", idx, len(image_files), name)
-            _report_progress(progress_callback, file_end, "同步主播素材", f"{recipient} · {anchor} · 图片 {idx}/{len(image_files)} 已存在，跳过下载")
+        if fid in existing_valid:
+            skipped_count += 1
             continue
-        if dest.exists():
+        dest = source_dir / name
+        if dest.exists() or dest.resolve() in reserved_paths:
             dest = source_dir / f"{Path(name).stem}__{fid[:8]}{Path(name).suffix}"
-        try:
-            request = drive.files().get_media(fileId=download_id, supportsAllDrives=True)
-            with open(dest, "wb") as fh:
-                dl = MediaIoBaseDownload(fh, request, chunksize=1024 * 1024)
-                done = False
-                while not done:
-                    status_obj, done = dl.next_chunk()
-                    if status_obj:
-                        chunk_pct = float(status_obj.progress() or 0.0)
-                        log.info("[%d/%d] 下载 %s %.0f%%", idx, len(image_files), name, chunk_pct * 100)
-                        overall = file_start + int((file_end - file_start) * chunk_pct)
-                        _report_progress(progress_callback, overall, "下载主播素材", f"{recipient} · {anchor} · 图片 {idx}/{len(image_files)}：{name} · {int(chunk_pct*100)}%")
-        except HttpError as e:
-            if dest.exists():
-                try: dest.unlink()
-                except Exception: pass
-            status, reason = _google_http_reason(e)
-            con.close()
-            if status in (401,403,404):
-                raise PermissionError(f"下载图片失败：{name}（HTTP {status}）。当前OAuth账号：{account_email}。Google返回：{reason}") from e
-            raise
-        digest = sha256_file(dest)
-        con.execute(
-            """INSERT INTO assets(group_key,drive_file_id,original_name,local_path,sha256,mode,used)
-               VALUES(?,?,?,?,?,'UNCLASSIFIED',0)
-               ON CONFLICT(group_key,drive_file_id) DO UPDATE SET original_name=excluded.original_name,local_path=excluded.local_path,sha256=excluded.sha256""",
-            (group_key, fid, fmeta.get("name", ""), str(dest), digest),
-        )
+        reserved_paths.add(dest.resolve())
+        to_download.append((idx, fmeta, fid, download_id, name, dest))
+
+    if skipped_count and not to_download:
+        log.info("全部 %d 张图片已存在本地，跳过重复下载：%s / %s", skipped_count, recipient, anchor)
+        _report_progress(progress_callback, 88, "同步主播素材", f"{recipient} · {anchor} · 全部 {skipped_count} 张图片已存在本地")
+    elif to_download:
+        if creds is not None:
+            own_session = session is None
+            dl_session = session or _build_authorized_session(creds, pool_size=12)
+            try:
+                workers = min(8, len(to_download))
+                log.info("启用 %d 线程并发下载 %d 张新图片（已存在跳过 %d 张）：%s / %s",
+                         workers, len(to_download), skipped_count, recipient, anchor)
+                _report_progress(
+                    progress_callback, 22, "并发下载主播素材",
+                    f"{recipient} · {anchor} · 正在 {workers} 线程并发下载 {len(to_download)} 张图片…"
+                )
+                prog_lock = threading.Lock()
+                completed_count = [skipped_count]
+                downloaded_records = []
+
+                def _task_runner(item):
+                    idx, fmeta, fid, download_id, name, dest = item
+                    t0 = time.perf_counter()
+                    digest = _download_single_image_streaming(
+                        dl_session, download_id, dest, name, account_email
+                    )
+                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                    with prog_lock:
+                        completed_count[0] += 1
+                        done_n = completed_count[0]
+                        pct = 20 + int((done_n / total_images) * 68)
+                    log.info("[并发下载 %d/%d] %s 完成 (%.0f ms)", done_n, len(image_files), name, elapsed_ms)
+                    _report_progress(
+                        progress_callback, pct, "并发下载主播素材",
+                        f"{recipient} · {anchor} · 已完成 {done_n}/{len(image_files)} 张：{name}"
+                    )
+                    return (group_key, fid, fmeta.get("name", ""), str(dest), digest)
+
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(_task_runner, item) for item in to_download]
+                    first_error = None
+                    for fut in as_completed(futures):
+                        try:
+                            downloaded_records.append(fut.result())
+                        except Exception as exc:  # keep the images that did finish
+                            if first_error is None:
+                                first_error = exc
+                            log.warning("图片下载失败（其余图片继续）：%s / %s：%s", recipient, anchor, exc)
+
+                if downloaded_records:
+                    con.executemany(
+                        """INSERT INTO assets(group_key,drive_file_id,original_name,local_path,sha256,mode,used)
+                           VALUES(?,?,?,?,?,'UNCLASSIFIED',0)
+                           ON CONFLICT(group_key,drive_file_id) DO UPDATE SET original_name=excluded.original_name,local_path=excluded.local_path,sha256=excluded.sha256""",
+                        downloaded_records,
+                    )
+                    con.commit()
+                if first_error is not None:
+                    failed_n = len(to_download) - len(downloaded_records)
+                    con.close()
+                    raise RuntimeError(
+                        f"{recipient} · {anchor}：{failed_n}/{len(to_download)} 张图片下载失败（已下载的 {len(downloaded_records)} 张已保存，"
+                        f"再次点击同步只会补下失败的图片）。原因：{first_error}"
+                    ) from first_error
+            finally:
+                if own_session and dl_session is not None:
+                    try: dl_session.close()
+                    except Exception: pass
+        else:
+            from googleapiclient.http import MediaIoBaseDownload
+            for idx, fmeta, fid, download_id, name, dest in to_download:
+                file_start = 20 + int(((idx - 1) / total_images) * 68)
+                file_end = 20 + int((idx / total_images) * 68)
+                _report_progress(progress_callback, file_start, "同步主播素材", f"{recipient} · {anchor} · 图片 {idx}/{len(image_files)}：{name}")
+                try:
+                    request = drive.files().get_media(fileId=download_id, supportsAllDrives=True)
+                    with open(dest, "wb") as fh:
+                        dl = MediaIoBaseDownload(fh, request, chunksize=4 * 1024 * 1024)
+                        done = False
+                        while not done:
+                            status_obj, done = dl.next_chunk()
+                            if status_obj:
+                                chunk_pct = float(status_obj.progress() or 0.0)
+                                overall = file_start + int((file_end - file_start) * chunk_pct)
+                                _report_progress(progress_callback, overall, "下载主播素材", f"{recipient} · {anchor} · 图片 {idx}/{len(image_files)}：{name} · {int(chunk_pct*100)}%")
+                except HttpError as e:
+                    if dest.exists():
+                        try: dest.unlink()
+                        except Exception: pass
+                    status, reason = _google_http_reason(e)
+                    con.close()
+                    if status in (401,403,404):
+                        raise PermissionError(f"下载图片失败：{name}（HTTP {status}）。当前OAuth账号：{account_email}。Google返回：{reason}") from e
+                    raise
+                digest = sha256_file(dest)
+                con.execute(
+                    """INSERT INTO assets(group_key,drive_file_id,original_name,local_path,sha256,mode,used)
+                       VALUES(?,?,?,?,?,'UNCLASSIFIED',0)
+                       ON CONFLICT(group_key,drive_file_id) DO UPDATE SET original_name=excluded.original_name,local_path=excluded.local_path,sha256=excluded.sha256""",
+                    (group_key, fid, fmeta.get("name", ""), str(dest), digest),
+                )
     con.execute("UPDATE groups_tbl SET image_count=?,status='ASSETS_DOWNLOADED',message=?,updated_at=? WHERE group_key=?",
                 (len(image_files), f"已下载 {len(image_files)} 张图片", datetime.now().isoformat(timespec="seconds"), group_key))
     con.commit(); con.close()
@@ -921,19 +1366,28 @@ def reconcile_group(group_key, auto_only=False, selected_closed=None):
     from app.services.material_assignment import image_mode, assign, reference_tasks, manual_modes
     con = init_db()
     try:
-        g = con.execute('SELECT talking_count,praying_count FROM groups_tbl WHERE group_key=?', (group_key,)).fetchone()
+        g = con.execute('SELECT talking_count,praying_count,local_dir FROM groups_tbl WHERE group_key=?', (group_key,)).fetchone()
         if not g: raise ValueError('找不到任务组')
+        base_dir = Path(str(g[2] or '')).expanduser() if g[2] else None
         tasks = [dict(id=r[0], mode=r[1], asset=r[2]) for r in con.execute(
             'SELECT id,mode,matched_asset_path FROM tasks WHERE group_key=? AND sheet_row>0 ORDER BY sheet_row', (group_key,))]
         rows = con.execute('SELECT id,local_path,mode FROM assets WHERE group_key=? ORDER BY lower(original_name),id', (group_key,)).fetchall()
-        rows = [r for r in rows if is_valid_local_image(Path(str(r[1] or '')).expanduser())]
+        rows = [
+            r for r in rows
+            if is_valid_local_image(Path(str(r[1] or '')).expanduser())
+            and (base_dir is None or _is_path_under_dir(r[1], base_dir))
+        ]
         default = 'TALKING'
         manual = manual_modes(con)
         closed = {str(Path(p).resolve()) for p in selected_closed or []}
         files = [Path(r[1]).expanduser().resolve() for r in rows]
         modes = {p:('PRAYING' if str(p) in closed else image_mode(p,r[2],default,manual)) for p,r in zip(files,rows)}
         references = reference_tasks(tasks, modes)
-        previous = {t['id']:Path(t['asset']).expanduser().resolve() for t in tasks if t['asset']}
+        previous = {
+            t['id']: Path(t['asset']).expanduser().resolve()
+            for t in tasks
+            if t['asset'] and (base_dir is None or _is_path_under_dir(t['asset'], base_dir))
+        }
         assigned = assign(references, files, modes, previous)
         missing = len(tasks)-len(assigned)
         status = 'MATERIAL_SHORTAGE' if missing else 'READY_FOR_GPT'
@@ -1048,25 +1502,83 @@ def _report_progress(callback, percent, stage, detail=""):
         log.exception("同步进度回调失败")
 
 
+def _format_row_cells(row_numbers, col_ltr=""):
+    nums = sorted({int(r) for r in row_numbers if r is not None})
+    if not nums:
+        return "未知行", ""
+    spans = []
+    start = prev = nums[0]
+    for n in nums[1:]:
+        if n == prev + 1:
+            prev = n
+        else:
+            spans.append((start, prev))
+            start = prev = n
+    spans.append((start, prev))
+    row_str = "第 " + "、".join(f"{s}" if s == e else f"{s}-{e}" for s, e in spans) + " 行"
+    if not col_ltr:
+        return row_str, ""
+    cell_str = ", ".join(f"{col_ltr}{s}" if s == e else f"{col_ltr}{s}:{col_ltr}{e}" for s, e in spans)
+    return row_str, cell_str
+
+
 def share_group_links(tasks):
     """One J-column folder per recipient/anchor group, never across groups."""
     from app.services.sheet_links import extract_sheet_url
+    col_map = {}
+    for task in tasks:
+        if isinstance(task.get("_col_map"), dict) and task["_col_map"]:
+            col_map = task["_col_map"]
+            break
+    anchor_col = col_map.get("主播名称", "O")
+    rec_col = col_map.get("需求人员", "D")
+    fx_col = col_map.get("外文内容", "H")
+    link_col = col_map.get("主播图片链接", "J")
+
+    missing_anchor_rows = [t.get("表格行号") for t in tasks if not str(t.get("主播名称") or "").strip()]
+    if missing_anchor_rows:
+        r_desc, c_desc = _format_row_cells(missing_anchor_rows, anchor_col)
+        raise ValueError(f"表格读取失败：{r_desc} {anchor_col} 列（单元格 {c_desc}，主播名称）为空，请补全后再同步")
+
+    if "需求人员" in col_map:
+        missing_rec_rows = [t.get("表格行号") for t in tasks if not str(t.get("需求人员") or "").strip()]
+        if missing_rec_rows:
+            r_desc, c_desc = _format_row_cells(missing_rec_rows, rec_col)
+            raise ValueError(f"表格读取失败：{r_desc} {rec_col} 列（单元格 {c_desc}，需求人员）为空，请补全后再同步")
+
+    missing_fx_rows = [t.get("表格行号") for t in tasks if not str(t.get("外文内容") or "").strip()]
+    if missing_fx_rows:
+        r_desc, c_desc = _format_row_cells(missing_fx_rows, fx_col)
+        raise ValueError(f"表格读取失败：{r_desc} {fx_col} 列（单元格 {c_desc}，外文内容）为空，请补全后再同步")
+
     groups = {}
     for task in tasks:
         groups.setdefault((task.get('需求人员','').strip(), task.get('主播名称','').strip()), []).append(task)
     for (recipient, anchor), members in groups.items():
         links = {}
+        link_cells = {}
         for task in members:
+            rno = task.get("表格行号", "?")
+            cell_ref = f"{link_col}{rno}"
             raw = str(task.get('主播图片链接') or '').strip()
             if not raw: continue
             url = extract_sheet_url(raw)
             if not url:
-                raise ValueError(f'{recipient} · {anchor}：J{task["表格行号"]} 无法读取链接；文字超链接请先连接 Google')
-            folder = parse_drive_folder_id(url)
-            if not folder: raise ValueError(f'{anchor}：J{task["表格行号"]} 不是有效素材文件夹链接')
+                raise ValueError(f'{recipient} · {anchor}（第 {rno} 行 {link_col} 列，单元格 {cell_ref}）：{cell_ref} 无法读取链接（当前内容：{raw[:30]}）；文字超链接请先连接 Google')
+            try:
+                folder = parse_drive_folder_id(url)
+            except ValueError:
+                folder = ""
+            if not folder:
+                raise ValueError(f'{recipient} · {anchor}（第 {rno} 行 {link_col} 列，单元格 {cell_ref}）：{cell_ref} 不是有效素材文件夹链接')
             links.setdefault(folder, url)
-        if not links: raise ValueError(f'{recipient} · {anchor}：任务组 J 列至少填写一个素材链接')
-        if len(links)>1: raise ValueError(f'{recipient} · {anchor}：任务组 J 列存在多个不同素材文件夹，请保留一个')
+            link_cells.setdefault(folder, []).append(cell_ref)
+        r_desc, c_desc = _format_row_cells([m.get("表格行号") for m in members], link_col)
+        if not links:
+            raise ValueError(f'{recipient} · {anchor}（{r_desc} {link_col} 列，单元格 {c_desc}）：任务组 {link_col} 列至少填写一个素材链接')
+        if len(links)>1:
+            conflict = " vs ".join("/".join(cells) for cells in link_cells.values())
+            raise ValueError(f'{recipient} · {anchor}（{r_desc} {link_col} 列，冲突单元格 {conflict}）：任务组 {link_col} 列存在多个不同素材文件夹，请保留一个')
         url = next(iter(links.values()))
         for task in members: task['主播图片链接'] = url
     return tasks
@@ -1095,16 +1607,18 @@ def confirm_named_materials(group_key, selected_closed=None):
         tasks=con.execute('SELECT id,mode FROM tasks WHERE group_key=? AND sheet_row>0 ORDER BY sheet_row',(group_key,)).fetchall()
         if any(t[1]=='PRAYING' for t in tasks) and not closed:raise ValueError('该主播有闭眼任务，请至少勾选一张闭眼图片')
         if not files:raise ValueError('没有可用图片')
-        # Recover renamed paths by original content hash, retaining Drive file identities.
+        # Recover renamed paths by original content hash only when any recorded path is missing.
         assets=con.execute('SELECT id,local_path,sha256 FROM assets WHERE group_key=?',(group_key,)).fetchall()
-        hashes={}
-        for path in files: hashes.setdefault(sha256_file(path),[]).append(path)
-        for aid,old,digest in assets:
-            if not Path(old).is_file() and digest in hashes:
-                new=hashes[digest].pop(0) if hashes[digest] else None
-                if new:
-                    con.execute('INSERT OR REPLACE INTO image_path_aliases(old_path,new_path) VALUES(?,?)',(str(Path(old).expanduser().absolute()),str(new.resolve())))
-                    con.execute('UPDATE assets SET local_path=? WHERE id=?',(str(new),aid))
+        missing_assets=[(aid,old,digest) for aid,old,digest in assets if not Path(old).is_file()]
+        if missing_assets:
+            hashes={}
+            for path in files: hashes.setdefault(sha256_file(path),[]).append(path)
+            for aid,old,digest in missing_assets:
+                if digest in hashes:
+                    new=hashes[digest].pop(0) if hashes[digest] else None
+                    if new:
+                        con.execute('INSERT OR REPLACE INTO image_path_aliases(old_path,new_path) VALUES(?,?)',(str(Path(old).expanduser().absolute()),str(new.resolve())))
+                        con.execute('UPDATE assets SET local_path=? WHERE id=?',(str(new),aid))
         indices={'PRAYING':0,'TALKING':0}
         for tid,mode in tasks:
             pool=closed if mode=='PRAYING' else (opened or closed)
@@ -1119,6 +1633,55 @@ def confirm_named_materials(group_key, selected_closed=None):
         con.execute("UPDATE groups_tbl SET status='READY_FOR_GPT',image_count=?,message=? WHERE group_key=?",(len(files),message,group_key))
         con.commit();return {'status':'READY_FOR_GPT','message':message}
     finally:con.close()
+
+
+def _preload_cached_task_styles(sid, gid, tasks):
+    """Attach cached _source_styles from SQLite for unchanged tasks so repeat syncs skip Sheets grid API calls."""
+    if not tasks:
+        return 0
+    con = init_db()
+    try:
+        rows = con.execute(
+            """SELECT t.sheet_row, t.content_key, t.requirement, s.payload
+                 FROM tasks t
+                 JOIN task_source_styles s ON s.task_id = t.id
+                WHERE t.spreadsheet_id=? AND t.gid=?""",
+            (str(sid), str(gid)),
+        ).fetchall()
+    finally:
+        con.close()
+    if not rows:
+        return 0
+    by_row_ck = {}
+    by_ck = {}
+    for s_row, ck, req, payload in rows:
+        if not payload:
+            continue
+        by_row_ck[(int(s_row), str(ck), str(req or ""))] = payload
+        by_ck.setdefault((str(ck), str(req or "")), payload)
+    hit = 0
+    for t in tasks:
+        ck = task_content_key(t.get("需求人员", ""), t.get("主播名称", ""), t.get("中文内容", ""), t.get("外文内容", ""))
+        req = str(t.get("需求说明") or "")
+        rno = int(t.get("表格行号") or 0)
+        raw_payload = by_row_ck.get((rno, ck, req)) or by_ck.get((ck, req))
+        if not raw_payload:
+            continue
+        try:
+            styles = json.loads(raw_payload)
+            base_mode = classify_requirement(req)
+            ok = True
+            for key in ("中文内容", "外文内容"):
+                if key in styles:
+                    if styles[key].get("text") != t.get(key, "") or styles[key].get("base_mode", base_mode) != base_mode:
+                        ok = False
+                        break
+            if ok and styles:
+                t["_source_styles"] = styles
+                hit += 1
+        except Exception:
+            continue
+    return hit
 
 
 @close_google_resources
@@ -1143,6 +1706,7 @@ def sync_sheet(progress_callback=None):
     from app.services.sheet_columns import MODE_CUSTOM, load_spec, resolve_columns
     from app.services.sheet_links import overlay_sheet_links
     spec = load_spec()
+    active_start, active_end = _find_active_row_bounds(rows)
     sheets = None
     title = ''
     try:
@@ -1151,13 +1715,22 @@ def sync_sheet(progress_callback=None):
         if spec.get('mode') == MODE_CUSTOM:
             image_column = resolve_columns(rows, spec).get('主播图片链接')
             link_columns = [] if image_column is None else [image_column]
-            rows = overlay_sheet_links(rows, -1, sheets, sid, title, link_columns=link_columns)
+            rows = overlay_sheet_links(
+                rows, -1, sheets, sid, title,
+                link_columns=link_columns, start_row=active_start, end_row=active_end
+            )
         else:
-            rows = overlay_sheet_links(rows, find_header(rows), sheets, sid, title)
+            rows = overlay_sheet_links(
+                rows, find_header(rows), sheets, sid, title,
+                start_row=active_start, end_row=active_end
+            )
     except Exception:
         log.exception('[SHEET_LINK_ERROR] 超链接元数据读取失败；保留原始 CSV，纯 URL 可继续使用')
         sheets = None
     parsed = parse_sheet_rows(rows, spec)
+    cached_hits = _preload_cached_task_styles(sid, gid, parsed['tasks'])
+    if cached_hits:
+        log.info("已复用本地缓存样式 %d/%d 条任务", cached_hits, len(parsed['tasks']))
     from app.services.sheet_style import enrich
     enrich(sheets, sid, title if sheets else '', parsed)
     share_group_links(parsed['tasks'])
@@ -1165,6 +1738,12 @@ def sync_sheet(progress_callback=None):
     log.info("表头=%d；批量制作中=%d；批量已完成=%d；有效任务=%d", parsed["header_row"], parsed["start_row"], parsed["end_row"], len(parsed["tasks"]))
     _report_progress(progress_callback, 28, "写入任务中心", f"正在同步 {len(parsed['tasks'])} 条任务到本地数据库…")
     imported, updated, unchanged, group_keys = import_tasks(parsed, sid, gid)
+    try:
+        from app.services import ai_watermark
+        ai_watermark.sync_host_sources_from_tasks(parsed.get("tasks") or [])
+    except Exception:
+        log.exception("同步主播素材来源到 AI 水印绑定失败")
+    changed_groups = list(parsed.get("_changed_groups") or [])
     _report_progress(progress_callback, 36, "回写 Google Sheet", f"新增 {imported} · 更新 {updated} · 已存在 {unchanged}")
     wb = writeback_claim(parsed, sid, gid)
     _report_progress(progress_callback, 42, "任务表同步完成", f"已回写 {wb.get('written',0)} 行，准备同步主播素材…")
@@ -1172,7 +1751,15 @@ def sync_sheet(progress_callback=None):
         studio_repo.record_sync_history(imported,updated,unchanged,'manual',{'start_row':parsed['start_row'],'end_row':parsed['end_row']})
     except Exception:
         pass
-    return {"parsed": parsed, "imported": imported, "updated": updated, "unchanged": unchanged, "groups": group_keys, "writeback": wb}
+    return {
+        "parsed": parsed,
+        "imported": imported,
+        "updated": updated,
+        "unchanged": unchanged,
+        "groups": group_keys,
+        "changed_groups": changed_groups,
+        "writeback": wb,
+    }
 
 
 def _view_hidden():
@@ -1208,7 +1795,10 @@ def _source_task_key(spreadsheet_id: str, gid: str, content_key: str='') -> str:
     return f"sheet:{spreadsheet_id}:{gid}:{content_key}" if content_key else f"sheet:{spreadsheet_id}:{gid}"
 
 
-def promote_ready_to_studio(task_ids=None) -> dict:
+_PROMOTED_SYNCED_VIDEOS = set()
+
+
+def promote_ready_to_studio(task_ids=None, group_key=None) -> dict:
     """Copy READY_FOR_GPT intake tasks into the main Flow Studio project database.
 
     Idempotent by durable intake task ID with legacy source-link recovery.
@@ -1217,35 +1807,85 @@ def promote_ready_to_studio(task_ids=None) -> dict:
     con = init_db()
     try:
         con.execute("BEGIN IMMEDIATE")
-        rows = con.execute(
-            """SELECT id,spreadsheet_id,gid,sheet_row,recipient,anchor_name,chinese_text,foreign_text,
-                      mode,drive_url,matched_asset_path,status,content_key,created_at,sheet_date
-                 FROM tasks WHERE status='READY_FOR_GPT' AND sheet_row>0 ORDER BY recipient,anchor_name,sheet_row"""
-        ).fetchall()
+        if group_key:
+            rows = con.execute(
+                """SELECT id,spreadsheet_id,gid,sheet_row,recipient,anchor_name,chinese_text,foreign_text,
+                          mode,drive_url,matched_asset_path,status,content_key,created_at,sheet_date
+                     FROM tasks WHERE status='READY_FOR_GPT' AND sheet_row>0 AND group_key=?
+                    ORDER BY recipient,anchor_name,sheet_row""",
+                (group_key,),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                """SELECT id,spreadsheet_id,gid,sheet_row,recipient,anchor_name,chinese_text,foreign_text,
+                          mode,drive_url,matched_asset_path,status,content_key,created_at,sheet_date
+                     FROM tasks WHERE status='READY_FOR_GPT' AND sheet_row>0 ORDER BY recipient,anchor_name,sheet_row"""
+            ).fetchall()
         if task_ids is not None:
             selected_ids = {int(tid) for tid in task_ids}
             rows = [row for row in rows if row[0] in selected_ids]
+        if not rows:
+            con.commit()
+            return {"created": 0, "updated": 0, "skipped": 0}
         created = updated = skipped = 0
-        today = datetime.now().strftime("%Y%m%d")
         fixed_code = studio_repo.get_setting("default_code", "ZB") or "ZB"
         creator = studio_repo.default_creator()
+        try:
+            max_chars = int(studio_repo.get_setting("default_wrap", "0") or 0)
+        except (TypeError, ValueError):
+            max_chars = 0
+
+        existing_links = dict(con.execute("SELECT task_id, video_id FROM production_links").fetchall())
+        existing_styles = dict(con.execute("SELECT task_id, payload FROM task_source_styles").fetchall())
+        first_group_sources = {}
+        for gk_row, ms_row in con.execute(
+            "SELECT group_key, COALESCE(material_source, '') FROM tasks WHERE sheet_row>0 ORDER BY sheet_row"
+        ).fetchall():
+            if gk_row and gk_row not in first_group_sources:
+                first_group_sources[str(gk_row)] = str(ms_row or "").strip()
+        bound_watermark_hids = set()
+        with studio_connect() as scon:
+            existing_videos = {
+                int(vr[0]): (str(vr[1] or ""), str(vr[2] or ""), int(vr[3] or 0))
+                for vr in scon.execute("SELECT id, original_script, performance_mode, host_id FROM videos").fetchall()
+            }
+
         for r in rows:
             task_id, sid, gid, sheet_row, recipient, anchor, chinese, foreign, mode, drive_url, asset_path, status, content_key, created_at, sheet_date = r
+            gkey_cur = make_group_key(recipient, anchor)
             source_task_id = _source_task_key(sid, gid, content_key)
-            link = con.execute("SELECT video_id FROM production_links WHERE task_id=?", (task_id,)).fetchone()
-            with studio_connect() as scon:
-                old = {"video_id":link[0]} if link else scon.execute(
-                    "SELECT video_id FROM source_tasks WHERE source_task_id=? AND source_row=?",
-                    (source_task_id,str(sheet_row)),
-                ).fetchone()
-            if old and old['video_id']:
-                con.execute("INSERT OR IGNORE INTO production_links(task_id,video_id) VALUES(?,?)",(task_id,old['video_id']))
+            linked_vid = existing_links.get(task_id)
+            if not linked_vid:
+                with studio_connect() as scon:
+                    old_row = scon.execute(
+                        "SELECT video_id FROM source_tasks WHERE source_task_id=? AND source_row=?",
+                        (source_task_id, str(sheet_row)),
+                    ).fetchone()
+                if old_row and old_row[0]:
+                    linked_vid = int(old_row[0])
+                    con.execute("INSERT OR IGNORE INTO production_links(task_id,video_id) VALUES(?,?)", (task_id, linked_vid))
+                    existing_links[task_id] = linked_vid
+
+            raw_style = existing_styles.get(task_id, "")
+            style_sig = hashlib.sha1(raw_style.encode("utf-8")).hexdigest()[:12] if raw_style else ""
+            norm_mode = "PRAYING" if mode == "PRAYING" else "TALKING"
+            fast_sig = (linked_vid, content_key, norm_mode, str(asset_path or ""), style_sig, max_chars)
+
+            if linked_vid and linked_vid in existing_videos:
+                orig_script, cur_perf_mode, cur_hid = existing_videos[linked_vid]
+                if cur_hid and cur_hid not in bound_watermark_hids and gkey_cur in first_group_sources:
+                    bound_watermark_hids.add(cur_hid)
+                    try:
+                        from app.services import ai_watermark
+                        ai_watermark.bind_host_from_sheet_value(cur_hid, first_group_sources[gkey_cur])
+                    except Exception:
+                        log.exception("绑定主播素材来源失败")
+                if fast_sig in _PROMOTED_SYNCED_VIDEOS and cur_perf_mode == norm_mode:
+                    skipped += 1
+                    continue
+
             # Spoken-text preparation is deliberately inserted only here, between the immutable
             # source copy and the existing GPT/Flow production chain.
-            try:
-                max_chars = int(studio_repo.get_setting("default_wrap", "0") or 0)
-            except (TypeError, ValueError):
-                max_chars = 0
             prepared = prepare_swahili_speech(foreign or "", max_chars=max_chars or None)
             clean = prepared.spoken_text
             segments = list(prepared.segments) or ([clean] if clean.strip() else [])
@@ -1257,38 +1897,46 @@ def promote_ready_to_studio(task_ids=None) -> dict:
                 elif prepared.timing_status == "INTEGRITY_FAILED":
                     item["timing_status"] = "INTEGRITY_FAILED"
                 timing_meta.append(item)
-            style_row = con.execute('SELECT payload FROM task_source_styles WHERE task_id=?', (task_id,)).fetchone()
-            source_styles = json.loads(style_row[0]) if style_row else {}
+            source_styles = json.loads(raw_style) if raw_style else {}
             from app.services import eye_states
             eye_modes = []
             if source_styles.get('外文内容'):
                 segments, eye_modes, timing_meta, clean = eye_states.prepare(
                     source_styles['外文内容'], lambda text: prepare_swahili_speech(text, max_chars=max_chars or None), mode)
-            if old and old["video_id"]:
+            if linked_vid and linked_vid in existing_videos:
                 # Source changes remain in intake; production IDs, text, images and all
                 # downstream states are immutable to source synchronization.
-                with studio_connect() as scon:
-                    exists = scon.execute("SELECT id FROM videos WHERE id=?", (old["video_id"],)).fetchone()
-                if exists:
-                    if eye_modes:
-                        from app.services.sheet_style import load_video
-                        existing_style = load_video(old['video_id']).get('外文内容', {})
-                        with studio_connect() as check:
-                            original = check.execute('SELECT original_script FROM videos WHERE id=?', (old['video_id'],)).fetchone()
-                        if original and original[0] == foreign and not existing_style.get('local_override'):
-                            if studio_repo.sync_flow_segments(old['video_id'], segments, edit_unstarted=True, timing_meta=timing_meta):
-                                eye_states.save_modes(old['video_id'], segments, eye_modes)
-                    from app.services import selected_resubmission
-                    changed=selected_resubmission.refresh_classification(old["video_id"],mode,asset_path,created_at)
-                    if changed:updated += 1
-                    else:skipped += 1
-                    continue
+                orig_script, _, cur_hid = existing_videos[linked_vid]
+                if eye_modes:
+                    from app.services.sheet_style import load_video
+                    existing_style = load_video(linked_vid).get('外文内容', {})
+                    if orig_script == foreign and not existing_style.get('local_override'):
+                        if studio_repo.sync_flow_segments(linked_vid, segments, edit_unstarted=True, timing_meta=timing_meta):
+                            eye_states.save_modes(linked_vid, segments, eye_modes)
+                from app.services import selected_resubmission
+                changed = selected_resubmission.refresh_classification(linked_vid, mode, asset_path, created_at)
+                if changed:
+                    updated += 1
+                    existing_videos[linked_vid] = (orig_script, norm_mode, cur_hid)
+                else:
+                    skipped += 1
+                if len(_PROMOTED_SYNCED_VIDEOS) > 8192:
+                    _PROMOTED_SYNCED_VIDEOS.clear()
+                _PROMOTED_SYNCED_VIDEOS.add(fast_sig)
+                continue
             from app.core import work_dates
             from app.services.sheet_columns import task_work_day
             original_day=task_work_day(sheet_date, created_at)
             task_date=original_day.replace("-", "") if original_day else work_dates.LEGACY
             rid = studio_repo.find_or_create_recipient(recipient or "未命名接收人", fixed_code, creator, task_date)
             hid = studio_repo.find_or_create_host(rid, anchor or "未命名主播")
+            if hid and hid not in bound_watermark_hids and gkey_cur in first_group_sources:
+                bound_watermark_hids.add(int(hid))
+                try:
+                    from app.services import ai_watermark
+                    ai_watermark.bind_host_from_sheet_value(int(hid), first_group_sources[gkey_cur])
+                except Exception:
+                    log.exception("新建主播绑定素材来源失败")
             video_id = studio_repo.add_video_to_host(
                 hid, original_script=foreign or "", chinese=chinese or "",
                 source_task_id=source_task_id, source_row=str(sheet_row), drive_url=drive_url or ""
@@ -1298,15 +1946,17 @@ def promote_ready_to_studio(task_ids=None) -> dict:
                     """UPDATE videos SET image_path=?,asset_status='已准备',performance_mode=?,production_script=?,script=? WHERE id=?""",
                     (asset_path or "", mode or "TALKING", clean or foreign or "", clean or foreign or "", video_id),
                 )
-            style_row = con.execute('SELECT payload FROM task_source_styles WHERE task_id=?', (task_id,)).fetchone()
-            if style_row:
+            if source_styles:
                 from app.services.sheet_style import save_video
-                save_video(video_id, json.loads(style_row[0]))
+                save_video(video_id, source_styles)
             studio_repo.sync_flow_segments(video_id, segments, timing_meta=timing_meta)
             if eye_modes:
                 eye_states.save_modes(video_id, segments, eye_modes)
             studio_repo.mark_source_task(source_task_id, str(sheet_row), video_id, "已导入")
             con.execute("INSERT INTO production_links(task_id,video_id) VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET video_id=excluded.video_id", (task_id,video_id))
+            existing_links[task_id] = video_id
+            existing_videos[int(video_id)] = (foreign or "", norm_mode, int(hid))
+            _PROMOTED_SYNCED_VIDEOS.add((int(video_id), content_key, norm_mode, str(asset_path or ""), style_sig, max_chars))
             created += 1
         con.commit()
         log.info("READY -> Studio：新建 %d，更新 %d，跳过 %d", created, updated, skipped)
@@ -1320,8 +1970,10 @@ def promote_ready_to_studio(task_ids=None) -> dict:
 
 def sync_download_and_prepare_all(progress_callback=None) -> dict:
     """Run the confirmed pre-GPT pipeline and continuously expose real progress to the desktop UI."""
+    from concurrent.futures import ThreadPoolExecutor
     _report_progress(progress_callback, 0, "开始同步", "正在初始化任务同步…")
     sync_result = sync_sheet(progress_callback=progress_callback)
+    changed_groups = set(sync_result.get("changed_groups") or ())
     download_results = []
     manual = []
     errors = []
@@ -1329,33 +1981,127 @@ def sync_download_and_prepare_all(progress_callback=None) -> dict:
     total_groups = len(groups)
     if total_groups == 0:
         _report_progress(progress_callback, 88, "素材同步", "当前没有主播素材组需要处理")
-    for index, g in enumerate(groups, 1):
-        group_start = 44 + int(((index - 1) / max(1, total_groups)) * 44)
-        group_end = 44 + int((index / max(1, total_groups)) * 44)
-        recipient = str(g.get("recipient") or "")
-        anchor = str(g.get("anchor_name") or "")
-        _report_progress(progress_callback, group_start, "同步主播素材", f"主播 {index}/{total_groups} · {recipient} · {anchor}")
-        if g.get("status") == "DRIVE_LINK_CONFLICT":
-            errors.append({"group_key": g["group_key"], "error": g.get("message", "")})
-            _report_progress(progress_callback, group_end, "跳过素材冲突", f"主播 {index}/{total_groups} · {recipient} · {anchor}")
-            continue
-        try:
-            def group_progress(local_pct, stage, detail, gs=group_start, ge=group_end, idx=index, total=total_groups):
-                pct = gs + int((ge - gs) * (max(0, min(100, int(local_pct))) / 100.0))
-                prefix = f"主播 {idx}/{total} · " if total else ""
-                _report_progress(progress_callback, pct, stage, prefix + str(detail or ""))
-            result = download_drive_group(g["group_key"], progress_callback=group_progress)
-            download_results.append({"group_key": g["group_key"], **result})
-            if result.get("status") == "NEEDS_MANUAL_CLASSIFY":
-                manual.append({"group_key": g["group_key"], "required_closed": result.get("required_closed", 0)})
-        except Exception as exc:
-            log.exception("自动素材准备失败：%s / %s", g.get("recipient"), g.get("anchor_name"))
-            errors.append({"group_key": g["group_key"], "error": str(exc)})
-            _report_progress(progress_callback, group_end, "主播素材失败", f"主播 {index}/{total_groups} · {recipient} · {anchor} · {exc}")
+
+    # Identify which groups are already locally ready & unchanged vs which need remote Drive checks.
+    ready_skip_map = {}
+    groups_needing_drive = []
+    folder_id_by_group = {}
+    con = init_db()
+    try:
+        for g in groups:
+            gk = g["group_key"]
+            st = str(g.get("status") or "")
+            d_url = str(g.get("drive_url") or "")
+            if st == "DRIVE_LINK_CONFLICT":
+                continue
+            if d_url.startswith("local:"):
+                ready_skip_map[gk] = {
+                    "status": st or "READY_FOR_GPT",
+                    "message": g.get("message") or "本地手动导入素材，跳过云端下载",
+                    "missing": 0,
+                    "unchanged": True,
+                    "skipped_check": True,
+                }
+                continue
+            if gk not in changed_groups and st in ("READY_FOR_GPT", "NEEDS_MANUAL_CLASSIFY") and _verify_group_local_ready(con, gk, st):
+                ready_skip_map[gk] = {
+                    "status": st,
+                    "message": g.get("message") or "素材未变化，已跳过重复检测",
+                    "missing": 0,
+                    "unchanged": True,
+                    "skipped_check": True,
+                }
+            else:
+                row = con.execute("SELECT drive_folder_id FROM groups_tbl WHERE group_key=?", (gk,)).fetchone()
+                fid = str(row[0] or "") if row else ""
+                if fid:
+                    folder_id_by_group[gk] = fid
+                groups_needing_drive.append(g)
+    finally:
+        con.close()
+
+    creds = google_creds(interactive=False) if groups_needing_drive else None
+    shared_session = _build_authorized_session(creds, pool_size=16) if creds is not None else None
+    prefetched_map = {}
+    try:
+        # Parallel prefetch of Drive folder metadata & image lists for all pending host groups.
+        if shared_session is not None and len(groups_needing_drive) > 1:
+            account_email = google_account_info(use_cache=True).get("email") or "未知账号"
+            _report_progress(
+                progress_callback, 43, "并发检查素材夹",
+                f"正在并发校验 {len(groups_needing_drive)} 个待更新主播的 Google Drive 素材文件夹…"
+            )
+            def _prefetch_one(g_item):
+                gk = g_item["group_key"]
+                fid = folder_id_by_group.get(gk)
+                if not fid:
+                    return gk, None
+                return gk, _fetch_drive_folder_images_via_session(
+                    shared_session, fid, str(g_item.get("recipient") or ""), str(g_item.get("anchor_name") or ""), account_email
+                )
+
+            with ThreadPoolExecutor(max_workers=min(6, len(groups_needing_drive))) as pool:
+                futures = {pool.submit(_prefetch_one, g_item): g_item["group_key"] for g_item in groups_needing_drive}
+                for fut, gk in futures.items():
+                    try:
+                        _, pdata = fut.result()
+                        if pdata is not None:
+                            prefetched_map[gk] = pdata
+                    except Exception:
+                        # Individual group error will be raised/handled cleanly inside download_drive_group
+                        pass
+
+        for index, g in enumerate(groups, 1):
+            group_start = 44 + int(((index - 1) / max(1, total_groups)) * 44)
+            group_end = 44 + int((index / max(1, total_groups)) * 44)
+            gk = g["group_key"]
+            recipient = str(g.get("recipient") or "")
+            anchor = str(g.get("anchor_name") or "")
+            if g.get("status") == "DRIVE_LINK_CONFLICT":
+                errors.append({"group_key": gk, "error": g.get("message", "")})
+                _report_progress(progress_callback, group_end, "跳过素材冲突", f"主播 {index}/{total_groups} · {recipient} · {anchor}")
+                continue
+            if gk in ready_skip_map:
+                result = ready_skip_map[gk]
+                log.info("主播任务与本地素材未变化，跳过重复校验：%s / %s (%s)", recipient, anchor, result["status"])
+                _report_progress(
+                    progress_callback, group_end, "跳过重复校验",
+                    f"主播 {index}/{total_groups} · {recipient} · {anchor} · 已就绪，跳过重复校验"
+                )
+                download_results.append({"group_key": gk, **result})
+                if result.get("status") == "NEEDS_MANUAL_CLASSIFY":
+                    manual.append({"group_key": gk, "required_closed": result.get("required_closed", 0)})
+                continue
+            _report_progress(progress_callback, group_start, "同步主播素材", f"主播 {index}/{total_groups} · {recipient} · {anchor}")
+            try:
+                def group_progress(local_pct, stage, detail, gs=group_start, ge=group_end, idx=index, total=total_groups):
+                    pct = gs + int((ge - gs) * (max(0, min(100, int(local_pct))) / 100.0))
+                    prefix = f"主播 {idx}/{total} · " if total else ""
+                    _report_progress(progress_callback, pct, stage, prefix + str(detail or ""))
+                result = download_drive_group(
+                    gk,
+                    progress_callback=group_progress,
+                    prefetched=prefetched_map.get(gk),
+                    session=shared_session,
+                )
+                download_results.append({"group_key": gk, **result})
+                if result.get("status") == "NEEDS_MANUAL_CLASSIFY":
+                    manual.append({"group_key": gk, "required_closed": result.get("required_closed", 0)})
+            except Exception as exc:
+                log.exception("自动素材准备失败：%s / %s", g.get("recipient"), g.get("anchor_name"))
+                errors.append({"group_key": gk, "error": str(exc)})
+                _report_progress(progress_callback, group_end, "主播素材失败", f"主播 {index}/{total_groups} · {recipient} · {anchor} · {exc}")
+    finally:
+        if shared_session is not None:
+            try: shared_session.close()
+            except Exception: pass
+
     _report_progress(progress_callback, 91, "导入 Flow Studio", "正在把 READY FOR GPT 任务写入 Studio 主数据库…")
     promote = promote_ready_to_studio()
-    _report_progress(progress_callback, 98, "刷新任务中心", f"新建 {promote.get('created',0)} · 更新 {promote.get('updated',0)}")
-    _report_progress(progress_callback, 100, "同步完成", f"本轮共处理 {len(sync_result.get('parsed',{}).get('tasks',[]))} 条任务 · {total_groups} 个主播")
+    _report_progress(progress_callback, 98, "刷新任务中心", f"新建 {promote.get('created',0)} · 更新 {promote.get('updated',0)} · 已就绪跳过 {promote.get('skipped',0)}")
+    skipped_groups = len(ready_skip_map)
+    summary_tail = f"（已跳过 {skipped_groups} 个未变化主播）" if skipped_groups else ""
+    _report_progress(progress_callback, 100, "同步完成", f"本轮共处理 {len(sync_result.get('parsed',{}).get('tasks',[]))} 条任务 · {total_groups} 个主播{summary_tail}")
     return {"sync": sync_result, "downloads": download_results, "manual": manual, "errors": errors, "promote": promote}
 
 

@@ -13,7 +13,12 @@ def safe(value):
 
 def organize(path, meta, event):
     src = Path(path).expanduser()
-    root = Path(repo.get_setting('flow_download_root', str(Path.home() / 'Downloads' / 'FlowStudio'))).expanduser()
+    root_val = (
+        repo.get_setting('segment_output_root', '').strip()
+        or repo.get_setting('flow_download_root', '').strip()
+        or str(Path.home() / 'Downloads' / 'FlowStudio')
+    )
+    root = Path(root_val).expanduser()
     folder = root / safe(meta.get('work_date')) / safe(meta.get('recipient_name')) / safe(meta.get('host_name')) / f"视频_{int(meta.get('video_seq') or 0):02d}"
     folder.mkdir(parents=True, exist_ok=True)
     retry = int(meta.get('flow_retry_count') or 0)

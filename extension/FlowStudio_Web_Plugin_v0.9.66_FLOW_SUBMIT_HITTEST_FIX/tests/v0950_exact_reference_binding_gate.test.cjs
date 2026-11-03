@@ -1,8 +1,8 @@
 const vm=require('node:vm'),fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const engine=fs.readFileSync(path.join(__dirname,'../page-engine.js'),'utf8');
 const manifest=JSON.parse(fs.readFileSync(path.join(__dirname,'../manifest.json'),'utf8'));
-assert.ok(['0.9.50','0.9.51','0.9.52','0.9.56','0.9.57','0.9.58','0.9.59','0.9.60','0.9.62'].includes(manifest.version));
-if(['0.9.57','0.9.58','0.9.59','0.9.60','0.9.62'].includes(manifest.version)){
+assert.ok(['0.9.50','0.9.51','0.9.52','0.9.56','0.9.57','0.9.58','0.9.59','0.9.60','0.9.62','0.9.69'].includes(manifest.version));
+if(['0.9.57','0.9.58','0.9.59','0.9.60','0.9.62','0.9.69'].includes(manifest.version)){
   assert.match(engine,/material_binding_protection='disabled'/);
   assert.match(engine,/requireMaterial:false/);
   console.log('PASS: v0.9.57 intentionally relaxes exact binding enforcement while keeping diagnostics');

@@ -10,7 +10,8 @@ def main():
     build=ROOT/'build/linux';package=build/'package';app=package/'opt/flowstudio';app.mkdir(parents=True)
     archive=build/'python.tar.gz'
     urllib.request.urlretrieve('https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.13.16%2B20261009-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz',archive)
-    assert hashlib.sha256(archive.read_bytes()).hexdigest()==SHA
+    if hashlib.sha256(archive.read_bytes()).hexdigest()!=SHA:
+        raise ValueError('Python checksum mismatch')
     with tarfile.open(archive) as tar:tar.extractall(app,filter='data')
     python=app/'python/bin/python3'
     run(str(python),'-m','pip','install','--only-binary=:all:','-r',str(ROOT/'requirements-linux.lock'))

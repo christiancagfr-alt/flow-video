@@ -6,18 +6,29 @@ from app.services.text_processing import flow_timing
 from app.services.speech_preparation import rebalance_segments, timing_metadata
 
 
+def _is_omini_model(value):
+    return str(value or '').strip().lower() in ('flow_omni', 'omni', 'omini', 'abra', 'gemini_omni')
+
+
 def timing(task):
     text=str(task['foreign_text'] or '')
     result=flow_timing(text)
     with connect() as con:
         row=con.execute('''SELECT dc.dialogue,dc.force_submit,COALESCE(dc.duration,0) duration,COALESCE(dc.locked,0) locked,
-                                  COALESCE(fs.timing_status,'') timing_status,COALESCE(fs.manual_text_lock,0) manual_text_lock
+                                  COALESCE(fs.timing_status,'') timing_status,COALESCE(fs.manual_text_lock,0) manual_text_lock,
+                                  COALESCE(fs.video_model,'') video_model
                            FROM flow_segments fs LEFT JOIN flow_duration_choices dc ON dc.segment_id=fs.id
                            WHERE fs.id=?''',(task['segment_id'],)).fetchone()
     valid_choice=bool(row and row['dialogue']==text)
     stored=str(row['timing_status'] or '') if row else ''
+    vmodel=str((task.get('video_model') if isinstance(task, dict) else (task['video_model'] if 'video_model' in task.keys() else '')) or (row['video_model'] if row else '') or '')
+    is_omini=_is_omini_model(vmodel)
     integrity_failed=(stored=='INTEGRITY_FAILED')
-    if not integrity_failed and valid_choice and int(row['locked'] or 0) and int(row['duration'] or 0) in (4,6,8):
+    if not integrity_failed and is_omini:
+        result['duration']=8
+        result['needs_split']=False
+        result['timing_status']='MANUAL_DURATION_LOCK'
+    elif not integrity_failed and valid_choice and int(row['locked'] or 0) and int(row['duration'] or 0) in (4,6,8):
         result['duration']=int(row['duration'])
         result['needs_split']=False
         result['timing_status']='MANUAL_DURATION_LOCK'
@@ -27,9 +38,10 @@ def timing(task):
         result['timing_status']='INTEGRITY_FAILED'
     elif stored=='UNSPLITTABLE' and result['needs_split']:
         result['timing_status']='UNSPLITTABLE'
-    result['force_submit']=bool(valid_choice and row['force_submit'] and not integrity_failed) if row else False
+    result['video_model']='flow_omni' if is_omini else ''
+    result['force_submit']=bool((is_omini or (valid_choice and row['force_submit'])) and not integrity_failed) if row else bool(is_omini and not integrity_failed)
     result['manual_text_lock']=bool(row and row['manual_text_lock'])
-    result['manual_duration_lock']=bool(valid_choice and row['locked'] and not integrity_failed) if row else False
+    result['manual_duration_lock']=bool((is_omini or (valid_choice and row['locked'])) and not integrity_failed) if row else bool(is_omini and not integrity_failed)
     result['submission_blocked']=bool(integrity_failed or (result['needs_split'] and not result['force_submit'] and not result['manual_duration_lock']))
     return result
 
@@ -48,6 +60,7 @@ def unresolved(tasks):
     placeholders=','.join('?' for _ in ids)
     with connect() as con:
         rows=con.execute(f'''SELECT fs.id segment_id,COALESCE(fs.timing_status,'') timing_status,
+                                    COALESCE(fs.video_model,'') video_model,
                                     dc.dialogue,COALESCE(dc.force_submit,0) force_submit,
                                     COALESCE(dc.duration,0) duration,COALESCE(dc.locked,0) locked
                                FROM flow_segments fs
@@ -60,6 +73,8 @@ def unresolved(tasks):
         stored=str(row['timing_status'] or '') if row else ''
         if stored=='INTEGRITY_FAILED':
             blocked.append(task)
+            continue
+        if row and _is_omini_model(row['video_model']):
             continue
         check=flow_timing(str(task['foreign_text'] or ''))
         if not check['needs_split']:
@@ -142,13 +157,25 @@ def dispatch_timing(task):
     except (TypeError, ValueError):
         duration = 8
     locked = False
+    vmodel = str(task.get('video_model') or '').strip()
     with connect() as con:
         row = con.execute('SELECT dialogue,duration,locked FROM flow_duration_choices WHERE segment_id=?',
                           (task['segment_id'],)).fetchone()
-    if row and row['dialogue'] == str(task.get('foreign_text') or '') and row['locked'] and row['duration'] in (4, 6, 8):
+        if not vmodel:
+            vrow = con.execute("SELECT COALESCE(video_model,'') video_model FROM flow_segments WHERE id=?", (task['segment_id'],)).fetchone()
+            if vrow:
+                vmodel = str(vrow['video_model'] or '').strip()
+    is_omini = _is_omini_model(vmodel)
+    if is_omini:
+        duration, locked, vmodel = 8, True, 'flow_omni'
+    elif row and row['dialogue'] == str(task.get('foreign_text') or '') and row['locked'] and row['duration'] in (4, 6, 8):
         duration, locked = int(row['duration']), True
     if duration not in (4, 6, 8):
         duration = 8
-    return {'duration': duration, 'needs_split': False, 'force_submit': True,
-            'submission_blocked': False, 'manual_duration_lock': locked,
-            'manual_text_lock': bool(task.get('manual_text_lock'))}
+    out = {'duration': duration, 'needs_split': False, 'force_submit': True,
+           'submission_blocked': False, 'manual_duration_lock': locked,
+           'manual_text_lock': bool(task.get('manual_text_lock'))}
+    if vmodel:
+        out['video_model'] = vmodel
+        out['videoModel'] = vmodel
+    return out

@@ -6,22 +6,29 @@ from PySide6.QtGui import QImageReader
 from app.services.image_assets import image_cache_key, MAX_BYTES, _macos_sips_decode
 from pathlib import Path
 from app.core import repository as repo
-from app.services import host_priority, chrome_profiles
+from app.services import host_priority, chrome_profiles, channel_pool
 from app.services.perf_diagnostics import measured
 
 @lru_cache(maxsize=128)
 def thumbnail(key):
     # QImage is safe in a worker; QPixmap is created only on the GUI thread.
+    # 54x78 logical portrait (108x156 @ 2x Retina) for crisp 9:16 anchor cards.
     if key[1] is None or key[2] > MAX_BYTES:return None
+    target=QSize(108,156)
     reader=QImageReader(key[0]);reader.setAutoTransform(True);reader.setDecideFormatFromContent(True)
     size=reader.size()
-    if size.isValid():reader.setScaledSize(size.scaled(QSize(48,48),Qt.KeepAspectRatio))
+    if size.isValid():reader.setScaledSize(size.scaled(target,Qt.KeepAspectRatioByExpanding))
     image=reader.read()
     if image.isNull():
         try:image=_macos_sips_decode(*key)
         except Exception:return None
         if image is None:return None
-    return image.scaled(QSize(48,48),Qt.KeepAspectRatio,Qt.SmoothTransformation)
+    scaled=image.scaled(target,Qt.KeepAspectRatioByExpanding,Qt.SmoothTransformation)
+    x=max(0,(scaled.width()-target.width())//2)
+    y=max(0,(scaled.height()-target.height())//2)
+    cropped=scaled.copy(x,y,target.width(),target.height())
+    cropped.setDevicePixelRatio(2.0)
+    return cropped
 
 @measured('flow_ui_refresh')
 def read_snapshot(key):
@@ -69,7 +76,7 @@ def read_snapshot(key):
     return dict(key=key,all_tasks=all_tasks,tree_rows=scoped,tree=tree,images=images,rows=rows[page*100:(page+1)*100],
         total=len(rows),pages=pages,page=page,stats=repo.count_flow_task_status(rid,hid,work_date=day),
         channels=channels,summaries=summaries,groups=groups,b_enabled=repo.browser_b_enabled(),
-        root=repo.get_setting('flow_channel_download_root',str(Path.home()/'Downloads'/'FlowStudio_Channels')),
+        root=channel_pool.resolve_download_root(),
         live=[dict(d) for d in repo.list_live_flow_dispatches(work_date=day,max_age_minutes=30)],
         priorities=host_priority.load(day),links=links,link_values=link_values,
         profile=profile,profiles=chrome_profiles.list_chrome_profiles())

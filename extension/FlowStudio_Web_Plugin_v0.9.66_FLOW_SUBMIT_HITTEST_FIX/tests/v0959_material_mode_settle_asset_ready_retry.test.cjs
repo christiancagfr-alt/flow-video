@@ -2,7 +2,7 @@ const fs=require('fs');
 const assert=require('assert');
 const p=fs.readFileSync(require('path').join(__dirname,'..','page-engine.js'),'utf8');
 const manifest=JSON.parse(fs.readFileSync(require('path').join(__dirname,'..','manifest.json'),'utf8'));
-assert.ok(['0.9.59','0.9.60','0.9.62'].includes(manifest.version));
+assert.ok(['0.9.59','0.9.60','0.9.62','0.9.69'].includes(manifest.version));
 assert.match(p,/async function settleMaterialModeForSelect\(/);
 assert.doesNotMatch(p,/waitModeStable|presentStable|remoteStable/);
 assert.match(p,/Request the mode once/);

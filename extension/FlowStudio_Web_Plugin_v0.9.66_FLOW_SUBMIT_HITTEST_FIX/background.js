@@ -57,6 +57,58 @@ async function focusOwnedChannels(requests){
   }catch(error){await pushEvent({type:'channel_focus_failed',channel_id:req.channel_id,request_id:req.id,message:String(error.message||error)});}
  }
 }
+const claimedRedownloadIds=new Set();
+async function handleRedownloadJobs(requests){
+ const list=Array.isArray(requests)?requests:[];
+ if(!list.length || typeof dlEnqueueRedownloads!=='function')return;
+ const owner=await browserInstanceReady;
+ let tabs=[];
+ try{tabs=await chrome.tabs.query({url:['https://flow.google.com/*']});}catch(_){}
+ const openPaths=new Set(tabs.map(t=>normUrl(t?.url||'')).filter(Boolean));
+ const openGroups=new Set(tabs.map(t=>channelForTab(t)?.browser_group||'').filter(Boolean));
+ const nowSec=Date.now()/1000;
+ const candidates=[];
+ for(const req of list){
+  const rid=String(req?.request_id||'');
+  if(!rid || claimedRedownloadIds.has(rid))continue;
+  if(Number(req?.expires||0)>0 && Number(req.expires)<nowSec)continue;
+  const targetPath=normUrl(req?.collection_url||'');
+  if(!targetPath)continue;
+  const ageSec=Math.max(0,nowSec-Number(req?.requested_at||nowSec));
+  let eligible=false;
+  if(openPaths.has(targetPath)){
+   eligible=true;
+  }else if(req.browser_instance){
+   eligible=(req.browser_instance===owner) || (ageSec>8 && tabs.length>0);
+  }else{
+   const wantGroup=String(req.browser_group||'');
+   eligible=(wantGroup && openGroups.has(wantGroup)) || ageSec>3;
+  }
+  if(eligible)candidates.push(req);
+ }
+ if(!candidates.length)return;
+ try{
+  const resp=await fsFetch('/redownload-ack',{
+   method:'POST',
+   headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({request_ids:candidates.map(c=>c.request_id),owner})
+  });
+  if(!resp.ok)return;
+  const data=await resp.json();
+  const ackedSet=new Set(Array.isArray(data?.acked)?data.acked.map(String):[]);
+  const won=candidates.filter(c=>ackedSet.has(String(c.request_id)));
+  for(const w of won){
+   claimedRedownloadIds.add(String(w.request_id));
+   if(claimedRedownloadIds.size>500)claimedRedownloadIds.delete(claimedRedownloadIds.values().next().value);
+  }
+  if(won.length){
+   void pluginLog('redownload_jobs_claimed',{count:won.length,segment_ids:won.map(w=>w.segment_id)});
+   await dlEnqueueRedownloads(won);
+  }
+ }catch(e){
+  void pluginLog('redownload_claim_failed',{error:String(e?.message||e)});
+ }
+}
 let bridgePort = 17831;
 let BASE = 'http://127.0.0.1:' + bridgePort;
 const BRIDGE_PORT_KEY='flowStudioBridgePort';
@@ -128,7 +180,7 @@ async function pollSourceJobs(){
 
 const PLUGIN_LOG_KEY='flowStudioRuntimeLogsV0921';
 let runtimeLogs=[],runtimeLogSerial=Promise.resolve(),lastConnectionState=null,lastHeartbeatLog=0;
-const runtimeLogLoaded=chrome.storage.local.get(PLUGIN_LOG_KEY).then(d=>{runtimeLogs=Array.isArray(d[PLUGIN_LOG_KEY])?d[PLUGIN_LOG_KEY].slice(-3000):[];});
+const runtimeLogLoaded=chrome.storage.local.get(PLUGIN_LOG_KEY).then(d=>{runtimeLogs=Array.isArray(d[PLUGIN_LOG_KEY])?d[PLUGIN_LOG_KEY].slice(-400):[];});
 function safeLogValue(v){
   if(v==null)return v;
   if(typeof v==='string')return v.length>500?v.slice(0,500)+'…':v;
@@ -139,10 +191,10 @@ function safeLogValue(v){
 function pluginLog(stage,detail={}){
   const row={time:new Date().toISOString(),stage,...safeLogValue(detail)};
   console.info('[FlowStudio runtime]',row);
-  const p=runtimeLogSerial.then(async()=>{await runtimeLogLoaded;runtimeLogs.push(row);runtimeLogs=runtimeLogs.slice(-3000);await chrome.storage.local.set({[PLUGIN_LOG_KEY]:runtimeLogs});});
+  const p=runtimeLogSerial.then(async()=>{await runtimeLogLoaded;runtimeLogs.push(row);if(runtimeLogs.length>400)runtimeLogs=runtimeLogs.slice(-400);try{await chrome.storage.local.set({[PLUGIN_LOG_KEY]:runtimeLogs});}catch(_){runtimeLogs=runtimeLogs.slice(-150);try{await chrome.storage.local.set({[PLUGIN_LOG_KEY]:runtimeLogs});}catch(_){}}});
   runtimeLogSerial=p.catch(()=>{});return p;
 }
-async function pluginDiagnostics(){await runtimeLogLoaded;await runtimeLogSerial;return {version:'0.9.67',background_runtime:FlowStudioBackground.diagnostics(),exported_at:new Date().toISOString(),connected:!!token,jobsVersion,job_count:jobs.length,lastSuccessfulContact,lastJobsPollOk,reconnectAttempts,channels:channelConfigs.map(c=>({channel_key:c.channel_key,id:c.id,role:c.role,collection_url:c.collection_url})),jobs:jobs.map(j=>({channel_key:j.channel_key,channel_id:j.channel_id,command_id:j.command_id,collection_url:j.collection_url,task_count:(j.tasks||[]).length,execute_upload:!!j.execute_upload,dispatch_tasks:!!j.dispatch_tasks})),logs:runtimeLogs.slice()};}
+async function pluginDiagnostics(){await runtimeLogLoaded;await runtimeLogSerial;return {version:'0.9.69',background_runtime:FlowStudioBackground.diagnostics(),exported_at:new Date().toISOString(),connected:!!token,jobsVersion,job_count:jobs.length,lastSuccessfulContact,lastJobsPollOk,reconnectAttempts,channels:channelConfigs.map(c=>({channel_key:c.channel_key,id:c.id,role:c.role,collection_url:c.collection_url})),jobs:jobs.map(j=>({channel_key:j.channel_key,channel_id:j.channel_id,command_id:j.command_id,collection_url:j.collection_url,task_count:(j.tasks||[]).length,execute_upload:!!j.execute_upload,dispatch_tasks:!!j.dispatch_tasks})),logs:runtimeLogs.slice()};}
 const tabJobMemo=new Map();
 const tabChannelMemo=new Map();
 
@@ -319,6 +371,7 @@ async function pollJobs() {
       await focusOwnedChannels(d.focus_requests);
       jobs = Array.isArray(d.jobs) ? d.jobs : [];
       channelConfigs = Array.isArray(d.channels) ? d.channels : [];
+      await handleRedownloadJobs(d.redownload_jobs);
       lastJobsPollOk=Date.now();
       lastSuccessfulContact=Date.now();
       if (d.version !== jobsVersion) {

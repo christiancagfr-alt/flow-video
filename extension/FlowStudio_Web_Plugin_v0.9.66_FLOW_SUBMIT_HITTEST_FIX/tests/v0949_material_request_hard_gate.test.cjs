@@ -2,8 +2,8 @@ const fs=require('fs'),assert=require('assert');
 const engine=fs.readFileSync(__dirname+'/../page-engine.js','utf8');
 const content=fs.readFileSync(__dirname+'/../content.js','utf8');
 const manifest=JSON.parse(fs.readFileSync(__dirname+'/../manifest.json','utf8'));
-assert.ok(['0.9.49','0.9.50','0.9.51','0.9.52','0.9.56','0.9.57','0.9.58','0.9.59','0.9.60','0.9.62'].includes(manifest.version));
-if(['0.9.57','0.9.58','0.9.59','0.9.60','0.9.62'].includes(manifest.version)){
+assert.ok(['0.9.49','0.9.50','0.9.51','0.9.52','0.9.56','0.9.57','0.9.58','0.9.59','0.9.60','0.9.62','0.9.69'].includes(manifest.version));
+if(['0.9.57','0.9.58','0.9.59','0.9.60','0.9.62','0.9.69'].includes(manifest.version)){
   assert.match(engine,/requireMaterial:false/,'v0.9.57 must not require request-level material proof');
   assert.match(engine,/materialRequestProtectionDisabled=true/,'v0.9.57 must explicitly disable request blocking');
   assert.doesNotMatch(content,/已阻止无图提交/,'old material hard-gate operator block must be gone');

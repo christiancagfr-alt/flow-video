@@ -22,5 +22,5 @@ vm.runInContext(`const source=fn=>Function.prototype.toString.call(fn); const sl
 const modes=['VIDEO_REFERENCES','VIDEO_FRAMES'];const models=['veo_3_1_lite_low_priority'];
 function sig(v){const fn=()=>v;fn.set=x=>v=x;fn.update=f=>v=f(v);return fn;}
 class Service {constructor(){this.outputs=sig(1);this.duration=sig(8);this.mode=sig('VIDEO_REFERENCES');this.model=sig('veo_3_1_lite_low_priority');this.aspectRatio=sig('PORTRAIT');}setAspectRatio(v){this.aspectRatio.set(v);}}
-`+extract('signal')+'\n'+extract('constructorSignal')+'\n'+extract('aspectValue')+'\n'+asyncExtract('verifySettings')+'\n'+extract('configure'),timing);
+`+extract('normalizeVideoModel')+'\n'+extract('signal')+'\n'+extract('constructorSignal')+'\n'+extract('aspectValue')+'\n'+asyncExtract('verifySettings')+'\n'+extract('configure'),timing);
 (async()=>{for(const duration of [4,6,8]){timing.duration=duration;const actual=await vm.runInContext(`(async()=>{const s=new Service();const d={duration,mode:'VIDEO_FRAMES'};configure(s,d);return (await verifySettings(s,d)).duration;})()`,timing);assert.equal(actual,duration);}console.log('PASS: real configure and verifySettings apply all three durations');})().catch(e=>{console.error(e);process.exitCode=1});

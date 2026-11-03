@@ -3,7 +3,7 @@ const p=path.join(__dirname,'..');
 const page=fs.readFileSync(path.join(p,'page-engine.js'),'utf8');
 const content=fs.readFileSync(path.join(p,'content.js'),'utf8');
 const manifest=JSON.parse(fs.readFileSync(path.join(p,'manifest.json'),'utf8'));
-assert.ok(['0.9.51','0.9.52','0.9.56','0.9.57','0.9.58','0.9.59','0.9.60','0.9.62'].includes(manifest.version));
+assert.ok(['0.9.51','0.9.52','0.9.56','0.9.57','0.9.58','0.9.59','0.9.60','0.9.62','0.9.69'].includes(manifest.version));
 if(manifest.version==='0.9.51'){
   assert.match(page,/requestMaterialDirectAttach\(detail\)/,'v0.9.51 MATERIAL direct composer fallback missing');
 }else{

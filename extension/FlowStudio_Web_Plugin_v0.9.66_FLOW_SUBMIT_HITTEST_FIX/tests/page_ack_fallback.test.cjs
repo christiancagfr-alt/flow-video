@@ -11,8 +11,8 @@ const ctx=vm.createContext({FlowStudioResults:core,JSON,Object,Array,Set,Error,S
  context:()=>({instance:{},service:{clear(){}}}),validateDuration(){},mediaList:()=>clips,normal:v=>String(v).toLowerCase(),selectMethod:()=>async()=>{},sleep:async()=>{},configure(){},editorSignal:()=>editor,stateSnapshot:()=>({}),attachmentIdentities:()=>new Set(['image1']),retainedReference:()=>null,firstFrameMatches:()=>true,signal:()=>()=> 'VIDEO_FRAMES',modes:[],verifySettings:async()=>({}),
  document:{querySelector:()=>({disabled:false,getAttribute:()=>null,click(){clicks++;if(mode==='success')clips.push({type:'VIDEO',id:'new',prompt});if(mode==='ambiguous')clips.push({type:'VIDEO',id:'new1',prompt},{type:'VIDEO',id:'new2',prompt});}})}
 });
-ctx.composerContext=()=>null;ctx.composerPreviews=()=>[];ctx.referencePreview=()=>null;ctx.waitGenerateButton=async()=>ctx.document.querySelector();
-vm.runInContext(body,ctx);ctx.detail={recovery_key:'one',prompt,image_id:'image1',image_name:'first.png',mode:'VIDEO_FRAMES'};
+ctx.composerContext=()=>({button:ctx.document.querySelector()});ctx.generateButtonReady=b=>!!b&&!b.disabled;ctx.requestNativeGenerateClick=async b=>{b.click();return {method:"test-native"}};ctx.composerPreviews=()=>[];ctx.referencePreview=()=>null;ctx.waitGenerateButton=async()=>ctx.document.querySelector();
+vm.runInContext(source.slice(source.indexOf('  function flowAssetFlags('),source.indexOf('  async function waitExistingFlowImageAssetReady('))+source.slice(source.indexOf("  const pendingStoragePrefix="),source.indexOf('  const wrapped ='))+body,ctx);ctx.detail={recovery_key:'one',prompt,image_id:'image1',image_name:'first.png',mode:'VIDEO_FRAMES'};
 (async()=>{
  let r=await vm.runInContext('execute(detail)',ctx);assert.deepEqual(Array.from(r.generation_ids),['new']);assert.equal(clicks,1);
  r=await vm.runInContext('execute(detail)',ctx);assert.equal(r.method,'recovered_catalog_identity');assert.equal(clicks,1);

@@ -33,7 +33,8 @@ def install_root():
 
 def _magic_ok(path: Path) -> bool:
     try:
-        head = path.read_bytes()[:4]
+        with path.open("rb") as fh:
+            head = fh.read(4)
     except OSError:
         return False
     return head in (b"ggml", b"GGUF", b"lmgg")

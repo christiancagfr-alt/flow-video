@@ -13,6 +13,7 @@ const ctx=vm.createContext({console,Date,Set,Math,setTimeout:()=>0,clearTimeout:
  fileInputUpload:async paths=>{calls.push(['input',paths]);return {ok:true,method:'file_input'};},syntheticDragUpload:async()=>({ok:false}),
  chrome:{runtime:{sendMessage:(m,cb)=>{calls.push(['drag',m.paths]);cb({ok:true,method:'chrome_debugger'})}}}
 });
+Object.assign(ctx,{queueMicrotask:()=>{},submitViaMainWorld:async()=>({media:[]}),recognizedMediaCount:()=>0,matchTasks:()=>{},allMissingImageNames:()=>ctx.missingImagePaths().names});
 vm.runInContext(method,ctx);
 (async()=>{
  for(let i=0;i<4;i++) await vm.runInContext('uploadMissing(true)',ctx);

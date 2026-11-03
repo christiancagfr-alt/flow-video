@@ -3,7 +3,7 @@ const root=path.join(__dirname,'..');
 const content=fs.readFileSync(path.join(root,'content.js'),'utf8');
 const page=fs.readFileSync(path.join(root,'page-engine.js'),'utf8');
 const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
-assert.ok(['0.9.57','0.9.58','0.9.59','0.9.60','0.9.62'].includes(manifest.version));
+assert.ok(['0.9.57','0.9.58','0.9.59','0.9.60','0.9.62','0.9.69'].includes(manifest.version));
 assert.match(content,/function noteSubmissionOutcome\(job,source='confirmed'\)/,'confirmed-outcome submit gate missing');
 assert.match(content,/noteSubmissionOutcome\(job,'confirmed'\)/,'successful submission must re-arm interval from confirmation');
 assert.match(content,/noteSubmissionOutcome\(job,'uncertain'\)/,'uncertain outcome must still preserve pacing');

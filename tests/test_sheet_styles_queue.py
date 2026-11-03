@@ -91,22 +91,30 @@ class QueueTests(unittest.TestCase):
 
     def test_same_image_different_hosts_and_videos_are_separate(self):
         tasks={1:self.task(1),2:self.task(2,2,2),3:self.task(3,1,3),4:self.task(4)}
-        with patch('app.ui.prompt_center.repo.get_prompt_task',side_effect=tasks.get):
-            groups=GenerateWorker([1,4,2,3],'test','test')._build_groups()
+        groups=GenerateWorker._build_groups_for_ids([1,4,2,3], preloaded_tasks=list(tasks.values()))
         self.assertEqual([[s['segment_id'] for s in g['segments']] for g in groups],[[1,4],[2],[3]])
 
-    def test_header_queues_only_checked_pending_current_day(self):
+    def test_header_queues_only_checked_pending_selected_host(self):
         from types import SimpleNamespace
         from app.ui.prompt_center import PromptCenterPage
-        rows=[]
-        for sid,prompt,review in [(1,'','待检查'),(2,'existing','待检查'),(3,'','待检查'),(4,'','已提交')]:
-            rows.append(dict(self.task(sid),prompt=prompt,prompt_review_status=review))
-        fake=SimpleNamespace(worker=None,checked_ids={1,2,4},progress=MagicMock(),header_generate=MagicMock(),current_job=MagicMock(),
-            generate_empty=MagicMock(),generate_selected=MagicMock(),retry_failed=MagicMock(),on_progress=MagicMock(),on_item_done=MagicMock(),on_finished=MagicMock(),_release_generate_worker=MagicMock())
-        with patch('app.ui.prompt_center.openai_service.get_api_key',return_value='fake'),patch('app.ui.prompt_center.work_dates.active',return_value='2026-10-08'),patch('app.ui.prompt_center.repo.list_prompt_tasks',return_value=rows) as listing,patch('app.ui.prompt_center.repo.get_prompt_task',side_effect=lambda sid:next(t for t in rows if t['segment_id']==sid)),patch('app.ui.prompt_center.repo.get_setting',return_value='configured'),patch('app.ui.prompt_center.GenerateWorker') as worker:
+        rows = [dict(self.task(1),prompt='',status='待处理'),
+                dict(self.task(2),prompt='existing',status='已完成'),
+                dict(self.task(3,host=2),prompt='',status='待处理')]
+        fake=SimpleNamespace(worker=None, host=MagicMock(), _editor_dirty=False,
+            _current_host_task_rows=MagicMock(return_value=rows), selected_segment_ids=MagicMock(return_value=[1,2,3]),
+            progress=MagicMock(), current_job=MagicMock(), _progress_hide_timer=MagicMock(),
+            _mark_rows_generating=MagicMock(),on_progress=MagicMock(),on_item_done=MagicMock(),
+            on_finished=MagicMock(),_release_generate_worker=MagicMock())
+        fake.host.currentData.return_value=1
+        with patch('app.ui.prompt_center.openai_service.get_api_key',return_value='fake'), \
+             patch('app.ui.prompt_center.repo.get_prompt_tasks_by_ids',side_effect=lambda ids:[t for t in rows if t['segment_id'] in ids]), \
+             patch('app.ui.prompt_center.repo.get_setting',side_effect=lambda key,default='':default), \
+             patch('app.services.credential_pool.active_openai_keys',return_value=['fake'],create=True), \
+             patch('app.ui.prompt_center.GenerateWorker') as worker:
             PromptCenterPage.start_generation(fake,'checked_pending')
-            listing.assert_called_once_with(work_date='2026-10-08')
-            self.assertEqual(worker.call_args.args[0],[1]);worker.return_value.start.assert_called_once()
+            self.assertEqual(worker.call_args.args[0],[1])
+            self.assertEqual([t['segment_id'] for t in worker.call_args.kwargs['preloaded_tasks']],[1])
+            worker.return_value.start.assert_called_once()
 
     def test_failure_continues_without_duplicate_requests(self):
         tasks={1:self.task(1),2:self.task(2,2,2)}
@@ -116,9 +124,9 @@ class QueueTests(unittest.TestCase):
             kwargs['on_request']()
             if sid==1: raise RuntimeError('test failure')
             return dict(prompts={2:'ok'},input_tokens=1,cached_tokens=0,output_tokens=1,cost_usd=0)
-        worker=GenerateWorker([1,2],'test','core');summaries=[]
+        worker=GenerateWorker([1,2],'test','core',max_workers=1,preloaded_tasks=list(tasks.values()));summaries=[]
         worker.finished_summary.connect(lambda *x:summaries.append(x))
-        with patch('app.ui.prompt_center.repo.get_prompt_task',side_effect=tasks.get), patch('app.ui.prompt_center.repo.get_setting',side_effect=lambda key,default='': 'template' if key=='talking_base_prompt' else default), patch('app.ui.prompt_center.openai_service.generate_prompts_for_image',side_effect=request), patch('app.ui.prompt_center.repo.save_prompt_batch_results'), patch('app.ui.prompt_center.repo.mark_prompt_failed'):
+        with patch('app.ui.prompt_center.repo.get_prompt_task',side_effect=tasks.get), patch('app.ui.prompt_center.repo.get_setting',side_effect=lambda key,default='': 'template' if key=='talking_base_prompt' else default), patch('app.ui.prompt_center.openai_service.generate_prompts_for_image',side_effect=request), patch('app.services.broll_presets.get_video_enhancement',return_value={}), patch('app.ui.prompt_center.repo.save_prompt_batch_results'), patch('app.ui.prompt_center.repo.mark_prompt_failed'):
             worker.run()
         self.assertEqual(calls,[1,2]);self.assertEqual(summaries[0][:2],(1,1))
 

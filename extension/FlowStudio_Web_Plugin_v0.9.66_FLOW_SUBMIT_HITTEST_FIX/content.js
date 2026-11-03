@@ -74,10 +74,10 @@
     const pair=String(task.task_id||'').match(/^(\d+)[-_.](\d+)$/);
     return pair?Number(pair[1]):index+1;
   }
-  function downloadMessage(message) {
+  function downloadMessageOnce(message,timeoutMs=20000) {
     return new Promise((resolve,reject)=>{
       let settled=false;
-      const timer=setTimeout(()=>{if(!settled){settled=true;reject(Error('BRIDGE_TIMEOUT:'+message.type));}},15000);
+      const timer=setTimeout(()=>{if(!settled){settled=true;reject(Error('BRIDGE_TIMEOUT:'+message.type));}},timeoutMs);
       chrome.runtime.sendMessage(message,result=>{
         if(settled)return;settled=true;clearTimeout(timer);
         const error=chrome.runtime.lastError?.message;
@@ -85,6 +85,24 @@
         else resolve(result.result);
       });
     });
+  }
+  async function downloadMessage(message) {
+    const retryable=message?.type!=='FS_DOWNLOAD_POLL';
+    const maxTries=retryable?3:1;
+    let lastErr;
+    for(let attempt=1;attempt<=maxTries;attempt++){
+      try{
+        return await downloadMessageOnce(message,message?.type==='FS_DOWNLOAD_POLL'?10000:20000);
+      }catch(err){
+        lastErr=err;
+        const msg=String(err?.message||err);
+        if(!retryable || attempt>=maxTries)break;
+        if(!/BRIDGE_TIMEOUT:|message port closed|Receiving end does not exist|service worker/i.test(msg))break;
+        try{chrome.runtime.sendMessage({type:'FS_CONNECTION_PING'},()=>void chrome.runtime.lastError);}catch(_){}
+        await new Promise(r=>setTimeout(r,450*attempt));
+      }
+    }
+    throw lastErr;
   }
   // MAIN-world Flow hooks publish a result as soon as Flow exposes it.
   // The background registry performs the exact ID check and ordered download.
@@ -322,7 +340,7 @@
     }
     if(msg?.type==='FS_DOWNLOAD_SCAN' && !state.resultScanRunning) {
       state.resultScanRunning=true;
-      submitViaMainWorld({action:'scan_video_results',ids:msg.ids},5000)
+      submitViaMainWorld({action:'scan_video_results',ids:msg.ids,refresh_ids:msg.refresh_ids||[]},8000)
         .then(data=>downloadMessage({type:'FS_DOWNLOAD_OBSERVE',rows:data.rows||[],diagnostics:data.diagnostics})).catch(error=>{state.downloadSummary='扫描失败：'+String(error.message||error);render();}).finally(()=>{state.resultScanRunning=false;});
     }
     if(msg?.type==='FS_GENERATION_CONTROL'){
@@ -353,16 +371,18 @@
         const ids=saved['flowStudioConfirmedIds:'+taskLedgerKey(job,t,round)];if(!ids?.length)continue;
         const key=JSON.stringify([new URL(location.href).origin+location.pathname.replace(/\/+$/,''),job.command_id,t.segment_id??t.task_name??t.task_id,round]);
         if(repairedBindings.has(key))continue;
-        await downloadMessage({type:'FS_DOWNLOAD_BIND',key,ids});repairedBindings.add(key);
+        const bound=await downloadMessage({type:'FS_DOWNLOAD_BIND',key,ids});repairedBindings.add(key);
         if(repairedBindings.size>1000)repairedBindings.delete(repairedBindings.values().next().value);
-        emit('generation_task_status',{host_id:t.host_id,recipient_id:t.recipient_id,segment_id:t.segment_id,round,state:'success',generation_ids:ids,message:'已恢复原生成结果绑定，继续等待下载'});
+        if(bound?.repaired_from_reserved){
+          emit('generation_task_status',{host_id:t.host_id,recipient_id:t.recipient_id,segment_id:t.segment_id,round,state:'success',generation_ids:ids,message:'已恢复原生成结果绑定，继续等待下载'});
+        }
       }
     }catch(error){state.downloadSummary='结果绑定待恢复：'+String(error.message||error);}
     finally{bindingRepairRunning=false;}
   }
   setInterval(()=>{void repairConfirmedBindings();},30000);
   // Content heartbeat wakes a suspended MV3 worker; independent of generation/upload.
-  setInterval(()=>{downloadMessage({type:'FS_DOWNLOAD_POLL'}).catch(error=>{state.downloadSummary='下载后台异常：'+String(error.message||error);render();});},2000);
+  setInterval(()=>{downloadMessage({type:'FS_DOWNLOAD_POLL'}).catch(error=>{state.downloadSummary='下载后台异常：'+String(error.message||error);render();});},4000);
   setInterval(()=>{chrome.runtime.sendMessage({type:'FS_CONNECTION_PING'},()=>void chrome.runtime.lastError);},2200);
 
   // Upload watchdog: no upload stage is allowed to hold the channel forever.
@@ -385,8 +405,14 @@
     render();
     queueMicrotask(()=>maybeAutoUpload());
   },5000);
+  function isOminiVideoModel(value) {
+    return ['abra','flow_omni','omni','omini','gemini_omni'].includes(String(value || '').trim().toLowerCase());
+  }
   function normalizeTasks(job) {
-    return (job?.tasks || []).map((t,i)=>({
+    return (job?.tasks || []).map((t,i)=>{
+      const videoModel = String(t.video_model || t.videoModel || t.model || '');
+      const isOmini = isOminiVideoModel(videoModel);
+      return {
       document_number:documentNumber(t,i),
       task_id: String(t.task_id || t.segment_id || `${i+1}`),
       task_name: String(t.task_name || t.download_stem || t.task_id || t.segment_id || `${i+1}`),
@@ -403,13 +429,15 @@
       image_path: taskImagePath(t),
       dialogue: String(t.dialogue || t.script || t.text || ''),
       prompt: String(t.prompt || t.flow_prompt || t.final_prompt || ''),
+      video_model: videoModel,
       generation_mode: String(t.generation_mode || 'FRAME').toUpperCase()==='MATERIAL' ? 'MATERIAL' : 'FRAME',
-      duration: Number(t.duration || 8),
-      needs_split: Boolean(t.needs_split), force_submit: Boolean(t.force_submit),
+      aspect_ratio: String(t.aspect_ratio || t.aspectRatio || job?.aspect_ratio || job?.aspectRatio || '9:16')==='16:9' ? '16:9' : '9:16',
+      duration: isOmini ? 8 : Number(t.duration || 8),
+      needs_split: isOmini ? false : Boolean(t.needs_split), force_submit: isOmini ? true : Boolean(t.force_submit),
       estimated_speech_seconds: Number(t.estimated_speech_seconds || 0),
       matched: false,
       flow_media_url: ''
-    }));
+    };});
   }
 
   function jobBaseIdentity(job) {
@@ -423,7 +451,8 @@
       const task=String(t.task_id ?? t.task_name ?? '');
       const image=basename(t.image_path || t.reference_image || t.image || t.image_name || '');
       const mode=String(t.generation_mode||'FRAME').toUpperCase()==='MATERIAL'?'MATERIAL':'FRAME';
-      return `${segment}|${task}|${image}|${mode}`;
+      const vmodel=isOminiVideoModel(t.video_model||t.videoModel||t.model)?'OMINI':'';
+      return vmodel?`${segment}|${task}|${image}|${mode}|${vmodel}`:`${segment}|${task}|${image}|${mode}`;
     }).sort();
     return `${Number(job?.generation_count||1)}:${rows.join('~')}`;
   }
@@ -579,9 +608,15 @@
     return !!String(item.id||'').trim() && !!String(item.name||'').trim();
   }
   function requiredUploadStatus(media=state.media,job=state.job) {
-    const expected=getExpectedNames(job);
+    // V-timeout: images already skipped after exhausted upload retries no longer gate the wave.
+    const expected=getExpectedNames(job).filter(name=>!isUploadSkippedName(name));
     const rows=new Map();
-    for(const item of (media||[])){const key=norm(item?.name);if(key&&!rows.has(key))rows.set(key,item);}
+    for(const item of (media||[])){
+      const key=norm(item?.name);
+      if(!key)continue;
+      const prev=rows.get(key);
+      if(!prev || (!mediaUploadUsable(prev) && mediaUploadUsable(item)))rows.set(key,item);
+    }
     const missing=[],pending=[];
     for(const name of expected){
       const item=rows.get(norm(name));
@@ -989,8 +1024,17 @@
       // wave is still submitting. Same command/channel must NOT cancel the
       // in-flight wave; the next poll will adopt the new task set after it ends.
       if (incoming && incomingBase===state.baseIdentity) {
-        // 同一命令运行中：只刷新设置（间隔/随机时间等），不改变任务集。
-        if(state.job && incoming.settings && String(incoming.command_id||'')===String(state.job.command_id||'')) state.job.settings=incoming.settings;
+        // 同一命令运行中：只刷新设置（间隔/随机时间/生成比例等），不改变任务集。
+        if(state.job && String(incoming.command_id||'')===String(state.job.command_id||'')){
+          if(incoming.settings) state.job.settings=incoming.settings;
+          if(incoming.aspect_ratio){state.job.aspect_ratio=incoming.aspect_ratio;state.job.aspectRatio=incoming.aspect_ratio;}
+          const freshBySeg=new Map((incoming.tasks||[]).map(x=>[Number(x.segment_id||0),x]));
+          for(const t of state.tasks){
+            const ft=freshBySeg.get(Number(t.segment_id||0));
+            if(ft?.aspect_ratio) t.aspect_ratio=ft.aspect_ratio;
+            else if(incoming.aspect_ratio) t.aspect_ratio=incoming.aspect_ratio;
+          }
+        }
         render();
       }
       else if(res.connected) {state.cancelledCommand=state.job?.command_id;}
@@ -1032,7 +1076,15 @@
         stopScanner();
       }
     }
-    if (incoming) state.job = incoming;
+    if (incoming) {
+      state.job = incoming;
+      const freshBySeg=new Map((incoming.tasks||[]).map(x=>[Number(x.segment_id||0),x]));
+      for(const t of state.tasks){
+        const ft=freshBySeg.get(Number(t.segment_id||0));
+        if(ft?.aspect_ratio) t.aspect_ratio=ft.aspect_ratio;
+        else if(incoming.aspect_ratio) t.aspect_ratio=incoming.aspect_ratio;
+      }
+    }
     if (incoming && Date.now()-state.lastBoundEmit >= 2500) {
       emit('web_plugin_heartbeat',{
         ready:state.ready,
@@ -1049,12 +1101,17 @@
   }
 
   function matchTasks(media) {
-    const counts=new Map();
-    for(const m of media){const key=norm(m.name);counts.set(key,(counts.get(key)||0)+1);}
-    const byName = new Map(media.filter(m=>counts.get(norm(m.name))===1).map(m=>[norm(m.name),m]));
+    // 上传前查重与同名图片复用：若 Flow 中已有 1 张或多张同名图片，直接优先选用已就绪的一张，不再阻断任务。
+    const byName = new Map();
+    for(const m of (media||[])){
+      const key=norm(m?.name);
+      if(!key)continue;
+      const prev=byName.get(key);
+      if(!prev || (!mediaUploadUsable(prev) && mediaUploadUsable(m)))byName.set(key,m);
+    }
     state.tasks = state.tasks.map(t=>{
       const hit = byName.get(norm(t.image));
-      return {...t, matched:!!hit, flow_media_url:hit?.url || '', flow_media_id:hit?.id || ''};
+      return {...t, matched:!!hit && mediaUploadUsable(hit), flow_media_url:hit?.url || '', flow_media_id:hit?.id || ''};
     });
     state.matched = state.tasks.filter(t=>t.matched).length;
   }
@@ -1128,6 +1185,17 @@
     state.message=`已跳过 ${failed.length} 张上传失败图片，正在优先准备已上传成功的任务`;
     startScanner();render();
   }
+  // V-timeout: automatic version of「跳过失败图片并继续」. If nothing is left to submit,
+  // retire the wave so Studio releases the channel instead of waiting forever.
+  function autoSkipFailedUploads() {
+    if(!state.job || state.generationRunning)return;
+    const failed=exhaustedUploadNames();
+    if(!failed.length)return;
+    skipFailedUploadsAndContinue();
+    if(!activeGenerationTasks().filter(t=>t.prompt||t.dialogue).length && state.job?.command_id){
+      retireCompletedWave(state.job,{total:state.tasks.length,success:0,failed:state.tasks.length,deferred:0},'本批参考图全部上传失败，已标记失败并释放通道');
+    }
+  }
   function uploadKey(name) {
     const j=state.job || {};
     return JSON.stringify([location.pathname,j.host_id,j.image_set_id,taskPathForName(name),norm(name)]);
@@ -1183,9 +1251,48 @@
   }
   async function uploadMissing(auto=false) {
     if (!state.job || state.ready || state.uploadInFlight || state.generationRunning) return;
+    // 上传前强制查重：每次上传前先实时读取 Flow 当前素材列表，页面已有的同名图片直接复用，只上传真正缺失的图片。
+    const expectedBeforeUpload=getExpectedNames(state.job);
+    if (expectedBeforeUpload.length) {
+      try {
+        const wanted=new Set(expectedBeforeUpload.map(norm));
+        const snapshot=await submitViaMainWorld({action:'scan_media'},5000);
+        const media=(snapshot?.media || []).filter(m=>wanted.has(norm(m?.name)));
+        state.mediaScanValid=true;
+        state.media=media;
+        state.lastRecognizedMediaCount=recognizedMediaCount();
+        for (const m of media) {
+          if (mediaUploadUsable(m)) {
+            clearDispatchRecord(m.name);
+            markUploadFailureRecovered(m.name);
+          }
+        }
+        matchTasks(media);
+        emit('preupload_existing_media_checked',{
+          required:expectedBeforeUpload.length,
+          present:new Set(media.map(m=>norm(m.name))).size,
+          missing:allMissingImageNames(),
+          reused:[...new Set(media.map(m=>m.name).filter(Boolean))]
+        });
+      } catch (e) {
+        state.mediaScanValid=false;
+        emit('preupload_existing_media_check_failed',{error:String(e?.message||e)});
+        if (auto) {
+          state.message='正在等待 Flow 页面素材库就绪以完成上传前查重…';
+          render();
+          return;
+        }
+      }
+    }
+    if (!state.job || state.ready || state.uploadInFlight || state.generationRunning) return;
     const batch=missingImagePaths();
-    if (!batch.names.length) return;
-    const hints=state.mediaScanValid ? new Set() : visibleMediaNames();
+    if (!batch.names.length) {
+      state.message='所需图片已在 Flow 中存在，无需重复上传；继续准备生成';
+      render();
+      queueMicrotask(()=>scanOnce());
+      return;
+    }
+    const hints=state.mediaScanValid ? new Set((state.media||[]).map(m=>norm(m.name))) : visibleMediaNames();
     const missing=batch.names.filter(name=>!hints.has(norm(name)) && taskPathForName(name));
     const now=Date.now();
     const fresh=missing.filter(name=>dispatchCount(name)===0);
@@ -1205,6 +1312,9 @@
           uploadFailureLedger.add(signature);
           emit('media_upload_failed_final',{files:exhausted,count:exhausted.length,max_attempts:MAX_AUTO_UPLOAD_ATTEMPTS,error:'Flow did not expose uploaded media after verified dispatch retries'});
         }
+        // V-timeout: never wait for a manual click. Mark only these tasks failed and keep
+        // submitting the rest of the wave (same effect as「跳过失败图片并继续」).
+        queueMicrotask(()=>autoSkipFailedUploads());
       } else {
         const nextAt=waiting.length ? Math.min(...waiting.map(name=>lastDispatchAt(name)+UPLOAD_VERIFY_GRACE_MS)) : 0;
         const seconds=nextAt ? Math.max(1,Math.ceil((nextAt-now)/1000)) : 0;
@@ -1318,7 +1428,6 @@
       if (identity !== state.identity) return;
       state.mediaScanValid=false; state.ready=false;
       state.message=String(e.message || e); render();
-      await maybeAutoUpload();
       return;
     }
     if (identity !== state.identity) return;
@@ -1342,8 +1451,7 @@
       emit('flow_media_detected',{recognized:state.lastRecognizedMediaCount,total:expected.length,added:state.lastRecognizedMediaCount-previousRecognized,files:media.map(m=>m.name)});
     }
     matchTasks(media);
-    const duplicates=media.filter((m,i)=>media.findIndex(x=>norm(x.name)===norm(m.name))!==i);
-    if (duplicates.length) { state.ready=false; state.message='存在同名素材，请在 Flow 中清理重复图片：'+[...new Set(duplicates.map(m=>m.name))].join('、'); render(); return; }
+    // 同名图片已在上传前查重并复用可用素材，不再因页面存在重复图片而卡住。
     const sig = media.map(x=>x.id+':'+norm(x.name)).sort().join('|');
     const imageCountNow=media.length;
     const imageTotalNow=expected.length;
@@ -1516,15 +1624,24 @@
   }
   async function markTaskConfirmed(job,t,round,ids=[]){
     const key=taskLedgerKey(job,t,round),ts=Date.now();
-    try{await chrome.storage.local.set({['flowStudioConfirmedIds:'+key]:ids});}catch(error){throw Error('SUBMISSION_UNCONFIRMED:无法保存已提交视频ID，禁止重复点击');}
     try{sessionStorage.setItem('flow-studio-dispatch:'+key,'confirmed');}catch(_){}
+    try{
+      await chrome.storage.local.set({['flowStudioConfirmedIds:'+key]:ids});
+    }catch(_){
+      try{
+        const all=await chrome.storage.local.get(null);
+        const ck=Object.keys(all||{}).filter(k=>k.startsWith('flowStudioConfirmedIds:'));
+        if(ck.length>400)await chrome.storage.local.remove(ck.slice(0,ck.length-400));
+        await chrome.storage.local.set({['flowStudioConfirmedIds:'+key]:ids});
+      }catch(_2){}
+    }
     try{
       const d=await chrome.storage.local.get(DURABLE_DISPATCH_LEDGER);
       const ledger={...(d[DURABLE_DISPATCH_LEDGER]||{}),[key]:ts};
       const entries=Object.entries(ledger);
-      if(entries.length>5000){
+      if(entries.length>2000){
         entries.sort((a,b)=>Number(b[1])-Number(a[1]));
-        const keep=Object.fromEntries(entries.slice(0,5000));
+        const keep=Object.fromEntries(entries.slice(0,2000));
         await chrome.storage.local.set({[DURABLE_DISPATCH_LEDGER]:keep});
       }else await chrome.storage.local.set({[DURABLE_DISPATCH_LEDGER]:ledger});
     }catch(_){}
@@ -1744,8 +1861,8 @@
     noteSubmissionAttempt(job);
     try { result=await submitWithRecovery({
       action:'submit_task', recovery_key:reservation.key, image_name:t.image, image_id:t.flow_media_id,
-      model:job.video_model || job.videoModel || job.generation_model || job.model || 'veo_3_1_lite_low_priority',
-      aspect_ratio:job.aspect_ratio ?? job.aspectRatio ?? job.video_aspect_ratio ?? job.video_ratio ?? job.ratio ?? job.settings?.aspect_ratio ?? job.settings?.aspectRatio ?? job.generation_settings?.aspect_ratio ?? '9:16',
+      model:t.video_model || t.videoModel || job.video_model || job.videoModel || job.generation_model || job.model || 'veo_3_1_lite_low_priority',
+      aspect_ratio:t.aspect_ratio ?? t.aspectRatio ?? job.aspect_ratio ?? job.aspectRatio ?? job.video_aspect_ratio ?? job.video_ratio ?? job.ratio ?? job.settings?.aspect_ratio ?? job.settings?.aspectRatio ?? job.generation_settings?.aspect_ratio ?? '9:16',
       duration:t.duration, needs_split:t.needs_split, force_submit:t.force_submit, image_path:t.image_path, prompt, mode:(t.generation_mode==='MATERIAL'?'VIDEO_REFERENCES':'VIDEO_FRAMES'), generation_mode:t.generation_mode, round,
       task_id:t.task_id, task_name:taskLabel, segment_id:t.segment_id, command_id:job.command_id
     }, taskMeta); } catch(error) {
@@ -1883,7 +2000,12 @@
     markStartedWave(executionKey);
     state.generationRunning=true; state.generationCommand=executionKey; state.generationSubmitted=0; state.generationFailed=0; state.generationDeferred=0;
     const tasks=activeGenerationTasks().filter(t=>t.prompt||t.dialogue);
-    if(!tasks.length){state.message='没有可生成任务：当前批次图片均未成功上传或已被手动跳过';state.generationRunning=false;render();return;}
+    if(!tasks.length){
+      // V-timeout: never exit silently while holding the channel.
+      state.generationRunning=false;
+      retireCompletedWave(job,{total:0,success:0,failed:state.tasks.length,deferred:0},'没有可生成任务：本批图片均未成功上传或已跳过，已释放通道');
+      return;
+    }
     const rounds=Math.max(1,Math.min(4,Number(job.generation_count||1)));
     const totalRuns=tasks.length*rounds;
     emit('generation_auto_started',{total:tasks.length,segment_ids:tasks.map(t=>t.segment_id).filter(Boolean),rounds});
@@ -1941,7 +2063,7 @@
     return state.tasks.map(t=>`<div class="fs-row">
       <div class="fs-taskid">${esc(t.task_name||t.task_id)}</div>
       <div class="fs-ref"><span class="fs-dot ${t.matched?'ok':''}">${t.matched?'✓':'○'}</span><span>${esc(t.image||'未指定')}</span></div>
-      <div class="fs-text">${esc(t.dialogue)}<br><small>${String(t.duration||8)+' 秒 · '+(t.generation_mode==='MATERIAL'?'素材':'帧')}</small></div>
+      <div class="fs-text">${esc(t.dialogue)}<br><small>${String(t.duration||8)+' 秒 · '+(isOminiVideoModel(t.video_model)?'Omini':(t.generation_mode==='MATERIAL'?'素材':'帧'))+' · '+((t.aspect_ratio||state.job?.aspect_ratio||'9:16')==='16:9'?'16:9 横屏':'9:16 竖屏')}</small></div>
       <div class="fs-text prompt">${esc(t.prompt)}</div>
       <div><span class="fs-pill ${isUploadSkippedName(t.image)?'fail':(t.matched?'ok':'wait')}">${isUploadSkippedName(t.image)?'上传失败已跳过':(t.matched?'已匹配':'待匹配')}</span></div>
     </div>`).join('');
@@ -1993,7 +2115,7 @@
         <div class="fs-bridge-config"><span>本地连接</span><code>127.0.0.1:</code><input id="fs-bridge-port" type="number" min="1024" max="65535" value="${esc(state.bridgePort)}"><button id="fs-save-port">保存端口并重连</button><small>需与 Flow Studio → Flow设置 → 本地 Bridge 端口一致</small></div>
         <div class="fs-summary">
           <div><span>AI 主播</span><b>${esc(j.host_name||'—')}</b></div>
-          <div><span>生成方式</span><b>${state.tasks.length?(new Set(state.tasks.map(t=>t.generation_mode)).size>1?'帧 / 素材混合':(state.tasks[0].generation_mode==='MATERIAL'?'素材':'帧')):'—'}</b></div>
+          <div><span>生成方式</span><b>${state.tasks.length?(new Set(state.tasks.map(t=>t.generation_mode)).size>1?'帧 / 素材混合':(state.tasks[0].generation_mode==='MATERIAL'?'素材':'帧')):'—'} · ${((state.tasks[0]?.aspect_ratio||j.aspect_ratio||'9:16')==='16:9'?'16:9 横屏':'9:16 竖屏')}</b></div>
           <div><span>生成轮数</span><b>${esc(j.generation_count_label||j.generation_count||1)}</b></div>
           <div><span>任务数量</span><b>${activeTotal}${activeTotal!==total?` / 原 ${total}`:''}</b></div>
           <div><span>可用图片匹配</span><b>${recognizedMediaCount()} / ${expectedMediaTotal()}</b></div>

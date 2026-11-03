@@ -65,29 +65,59 @@ class PackagingComponentsPage(QWidget):
         if not (found['cli'] and found['model']):
             self.status.setText('未找到可用的 whisper.cpp。请在“字幕识别”里点击“检测 / 安装 whisper.cpp”。')
         local.addStretch()
-        templates=section('提示词模板')
-        for label,key in [('睁眼基础模板','talking_base_prompt'),('闭眼基础模板','praying_base_prompt')]:
-            templates.addWidget(QLabel(label));field=QPlainTextEdit(repo.get_setting(key,''));field.setMaximumHeight(120);templates.addWidget(field)
-            field.textChanged.connect(lambda field=field,key=key:repo.set_setting(key,field.toPlainText().strip()))
-        templates.addStretch()
         keys=section('API 密钥')
         from app.ui.credential_pool_dialog import edit_pool
         gpt=QPushButton('GPT 提示词 · 批量密钥 / 轮询');gpt.clicked.connect(lambda:edit_pool(self,'com.flowstudio.openai','FlowStudio'))
         row=QHBoxLayout();row.addWidget(gpt);row.addStretch();keys.addLayout(row)
-        keys.addWidget(QLabel('云端字幕识别服务'))
-        provider=QComboBox();provider.addItems(['Groq','ElevenLabs','Gladia','Gemini']);provider.setMaximumWidth(300)
-        if packaging.asr_provider.currentText()!=LOCAL_PROVIDER:provider.setCurrentText(packaging.asr_provider.currentText())
-        keys.addWidget(provider)
-        entry=QLineEdit();entry.setEchoMode(QLineEdit.Password);entry.setPlaceholderText('填写当前服务的密钥，或点击批量 / 轮询')
-        provider.currentTextChanged.connect(lambda _:entry.clear())
-        def save_key():
-            from app.services.credential_pool import save
+        keys.addWidget(QLabel('云端字幕识别服务（可用/总数）'))
+        provider=QComboBox();provider.setMaximumWidth(300)
+        for p_name in ('Groq','ElevenLabs','Gladia','Gemini'):
+            provider.addItem(p_name, p_name)
+        def _current_provider_name():
+            return str(provider.currentData() or provider.currentText().split()[0]).strip()
+        def _apply_provider_counts(counts_map):
             try:
-                save('com.flowstudio.asr',provider.currentText(),entry.text());entry.clear();packaging.component_feedback.setText(provider.currentText()+' 密钥已保存到系统凭据库。')
-            except Exception:QMessageBox.warning(self,'保存密钥','请填写有效密钥，并确认系统凭据库已解锁。')
+                provider.blockSignals(True)
+                for idx in range(provider.count()):
+                    p_name = provider.itemData(idx)
+                    if p_name in counts_map:
+                        av, tot = counts_map[p_name]
+                        provider.setItemText(idx, f'{p_name}   ({av}/{tot})')
+                provider.blockSignals(False)
+            except RuntimeError:
+                pass
+        def _refresh_provider_counts(async_load=False):
+            names = [provider.itemData(idx) for idx in range(provider.count())]
+            if async_load:
+                import threading
+                def _worker():
+                    from app.services import credential_pool
+                    res = {n: credential_pool.pool_counts('com.flowstudio.asr', n) for n in names}
+                    QTimer.singleShot(0, self, lambda r=res: _apply_provider_counts(r))
+                threading.Thread(target=_worker, name='asr-pool-counts', daemon=True).start()
+            else:
+                from app.services import credential_pool
+                _apply_provider_counts({n: credential_pool.pool_counts('com.flowstudio.asr', n) for n in names})
+        _refresh_provider_counts(async_load=True)
+        if packaging.asr_provider.currentText()!=LOCAL_PROVIDER:
+            idx = provider.findData(packaging.asr_provider.currentText())
+            if idx >= 0: provider.setCurrentIndex(idx)
+        keys.addWidget(provider)
+        entry=QLineEdit();entry.setEchoMode(QLineEdit.Password);entry.setPlaceholderText('填写要追加的密钥，或点击「管理密钥池 / 轮询」')
+        provider.currentIndexChanged.connect(lambda _:entry.clear())
+        def save_key():
+            from app.services.credential_pool import append_keys
+            p_name = _current_provider_name()
+            try:
+                total = append_keys('com.flowstudio.asr',p_name,entry.text());entry.clear();_refresh_provider_counts();packaging.component_feedback.setText(f'{p_name} 新密钥已追加保存（当前池内共 {total} 个密钥）。')
+            except Exception as exc:QMessageBox.warning(self,'添加密钥',f'请填写有效密钥（无空格），并确认系统凭据库已解锁。\n{exc}')
+        def open_bulk():
+            p_name = _current_provider_name()
+            edit_pool(self,'com.flowstudio.asr',p_name)
+            _refresh_provider_counts()
         row=QHBoxLayout();row.addWidget(entry,1)
-        save=QPushButton('保存单个');save.clicked.connect(save_key);row.addWidget(save)
-        bulk=QPushButton('批量 / 轮询');bulk.clicked.connect(lambda:edit_pool(self,'com.flowstudio.asr',provider.currentText()));row.addWidget(bulk);keys.addLayout(row)
+        save=QPushButton('➕ 添加密钥');save.clicked.connect(save_key);row.addWidget(save)
+        bulk=QPushButton('管理密钥池 / 轮询');bulk.clicked.connect(open_bulk);row.addWidget(bulk);keys.addLayout(row)
         keys.addWidget(packaging.component_feedback);keys.addStretch()
         engine=section('兼容引擎')
         note=QLabel('Remotion 用于原有 CSS 字幕、连续滚动等兼容效果。使用常规 Reels 样式时不需要此引擎。');note.setWordWrap(True);engine.addWidget(note)

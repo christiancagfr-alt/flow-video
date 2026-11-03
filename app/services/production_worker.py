@@ -8,6 +8,11 @@ from app.core import repository as repo, work_dates
 from app.services import channel_pool, runtime_log, pipeline_orchestrator, workflow
 from app.services.perf_diagnostics import measured
 
+def _is_omni_task(task):
+    from app.services import flow_accounts
+    return flow_accounts.is_omni_task(task)
+
+
 class StatusText:
     def __init__(self):
         self.text = ''
@@ -95,12 +100,43 @@ class ProductionWorker:
             return False
 
     def _auto_retry_timed_out_active_commands(self, scope_day):
-        """A delayed receipt is not permission to regenerate a paid or failed task."""
+        """Self-heal deadlocked channel slots, timed-out `uncertain` submissions, and 20m+ zombie renders."""
         now=time.time()
-        if now-getattr(self,'_last_active_progress_scan',0)>=60:
+        if now-getattr(self,'_last_active_progress_scan',0)>=30:
             self._last_active_progress_scan=now
             try:self.bridge.request_progress_scan()
             except Exception as exc:runtime_log.log('progress_scan_failed',level='WARNING',error=str(exc))
+        if now-getattr(self,'_last_self_heal_check',0)<10:
+            return 0
+        self._last_self_heal_check=now
+        try:
+            for d,_ch,p in channel_pool.scan_downloads():
+                try:workflow.accept_channel_file(d,p)
+                except Exception:pass
+            repo.adopt_orphan_outputs()
+        except Exception as exc:
+            runtime_log.log('self_heal_pre_scan_failed',level='WARNING',error=str(exc))
+        try:
+            idle_hb=self.bridge.idle_heartbeat_channels() if hasattr(self.bridge,'idle_heartbeat_channels') else {}
+            healed=repo.self_heal_stalled_scheduler_state(
+                work_date=scope_day,
+                now=now,
+                idle_heartbeat_channels=idle_hb,
+                uncertain_grace_seconds=int(repo.get_setting('flow_uncertain_grace_seconds','120') or 120),
+                # V-timeout: 每个视频固定 15 分钟等待；超时自动重新提交 1 次，再超时进入「异常」。
+                zombie_generating_seconds=int(repo.get_setting('flow_video_timeout_seconds','900') or 900),
+                max_auto_retries=int(repo.get_setting('flow_video_timeout_retries','1') or 1),
+            )
+            retired=healed.get('retired_commands') or []
+            if retired:
+                try:self.bridge.cancel_host_commands(retired)
+                except Exception:pass
+            if any(healed.get(k) for k in ('released_channels','uncertain_requeued','uncertain_failed','zombie_requeued','zombie_failed')):
+                runtime_log.log('scheduler_self_heal_applied',work_date=scope_day,**healed)
+                self.dirty=True
+                return len(healed.get('uncertain_requeued') or []) + len(healed.get('zombie_requeued') or [])
+        except Exception as exc:
+            runtime_log.log('scheduler_self_heal_failed',level='ERROR',error=str(exc))
         return 0
 
     def _auto_reclaim_unclaimed_dispatches(self, scope_day):
@@ -143,7 +179,8 @@ class ProductionWorker:
     def _auto_dispatch_ready_tasks(self, scope_day=None, audit=None):
         if scope_day is None:
             from app.core import work_dates as _work_dates
-            scope_day=self.day
+            scope_day=self.day or _work_dates.active()
+        self.day=scope_day
         # Automatic production must consume the GLOBAL approved queue, not the
         # recipient/host currently selected in the Flow Center UI. Otherwise a
         # prompt submitted from GPT can sit forever when another recipient/host
@@ -219,31 +256,8 @@ class ProductionWorker:
                     self.auto_production_state.setToolTip('自动调度器每 2 秒只检查当前选中日期。')
             return 0
 
-        # Opt-in dependency check; ordinary tasks retain their original path.
-
-        ready=[]; image_errors=[]
-        for task in tasks:
-            try:
-                channel_pool.resolve_task_image_path(task)
-                if task.get('TASK_TYPE','VIDEO')=='VIDEO':
-                    from app.services import camera_aux
-                    task=camera_aux.resolve(task)[0]
-                ready.append(task)
-            except Exception as exc:
-                self._record_image_block(task,exc)
-                image_errors.append(str(exc))
-                runtime_log.log('auto_dispatch_image_blocked',level='ERROR',segment_id=task['segment_id'],error=str(exc))
-        tasks=ready
-        if image_errors and hasattr(self,'auto_production_state'):
-            self.auto_production_state.setText(f'⚠ {len(image_errors)} 条图片待修复')
-            self.auto_production_state.setToolTip('\n'.join(image_errors[:10]))
-        if not tasks:return 0
-        tasks, account_id = self._limit_tasks_for_account(tasks)
-        if not tasks:return 0
-
-        # Only configured normal channels participate in unattended dispatch.
-        # Unconfigured slots (for example CH4-CH7 when the user only uses three
-        # browser tabs) must NOT block every submitted video task.
+        # Check channel availability first so busy ticks do not re-query 500+ video plans
+        # and disk paths every 2 seconds while still catching any newly added broken image.
         channel_pool.recover_unpublished_auto_dispatches(work_date=scope_day)
         healed=repo.heal_recent_online_channels()
         if healed:
@@ -261,16 +275,97 @@ class ProductionWorker:
                 continue
             seen[norm]=str(ch['channel_key'])
             channels.append(ch)
+
+        from collections import OrderedDict
+        from app.services import broll_presets, camera_aux
+        now_ts = time.time()
+        valid_cache = getattr(self, '_valid_task_cache', None)
+        if valid_cache is None:
+            valid_cache = OrderedDict()
+            self._valid_task_cache = valid_cache
+
+        def _task_sig(t):
+            return (
+                int(t['segment_id']),
+                int(t['video_id']),
+                str(t.get('image_path') or ''),
+                str(t.get('TASK_TYPE') or 'VIDEO'),
+                str(t.get('generation_mode') or ''),
+            )
+
+        need_fresh = bool(channels)
+        if need_fresh:
+            to_check_vids = {str(t['video_id']) for t in tasks if t.get('TASK_TYPE', 'VIDEO') == 'VIDEO'}
+        else:
+            to_check_vids = {
+                str(t['video_id'])
+                for t in tasks
+                if t.get('TASK_TYPE', 'VIDEO') == 'VIDEO'
+                and (_task_sig(t) not in valid_cache or now_ts - valid_cache[_task_sig(t)][0] > 45.0)
+            }
+        plan_cache = broll_presets.get_video_plans_batch(to_check_vids) if to_check_vids else {}
+        resolved_img_memo = {}
+
+        ready=[]; image_errors=[]
+        for task in tasks:
+            sig = _task_sig(task)
+            if not need_fresh:
+                cached_entry = valid_cache.get(sig)
+                if cached_entry is not None and now_ts - cached_entry[0] <= 45.0:
+                    valid_cache.move_to_end(sig)
+                    merged = dict(task)
+                    merged.update(cached_entry[1])
+                    ready.append(merged)
+                    continue
+            try:
+                img_key = (
+                    str(scope_day or ''),
+                    int(task.get('recipient_id') or 0),
+                    int(task.get('host_id') or 0),
+                    str(task.get('image_path') or ''),
+                )
+                if img_key not in resolved_img_memo:
+                    resolved_img_memo[img_key] = channel_pool.resolve_task_image_path(task, scope_day)
+                extra_fields = {}
+                if task.get('TASK_TYPE','VIDEO')=='VIDEO':
+                    resolved_task = camera_aux.resolve(task, plan_cache=plan_cache)[0]
+                    for k in ('end_image_path', 'camera_motion', 'generation_mode'):
+                        if k in resolved_task and resolved_task[k] != task.get(k):
+                            extra_fields[k] = resolved_task[k]
+                    task = resolved_task
+                valid_cache[sig] = (now_ts, extra_fields)
+                valid_cache.move_to_end(sig)
+                while len(valid_cache) > 2048:
+                    valid_cache.popitem(last=False)
+                ready.append(task)
+            except Exception as exc:
+                valid_cache.pop(sig, None)
+                self._record_image_block(task,exc)
+                image_errors.append(str(exc))
+                runtime_log.log('auto_dispatch_image_blocked',level='ERROR',segment_id=task['segment_id'],error=str(exc))
+        tasks=ready
+        if image_errors and hasattr(self,'auto_production_state'):
+            self.auto_production_state.setText(f'⚠ {len(image_errors)} 条图片待修复')
+            self.auto_production_state.setToolTip('\n'.join(image_errors[:10]))
+        if not tasks:return 0
+        tasks, account_id = self._limit_tasks_for_account(tasks)
+        if not tasks:return 0
+
         if not channels:
             configured=[dict(c) for c in repo.list_channel_pool(enabled_only=True) if str(c['role'])=='normal' and str(c['collection_url'] or '').strip()]
-            detail=[{'channel':str(c['channel_key']),'online_age':round(time.time()-float(c['last_seen'] or 0),1) if c['last_seen'] else None,
+            detail=[{'channel':str(c['channel_key']),'online_age':round(now_ts-float(c['last_seen'] or 0),1) if c['last_seen'] else None,
                      'task_command_id':str(c['task_command_id'] or ''),'health':str(c['health_status'] or ''),
                      'quarantine_until':float(c['quarantine_until'] or 0)} for c in configured]
             if hasattr(self,'auto_production_state'):
                 self.auto_production_state.setText(f'等待可用通道 · {len(tasks)} 条任务保留 · 已配置 {len(configured)} 个普通通道')
                 self.auto_production_state.setToolTip('调度器没有发现可领取任务的普通通道；详细原因已写入运行日志。')
-            runtime_log.log('auto_dispatch_waiting_for_channel',level='WARNING',reason='no_available_configured_channel',pending=len(tasks),channels=detail)
+            wait_sig = (len(tasks), tuple((d['channel'], d['task_command_id'], d['health']) for d in detail))
+            if wait_sig != getattr(self, '_last_wait_channel_sig', None) or now_ts - getattr(self, '_last_wait_channel_ts', 0.0) >= 60.0:
+                self._last_wait_channel_sig = wait_sig
+                self._last_wait_channel_ts = now_ts
+                runtime_log.log('auto_dispatch_waiting_for_channel',level='WARNING',reason='no_available_configured_channel',pending=len(tasks),channels=detail)
             return 0
+        self._last_wait_channel_sig = None
         pressure=pipeline_orchestrator.backpressure_state()
         if pressure.get('throttled'):
             # Retaining downstream data must not silently stop authorized new work.
@@ -288,9 +383,8 @@ class ProductionWorker:
             ctasks=plan.get(str(ch['channel_key']),[])
             if not ctasks: continue
             cmd=f"auto-pool-{ch['channel_key']}-{stamp}"
-            prelim=self._make_pool_job(ch,ctasks,cmd,generation_count=rounds,dispatch_tasks=True,work_date=scope_day)
-            need_upload=not bool(prelim['upload_proof']['verified'])
-            job=self._make_pool_job(ch,ctasks,cmd,generation_count=rounds,execute_upload=need_upload,dispatch_tasks=True,work_date=scope_day)
+            job=self._make_pool_job(ch,ctasks,cmd,generation_count=rounds,dispatch_tasks=True,work_date=scope_day)
+            job['execute_upload']=not bool(job['upload_proof']['verified'])
             jobs.append(job)
         if not jobs:
             # Never silently leave visible WAITING rows with idle channels. Record the
@@ -315,7 +409,7 @@ class ProductionWorker:
             repo.set_dispatch_release_for_command(job['command_id'],job.get('release_at') or 0)
         self.bridge.publish_host_jobs(jobs)
         sent=sum(len(j['tasks']) for j in jobs)
-        self._commit_account_use(account_id, sent)
+        self._commit_account_use(account_id, sum(1 for j in jobs for t in j['tasks'] if _is_omni_task(t)))
         if hasattr(self,'auto_production_state'):
             account_note=getattr(self,'_account_gate_note','')
             self.auto_production_state.setText(f"已发送 {sent} 条到插件队列（每通道最多5条），剩余 {len(tasks)-sent} 条等待空闲通道"+(f' · {len(image_errors)} 条图片异常' if image_errors else '')+(f' · {account_note}' if account_note else ''))
@@ -325,10 +419,12 @@ class ProductionWorker:
         return sum(len(j['tasks']) for j in jobs)
 
     def _pool_scope_tasks(self, redo=False):
+        redo_ids=workflow.redo_ids(work_date=self.day)
+        if redo and not redo_ids:
+            return []
         rid=self.recipient.currentData() if hasattr(self,'recipient') else None
         hid=self.host.currentData() if hasattr(self,'host') else None
         rows=[dict(t) for t in repo.list_flow_tasks(None if redo else rid,None if redo else hid,'全部', work_date=self.day)]
-        redo_ids=workflow.redo_ids(work_date=self.day)
         if redo:
             return [t for t in rows if int(t['segment_id']) in redo_ids and t['flow_status'] in ('待生成','已准备') and not str(t['generation_command'] or '')]
         out=[]
@@ -337,7 +433,9 @@ class ProductionWorker:
             status=t['flow_status'] or '待生成'; command=str(t['generation_command'] or '')
             if command: continue
             if status in ('待生成','已准备'): out.append(t)
-        return out
+        from app.services import host_priority
+        all_rows = rows if (rid is None and hid is None) else [dict(t) for t in repo.list_flow_tasks(None, None, '全部', work_date=self.day)]
+        return host_priority.apply(out, all_rows, self.day)
 
     def _make_pool_job(self,ch,tasks,command_id,generation_count=None,execute_upload=False,dispatch_tasks=False,retry_only=False,work_date=None):
         from app.services.text_processing import flow_timing
@@ -448,8 +546,22 @@ class ProductionWorker:
         task_recovery.queue_failures()
         self.notify_blocked_tasks()
         from app.services import pause_control
-        pending=pause_control.filter_tasks(self._pool_scope_tasks(True))   # paused hosts wait
+        raw_redo = self._pool_scope_tasks(True)
+        if not raw_redo:
+            return
+        pending=pause_control.filter_tasks(raw_redo)   # paused hosts wait
         pending=[t for t in pending if not self._retry_exhausted(t)]
+        if not pending:
+            return
+        # Rework has priority over new work. Only channels that are alive AND idle take part;
+        # check idle channels BEFORE disk image resolution when all channels are busy.
+        normal_avail={str(c['channel_key']):c for c in channel_pool.available_channels('normal',work_date=self.day)}
+        if not normal_avail:
+            now_rw=time.monotonic()
+            if now_rw - getattr(self, '_last_rework_wait_log_ts', 0.0) >= 60.0:
+                self._last_rework_wait_log_ts = now_rw
+                runtime_log.log('rework_waiting_for_free_channel',count=len(pending))
+            return
         readable=[]
         for task in pending:
             try:
@@ -466,9 +578,6 @@ class ProductionWorker:
         if not pending:return
         pending, account_id = self._limit_tasks_for_account(pending, 1)
         if not pending:return
-        # Rework has priority over new work. Only channels that are alive AND idle take part;
-        # offline channels are ignored; each wave uses the same bounded capacity.
-        normal_avail={str(c['channel_key']):c for c in channel_pool.available_channels('normal',work_date=self.day)}
         preferred=task_recovery.preferred_channels(pending)
         plan={};chosen={};fallback=[];waiting=0
         for task in pending:
@@ -526,9 +635,9 @@ class ProductionWorker:
             ctasks=plan.get(str(ch['channel_key']),[])
             if not ctasks:continue
             cmd=f"redo-pool-{ch['channel_key']}-{stamp}"
-            prelim=self._make_pool_job(ch,ctasks,cmd,generation_count=1,dispatch_tasks=True,retry_only=True)
-            need_upload=not bool(prelim['upload_proof']['verified'])
-            job=self._make_pool_job(ch,ctasks,cmd,generation_count=1,execute_upload=need_upload,dispatch_tasks=True,retry_only=True)
+            job=self._make_pool_job(ch,ctasks,cmd,generation_count=1,execute_upload=False,dispatch_tasks=True,retry_only=True)
+            need_upload=not bool(job['upload_proof']['verified'])
+            job['execute_upload']=bool(need_upload)
             job['force_media_scan']=True; job['release_at']=time.time()
             repo.set_channel_pool_task_command(ch['channel_key'],cmd)
             if job['execute_upload']:
@@ -542,7 +651,7 @@ class ProductionWorker:
                             tasks=[channel_pool.task_stem(t,1) for t in ctasks],upload=need_upload)
         if jobs:
             self.bridge.publish_host_jobs(jobs)
-            self._commit_account_use(account_id, sum(len(j['tasks']) for j in jobs))
+            self._commit_account_use(account_id, sum(1 for j in jobs for t in j['tasks'] if _is_omni_task(t)))
             self.dirty = True
 
     def notify_blocked_tasks(self):

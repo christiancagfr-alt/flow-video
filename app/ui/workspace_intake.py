@@ -6,36 +6,54 @@ from app.services import pre_gpt_pipeline as intake
 from app.services.file_filters import is_ignored_system_path
 from app.services.performance_types import is_mixed_requirement
 
-def _read_intake():
-    if not intake.DB_FILE.is_file():return [],{}
-    con=sqlite3.connect(intake.DB_FILE.resolve().as_uri()+'?mode=ro',uri=True)
-    con.row_factory=sqlite3.Row
+def _read_intake(day=None):
+    if not intake.DB_FILE.is_file():
+        return [], {}, {}, False
+    con = sqlite3.connect(intake.DB_FILE.resolve().as_uri() + '?mode=ro', uri=True)
+    con.row_factory = sqlite3.Row
     try:
-        tables={r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if not {'tasks','groups_tbl'}<=tables:return [],{}
-        tasks=[dict(r) for r in con.execute('SELECT * FROM tasks')]
-        groups={r['group_key']:dict(r) for r in con.execute('SELECT * FROM groups_tbl')}
-        return tasks,groups
-    finally:con.close()
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        hidden = bool(
+            day and 'intake_view_state' in tables
+            and con.execute('SELECT 1 FROM intake_view_state WHERE day=? AND hidden=1', (day,)).fetchone()
+        )
+        if hidden:
+            return [], {}, {}, True
+        links = (
+            dict(con.execute('SELECT task_id,video_id FROM production_links'))
+            if 'production_links' in tables else {}
+        )
+        if not {'tasks', 'groups_tbl'} <= tables:
+            return [], {}, links, False
+        tasks = [dict(r) for r in con.execute('SELECT * FROM tasks')]
+        groups = {r['group_key']: dict(r) for r in con.execute('SELECT * FROM groups_tbl')}
+        return tasks, groups, links, False
+    finally:
+        con.close()
 
 def snapshot(day=None):
-    day=day or work_dates.active(); raw,metadata=_read_intake()
-    links={}
-    if intake.DB_FILE.is_file():
-        with sqlite3.connect(intake.DB_FILE) as icon:
-            if icon.execute("SELECT 1 FROM sqlite_master WHERE name='production_links'").fetchone():links=dict(icon.execute('SELECT task_id,video_id FROM production_links'))
+    day = day or work_dates.active()
+    raw, metadata, links, hidden = _read_intake(day)
     with work_dates.read_connection() as con:
-        dates=work_dates.recipient_dates(con)
+        dates = work_dates.recipient_dates(con)
+        if hidden:
+            return [], [], set(dates.values())
         from app.services.performance_types import confirmed_videos
-        videos={r['video_id']:dict(r) for r in con.execute('SELECT v.*,v.id video_id,h.id host_id,h.name host_name,r.id recipient_id,r.name recipient_name FROM videos v JOIN hosts h ON h.id=v.host_id JOIN recipients r ON r.id=h.recipient_id')}
-        confirmed=confirmed_videos(con,{vid:dates[v['recipient_id']] for vid,v in videos.items()})
-        sources={(r['source_task_id'],str(r['source_row'])):r['video_id'] for r in con.execute('SELECT * FROM source_tasks')}
-    if intake.DB_FILE.is_file():
-        with sqlite3.connect(intake.DB_FILE) as icon:
-            tables={r[0] for r in icon.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if 'intake_view_state' in tables and icon.execute('SELECT 1 FROM intake_view_state WHERE day=? AND hidden=1',(day,)).fetchone():
-                return [],[],set(dates.values())
+        videos = {
+            r['video_id']: dict(r)
+            for r in con.execute(
+                'SELECT v.*,v.id video_id,h.id host_id,h.name host_name,r.id recipient_id,r.name recipient_name '
+                'FROM videos v JOIN hosts h ON h.id=v.host_id JOIN recipients r ON r.id=h.recipient_id'
+            )
+        }
+        video_dates = {vid: dates[v['recipient_id']] for vid, v in videos.items()}
+        day_video_ids = [vid for vid, d in video_dates.items() if d == day]
+        confirmed = confirmed_videos(con, video_dates, only_video_ids=day_video_ids)
+        sources = {(r['source_task_id'], str(r['source_row'])): r['video_id'] for r in con.execute('SELECT * FROM source_tasks')}
+        has_hw = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_watermarks'").fetchone()
+        host_wm = {int(r[0]): str(r[1] or '').strip() for r in con.execute('SELECT host_id, bound_name FROM host_watermarks')} if has_hw else {}
     represented=set(); groups={}; tasks=[];all_dates=set()
+    first_ms_by_group={}
     for t in raw:
         if int(t["sheet_row"])<=0:continue
         sid=intake._source_task_key(t['spreadsheet_id'],t['gid'],t.get('content_key',''))
@@ -45,6 +63,10 @@ def snapshot(day=None):
         if task_day!=day:continue
         if v:represented.add(vid)
         key=t['group_key'];m=metadata.get(key,{})
+        srow_num=int(t['sheet_row'])
+        prev_ms=first_ms_by_group.get(key)
+        if prev_ms is None or srow_num < prev_ms[0]:
+            first_ms_by_group[key]=(srow_num, str(t.get('material_source') or '').strip())
         g=groups.setdefault(key,dict(
             group_key=key,recipient=t['recipient'],anchor_name=t['anchor_name'],
             recipient_id=(v.get('recipient_id') if v else None),host_id=(v.get('host_id') if v else None),
@@ -89,7 +111,17 @@ def snapshot(day=None):
             recipient_id=v['recipient_id'],host_id=v['host_id'],video_id=vid,mode=v.get('performance_mode'),
             chinese=v.get('chinese_script',''),foreign=v.get('script',''),asset=image,status=v.get('edit_status','')
         ))
-    for g in groups.values():g['mixed_requirement']=bool(g.pop('_mixed_source',False) and g.get('_type_unconfirmed'));g.pop('_type_unconfirmed',None)
+    for key, g in groups.items():
+        g['mixed_requirement']=bool(g.pop('_mixed_source',False) and g.get('_type_unconfirmed'))
+        g.pop('_type_unconfirmed',None)
+        hid = g.get('host_id')
+        if hid is not None and int(hid) in host_wm:
+            g['material_source'] = host_wm[int(hid)]
+        else:
+            ms_pair = first_ms_by_group.get(key)
+            g['material_source'] = ms_pair[1] if ms_pair else ''
+    # Every day that has saved production tasks is selectable, not just the days in the current sheet.
+    all_dates|={dates[v['recipient_id']] for v in videos.values() if dates.get(v['recipient_id'])}
     return list(groups.values()),tasks,all_dates
 
 def list_groups():return snapshot()[0]

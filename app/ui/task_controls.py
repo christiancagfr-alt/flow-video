@@ -65,6 +65,16 @@ class FillHandleButton(QPushButton):
         super().mouseReleaseEvent(event)
 
 
+class _ShiftAwareCheckBox(QCheckBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.last_modifiers = Qt.NoModifier
+
+    def mousePressEvent(self, event):
+        self.last_modifiers = event.modifiers()
+        super().mousePressEvent(event)
+
+
 class CheckCell(QWidget):
     """Large checkbox + round fill handle, centered inside a table cell."""
     changed = Signal(bool)
@@ -81,12 +91,12 @@ class CheckCell(QWidget):
         row.setSpacing(4)
         row.setAlignment(Qt.AlignCenter)
 
-        self.checkbox = QCheckBox()
+        self.checkbox = _ShiftAwareCheckBox()
         self.checkbox.setObjectName("largeCheck")
         self.checkbox.setFixedSize(20, 20)
         self.checkbox.setCursor(Qt.PointingHandCursor)
         self.checkbox.setChecked(bool(checked))
-        self.checkbox.stateChanged.connect(lambda state: self.changed.emit(state == Qt.Checked))
+        self.checkbox.stateChanged.connect(lambda _state: self.changed.emit(self.checkbox.isChecked()))
 
         self.handle = FillHandleButton(self.checkbox)
         self.handle.drag_started.connect(self.drag_started)
@@ -95,6 +105,11 @@ class CheckCell(QWidget):
 
         row.addWidget(self.checkbox)
         row.addWidget(self.handle)
+
+    def consume_modifiers(self):
+        mods = getattr(self.checkbox, "last_modifiers", Qt.NoModifier)
+        self.checkbox.last_modifiers = Qt.NoModifier
+        return mods
 
     def isChecked(self):
         return self.checkbox.isChecked()
@@ -111,9 +126,11 @@ class GenerationModeToggle(QWidget):
     """Shared per-segment FRAME/MATERIAL selector used by GPT, Flow and QC pages."""
     modeChanged = Signal(str)
 
-    def __init__(self, mode="FRAME", parent=None, compact=True):
+    def __init__(self, mode="FRAME", parent=None, compact=True, video_model="", mini=False):
         super().__init__(parent)
         self._mode = "FRAME"
+        self._video_model = ""
+        self._compact = compact
         self._block = False
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -122,34 +139,89 @@ class GenerationModeToggle(QWidget):
         self.material_btn = QPushButton("素材", objectName="generationModeMaterial")
         # Keep the two labels readable even inside a dense table cell.  The widget
         # owns its minimum width so the parent table cannot squeeze “素材” into “帧”.
-        button_w = 62 if compact else 72
+        button_w = 48 if mini else (62 if compact else 72)
         self.setMinimumWidth(button_w * 2 + 4)
         for btn in (self.frame_btn, self.material_btn):
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setMinimumHeight(30 if compact else 34)
+            if mini:
+                # Small variant for dense tables (GPT prompt center): fits inside the column.
+                btn.setProperty("mini", True)
+                btn.setFixedHeight(26)
+            else:
+                btn.setMinimumHeight(30 if compact else 34)
             btn.setFixedWidth(button_w)
-        self.frame_btn.clicked.connect(lambda: self.setMode("FRAME", emit=True))
-        self.material_btn.clicked.connect(lambda: self.setMode("MATERIAL", emit=True))
+        self.frame_btn.clicked.connect(lambda: self._on_user_click("FRAME"))
+        self.material_btn.clicked.connect(lambda: self._on_user_click("MATERIAL"))
+        if mini:
+            row.addStretch(1)
         row.addWidget(self.frame_btn)
         row.addWidget(self.material_btn)
-        self.setMode(mode, emit=False)
+        if mini:
+            row.addStretch(1)
+        self.setMode(mode, emit=False, video_model=video_model)
 
     @staticmethod
     def normalize(mode):
         raw = str(mode or "").strip().upper()
         return "MATERIAL" if raw in {"MATERIAL", "VIDEO_REFERENCES", "素材"} else "FRAME"
 
+    @staticmethod
+    def is_omini(video_model):
+        return str(video_model or "").strip().lower() in {"flow_omni", "omni", "omini", "abra", "gemini_omni"}
+
     def mode(self):
         return self._mode
 
-    def setMode(self, mode, emit=False):
+    def videoModel(self):
+        return self._video_model
+
+    def _on_user_click(self, mode):
+        had_omini = self.is_omini(self._video_model)
+        self.setMode(mode, emit=True, video_model="", force_emit=had_omini)
+
+    def setVideoModel(self, video_model):
+        self._video_model = "flow_omni" if self.is_omini(video_model) else ""
+        self._refresh_visuals()
+
+    def _refresh_visuals(self):
+        omini = self.is_omini(self._video_model)
+        omini_style = (
+            "QPushButton { background: #7C3AED; color: #FFFFFF; border: 1px solid #8B5CF6; font-weight: 700; }"
+            "QPushButton:hover { background: #6D28D9; }"
+        )
+        if omini:
+            if self._mode == "MATERIAL":
+                self.frame_btn.setText("帧")
+                self.frame_btn.setStyleSheet("")
+                self.material_btn.setText("Omini")
+                self.material_btn.setStyleSheet(omini_style)
+            else:
+                self.frame_btn.setText("Omini")
+                self.frame_btn.setStyleSheet(omini_style)
+                self.material_btn.setText("素材")
+                self.material_btn.setStyleSheet("")
+            self.setToolTip("当前任务已设为使用 Omini 模型生成视频（默认 8 秒）")
+        else:
+            self.frame_btn.setText("帧")
+            self.material_btn.setText("素材")
+            self.frame_btn.setStyleSheet("")
+            self.material_btn.setStyleSheet("")
+            self.setToolTip("")
+
+    def setMode(self, mode, emit=False, video_model=None, force_emit=False):
         mode = self.normalize(mode)
         changed = mode != self._mode
         self._mode = mode
+        if video_model is not None:
+            new_vm = "flow_omni" if self.is_omini(video_model) else ""
+            if new_vm != self._video_model:
+                changed = True
+            self._video_model = new_vm
         self.frame_btn.setChecked(mode == "FRAME")
         self.material_btn.setChecked(mode == "MATERIAL")
+        self._refresh_visuals()
         # Checked-state colors are supplied by the global LIGHT/DARK stylesheet so
         # this control always follows the current application theme.
-        if emit and changed and not self._block:
+        if emit and (changed or force_emit) and not self._block:
             self.modeChanged.emit(mode)

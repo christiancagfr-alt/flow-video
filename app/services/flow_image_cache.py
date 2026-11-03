@@ -114,18 +114,63 @@ def _folder(meta) -> Path:
             / sanitize_path_component(meta['host_name'], '未分类主播'))
 
 
+_POOLED_REG_PATH: str | None = None
+_POOLED_REG_CON: "_RegistryConnection | None" = None
+
+
+class _RegistryConnection(sqlite3.Connection):
+    def _real_close(self):
+        if getattr(self, "_really_closed", False):
+            return
+        self._really_closed = True
+        super().close()
+
+    def close(self):
+        if getattr(self, "_really_closed", False):
+            return
+        if self is _POOLED_REG_CON:
+            try:
+                if self.in_transaction:
+                    self.rollback()
+                return
+            except Exception:
+                pass
+        self._real_close()
+
+
 def _con():
+    global _POOLED_REG_PATH, _POOLED_REG_CON
     p = _registry_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(p), timeout=15)
-    con.row_factory = sqlite3.Row
-    con.execute("""CREATE TABLE IF NOT EXISTS flow_image_cache(
-        image_id TEXT PRIMARY KEY, lookup_key TEXT UNIQUE,
-        original_filename TEXT, original_source_path TEXT, source_size INTEGER, source_mtime_ns INTEGER,
-        cache_path TEXT, cache_initialized INTEGER DEFAULT 0, cache_revision INTEGER DEFAULT 0,
-        cache_source TEXT, work_date TEXT, receiver_name TEXT, host_name TEXT,
-        recipient_id TEXT, host_id TEXT, source_changed INTEGER DEFAULT 0, updated_at REAL)""")
-    return con
+    p_str = str(p)
+    with _LOCK:
+        if _POOLED_REG_CON is not None and _POOLED_REG_PATH == p_str and not getattr(_POOLED_REG_CON, "_really_closed", False):
+            return _POOLED_REG_CON
+        if _POOLED_REG_CON is not None:
+            try:
+                _POOLED_REG_CON._real_close()
+            except Exception:
+                pass
+            _POOLED_REG_CON = None
+        p.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(p_str, timeout=15, check_same_thread=False, factory=_RegistryConnection)
+        con.row_factory = sqlite3.Row
+        con._really_closed = False
+        try:
+            con.execute("PRAGMA journal_mode = WAL")
+            con.execute("PRAGMA synchronous = NORMAL")
+            con.execute("PRAGMA temp_store = MEMORY")
+        except Exception:
+            pass
+        con.execute("""CREATE TABLE IF NOT EXISTS flow_image_cache(
+            image_id TEXT PRIMARY KEY, lookup_key TEXT UNIQUE,
+            original_filename TEXT, original_source_path TEXT, source_size INTEGER, source_mtime_ns INTEGER,
+            cache_path TEXT, cache_initialized INTEGER DEFAULT 0, cache_revision INTEGER DEFAULT 0,
+            cache_source TEXT, work_date TEXT, receiver_name TEXT, host_name TEXT,
+            recipient_id TEXT, host_id TEXT, source_changed INTEGER DEFAULT 0, updated_at REAL)""")
+        con.commit()
+        _POOLED_REG_PATH = p_str
+        _POOLED_REG_CON = con
+        return con
 
 
 def _valid_file(p) -> bool:

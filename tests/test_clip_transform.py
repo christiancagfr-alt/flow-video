@@ -61,7 +61,7 @@ class ClipTransformTests(unittest.TestCase):
         self.assertEqual(repo.requeue_unsubmitted_dispatches([did]),1)
         bridge=MagicMock();ProductionWorker(bridge)._auto_retry_timed_out_active_commands('2026-10-09');bridge.cancel_host_commands.assert_not_called();bridge.request_progress_scan.assert_called_once()
     def test_auto_pool_excludes_failure_until_manual_reset(self):
-        rows=[dict(segment_id=i,flow_status=status,generation_command='') for i,status in enumerate(('失败','下载失败','待生成','已准备'))]
+        rows=[dict(segment_id=i,recipient_id=1,host_id=1,video_id=1,video_seq=1,seg_seq=i,flow_status=status,generation_command='') for i,status in enumerate(('失败','下载失败','待生成','已准备'))]
         worker=ProductionWorker(MagicMock());worker.day='2026-10-09'
         with patch('app.services.production_worker.repo.list_flow_tasks',return_value=rows),patch('app.services.production_worker.workflow.redo_ids',return_value=set()):
             self.assertEqual([r['segment_id'] for r in worker._pool_scope_tasks()],[2,3])

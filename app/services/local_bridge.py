@@ -184,11 +184,14 @@ class FlowStudioBridge:
         self._drive_jobs = []
         self._drive_jobs_version = 0
         self._drive_events = []
+        self._redownload_jobs = []
+        self._redownload_version = 0
         # Latest per-host state reported by the new Flow Studio web plugin.
         # This survives event-queue consumption so the desktop UI can always
         # query the current browser-side state.
         self._web_plugin_hosts = {}
         self._web_plugin_channels = {}
+        self._channel_idle_heartbeat = {}
         self._event_ids = {}
         # Shared desktop <-> extension generation control. The desktop bumps
         # progress_scan_version every 10 seconds; the extension treats a new
@@ -231,6 +234,9 @@ class FlowStudioBridge:
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
             def _json(self, status, payload):
+                if isinstance(payload, dict) and 'error' in payload:
+                    from app.services.redaction import redact
+                    payload = dict(payload, error=redact(payload['error']))
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -335,7 +341,7 @@ class FlowStudioBridge:
                         eye_capable = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get('eye_reference') or [''])[0] == '1'
                         if not eye_capable:
                             visible_jobs = [j for j in visible_jobs if not j.get('dispatch_tasks') or not any(t.get('open_eye_prompt') for t in j.get('tasks',[]))]
-                        all_jobs=[dict(j, settings=dict(bridge._config.get("pluginSettings", {}))) for j in visible_jobs]
+                        all_jobs=[dict(j, settings={**dict(bridge._config.get("pluginSettings", {})), **(j.get("settings") or {})}) for j in visible_jobs]
                         try:
                             from app.services import pause_control as _pc
                             _manual_paused=_pc.manual_paused_channels()
@@ -367,10 +373,19 @@ class FlowStudioBridge:
                         "jobs": jobs,
                         "channels": channels,
                         "focus_requests": bridge.focus_requests(),
+                        "redownload_jobs": bridge.redownload_jobs(),
+                        "redownload_version": bridge._redownload_version,
                         "read_points": read_points,
                         "scheduled_total": len(all_jobs),
                         "released_total": len(jobs),
                         "server_time": now,
+                    })
+
+                if self.path.startswith("/redownload-jobs"):
+                    return self._json(200, {
+                        "ok": True,
+                        "version": bridge._redownload_version,
+                        "jobs": bridge.redownload_jobs(),
                     })
 
                 if self.path.startswith("/drive-jobs"):
@@ -444,6 +459,13 @@ class FlowStudioBridge:
                 if self.path == '/claim-command':
                     try:return self._json(200, {'ok':True,'owned':bridge.claim_command(str(data.get('command_id') or ''),str(data.get('owner') or ''),data.get('segment_id'),bool(data.get('recovery')))})
                     except ValueError as exc:return self._json(400,{'ok':False,'error':str(exc)})
+
+                if self.path == '/redownload-ack':
+                    try:
+                        acked = bridge.ack_redownload_jobs(data.get('request_ids') or [], str(data.get('owner') or ''))
+                        return self._json(200, {'ok': True, 'acked': acked})
+                    except ValueError as exc:
+                        return self._json(400, {'ok': False, 'error': str(exc)})
 
                 if self.path.startswith("/heartbeat"):
                     bridge.heartbeat(data)
@@ -695,18 +717,14 @@ class FlowStudioBridge:
                 command=str(row.get('command_id') or '')
                 event_channel=str(row.get('channel_key') or '')
                 # Submission-slot release is deliberately separate from render/download
-                # ownership. Once every submit is confirmed (deferred=0), the same Flow
-                # tab may immediately accept the next wave while old generations continue
-                # rendering and downloading under their immutable generation_command.
-                #
-                # V0.13.5.83: pool waves use host_id=0 and the completion receipt can arrive
-                # while the UI is already clearing/rebinding the local page state. Matching
-                # only by (command + host_id) made a valid completion receipt occasionally
-                # leave the Bridge job published. The channel then LOOKED idle in Studio but
-                # the scheduler still treated the old command as occupied. Command identity
-                # is immutable, so retire every Bridge job carrying this exact command and
-                # release the command-guarded channel slot directly from the receipt.
-                can_release_submission = typ=='generation_batch_finished' and deferred==0 and bool(command)
+                # ownership. Once the plugin finishes iterating this submission wave
+                # (generation_batch_finished), even if one or more tasks returned
+                # `state: uncertain` (deferred > 0), the browser submission loop has
+                # ended and called requestNextWaveSoon(); background reservation
+                # recovery (`FS_DOWNLOAD_PENDING all:true` + `claim_command recovery=True`)
+                # tracks deferred items by immutable command_id + segment_id without
+                # holding the channel's submission slot hostage.
+                can_release_submission = typ=='generation_batch_finished' and bool(command)
                 matched_channels=[]
                 kept_jobs=[]
                 for job in self._host_jobs:
@@ -776,8 +794,36 @@ class FlowStudioBridge:
                         runtime_log.log('completed_upload_only_bridge_job_retired',command_id=verified_cmd,removed=before-len(self._host_jobs))
             if row.get('type') in ('channel_focus_completed','channel_focus_failed'):
                 self._focus_requests=[x for x in getattr(self,'_focus_requests',[]) if x['id']!=row.get('request_id')]
+            if row.get('redownload_request_id') or row.get('type') in ('redownload_claimed', 'redownload_failed'):
+                req_id_rd = str(row.get('redownload_request_id') or '')
+                if req_id_rd and row.get('type') in ('video_download_completed', 'video_download_failed', 'redownload_failed'):
+                    self._redownload_jobs = [x for x in self._redownload_jobs if str(x.get('request_id') or '') != req_id_rd]
+                try:
+                    from app.services import flow_redownload
+                    flow_redownload.on_bridge_event(row)
+                except Exception:
+                    pass
             self._events.append(row)
             etype = str(row.get("type") or "")
+            ch_key_hb = str(row.get("channel_key") or "").strip()
+            if ch_key_hb:
+                hb_cmd = str(row.get("command_id") or "").strip()
+                if etype == "web_plugin_heartbeat" and not hb_cmd:
+                    prev_hb = self._channel_idle_heartbeat.get(ch_key_hb)
+                    if prev_hb and (now - float(prev_hb.get("last_seen") or 0.0)) <= 30.0:
+                        self._channel_idle_heartbeat[ch_key_hb] = {
+                            "since": float(prev_hb["since"]),
+                            "last_seen": now,
+                            "count": int(prev_hb.get("count") or 0) + 1,
+                        }
+                    else:
+                        self._channel_idle_heartbeat[ch_key_hb] = {
+                            "since": now,
+                            "last_seen": now,
+                            "count": 1,
+                        }
+                elif hb_cmd or etype in ("web_plugin_bound", "web_plugin_tasks_received", "generation_auto_started", "upload_drag_attempt", "upload_flow_progress"):
+                    self._channel_idle_heartbeat.pop(ch_key_hb, None)
             host_id = row.get("host_id")
             if host_id is not None and (etype.startswith("web_plugin_") or etype.startswith("media_") or etype in {"upload_flow_progress","upload_verified","upload_drag_attempt"}):
                 try:
@@ -843,6 +889,10 @@ class FlowStudioBridge:
             else:
                 kept=[]
             self._host_jobs = kept + list(incoming.values())
+            for _pub_j in (jobs or []):
+                _pub_ch = str(_pub_j.get('channel_key') or '').strip()
+                if _pub_ch:
+                    self._channel_idle_heartbeat.pop(_pub_ch, None)
             repo.set_setting("flow_host_jobs_v124", json.dumps(self._host_jobs))
             self._host_jobs_version += 1
             runtime_log.log('publish_channel_jobs', version=self._host_jobs_version, jobs=[{'channel':j.get('channel_key',''),'command_id':j.get('command_id',''),'tasks':len(j.get('tasks') or []),'upload':bool(j.get('execute_upload')),'generate':bool(j.get('dispatch_tasks'))} for j in (jobs or [])])
@@ -854,6 +904,38 @@ class FlowStudioBridge:
     def touch_host_jobs(self):
         """Bump the jobs version so every Flow tab re-reads settings / pause flags right away."""
         with self._lock:
+            self._host_jobs_version += 1
+            return self._host_jobs_version
+
+    def update_host_aspect_ratio(self, host_id, aspect_ratio):
+        """Immediately sync a host's aspect ratio (9:16 or 16:9) into published jobs for the web plugin."""
+        hid = int(host_id or 0)
+        ratio = repo.normalize_aspect_ratio(aspect_ratio)
+        if hid <= 0:
+            return self._host_jobs_version
+        with self._lock:
+            changed = False
+            for job in self._host_jobs:
+                job_hid = int(job.get('host_id') or 0)
+                tasks = job.get('tasks') or []
+                matched_tasks = 0
+                for t in tasks:
+                    if int(t.get('host_id') or job_hid) == hid:
+                        t['aspect_ratio'] = ratio
+                        t['aspectRatio'] = ratio
+                        matched_tasks += 1
+                        changed = True
+                if job_hid == hid or (tasks and matched_tasks == len(tasks)):
+                    job['aspect_ratio'] = ratio
+                    job['aspectRatio'] = ratio
+                    job['video_aspect_ratio'] = ratio
+                    settings = dict(job.get('settings') or {})
+                    settings['aspect_ratio'] = ratio
+                    settings['aspectRatio'] = ratio
+                    job['settings'] = settings
+                    changed = True
+            if changed:
+                repo.set_setting("flow_host_jobs_v124", json.dumps(self._host_jobs, ensure_ascii=False))
             self._host_jobs_version += 1
             return self._host_jobs_version
 
@@ -929,6 +1011,22 @@ class FlowStudioBridge:
                 except Exception:
                     return {}
             return [dict(v) for _, v in sorted(self._web_plugin_hosts.items())]
+
+    def idle_heartbeat_channels(self, *, min_idle_seconds=25.0, min_count=3, max_stale_seconds=20.0):
+        """Return `{channel_key: idle_seconds}` for live tabs continuously reporting `command_id=''`."""
+        now = time.time()
+        out = {}
+        with self._lock:
+            for ch_key, info in list(self._channel_idle_heartbeat.items()):
+                last_seen = float(info.get("last_seen") or 0.0)
+                since = float(info.get("since") or 0.0)
+                cnt = int(info.get("count") or 0)
+                if not last_seen or (now - last_seen) > float(max_stale_seconds):
+                    continue
+                idle_age = max(0.0, now - since)
+                if cnt >= int(min_count) and idle_age >= float(min_idle_seconds):
+                    out[str(ch_key)] = round(idle_age, 1)
+        return out
 
     def request_ch2_rebalance(self):
         from app.core.database import connect
@@ -1013,6 +1111,74 @@ class FlowStudioBridge:
         with self._lock:
             self._focus_requests=[x for x in getattr(self,'_focus_requests',[]) if x['expires']>time.time()]
             return [dict(x) for x in self._focus_requests]
+
+    def enqueue_redownload_jobs(self, jobs):
+        now = time.time()
+        with self._lock:
+            incoming = []
+            incoming_sids = set()
+            for raw in (jobs or []):
+                item = dict(raw)
+                sid = int(item.get('segment_id') or 0)
+                if sid <= 0:
+                    continue
+                if not item.get('browser_instance'):
+                    cid = int(item.get('channel_id') or 0)
+                    ch_state = self._web_plugin_channels.get(cid) or {}
+                    if ch_state.get('browser_instance'):
+                        item['browser_instance'] = str(ch_state['browser_instance'])
+                item['expires'] = float(item.get('expires') or (now + 180.0))
+                incoming.append(item)
+                incoming_sids.add(sid)
+            existing = [
+                x for x in getattr(self, '_redownload_jobs', [])
+                if float(x.get('expires') or 0) > now and int(x.get('segment_id') or 0) not in incoming_sids
+            ]
+            self._redownload_jobs = existing + incoming
+            self._redownload_version += 1
+            return self._redownload_version
+
+    def redownload_jobs(self):
+        now = time.time()
+        with self._lock:
+            self._redownload_jobs = [
+                x for x in getattr(self, '_redownload_jobs', [])
+                if float(x.get('expires') or 0) > now
+            ]
+            return [dict(x) for x in self._redownload_jobs]
+
+    def ack_redownload_jobs(self, request_ids, owner=''):
+        wanted = {str(x) for x in (request_ids or []) if str(x or '').strip()}
+        if not wanted:
+            return []
+        claimed_items = []
+        with self._lock:
+            kept = []
+            for item in getattr(self, '_redownload_jobs', []):
+                rid = str(item.get('request_id') or '')
+                if rid in wanted:
+                    claimed_items.append(dict(item))
+                else:
+                    kept.append(item)
+            if claimed_items:
+                self._redownload_jobs = kept
+                self._redownload_version += 1
+        if claimed_items:
+            try:
+                from app.services import flow_redownload
+                for item in claimed_items:
+                    flow_redownload.on_bridge_event({
+                        'type': 'redownload_claimed',
+                        'segment_id': item.get('segment_id'),
+                        'command_id': item.get('command_id', ''),
+                        'media_id': item.get('media_id', ''),
+                        'redownload_request_id': item.get('request_id', ''),
+                        'owner': owner,
+                        'message': '浏览器已接收指令，正在刷新云端签名直链…',
+                    })
+            except Exception:
+                pass
+        return [x.get('request_id') for x in claimed_items]
 
     def channel_state(self, channel_id=None):
         with self._lock:

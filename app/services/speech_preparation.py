@@ -115,23 +115,23 @@ def number_to_swahili(value: int) -> str:
     if n < 1000:
         head = f"mia {ONES[n // 100]}"
         rem = n % 100
-        return head if not rem else f"{head} {number_to_swahili(rem)}"
+        return head if not rem else f"{head} na {number_to_swahili(rem)}"
     if n < 100_000:
         head = f"elfu {number_to_swahili(n // 1000)}"
         rem = n % 1000
-        return head if not rem else f"{head} {number_to_swahili(rem)}"
+        return head if not rem else f"{head} na {number_to_swahili(rem)}"
     if n < 1_000_000:
         head = f"laki {number_to_swahili(n // 100_000)}"
         rem = n % 100_000
-        return head if not rem else f"{head} {number_to_swahili(rem)}"
+        return head if not rem else f"{head} na {number_to_swahili(rem)}"
     if n < 1_000_000_000:
         head = f"milioni {number_to_swahili(n // 1_000_000)}"
         rem = n % 1_000_000
-        return head if not rem else f"{head} {number_to_swahili(rem)}"
+        return head if not rem else f"{head} na {number_to_swahili(rem)}"
     if n < 1_000_000_000_000:
         head = f"bilioni {number_to_swahili(n // 1_000_000_000)}"
         rem = n % 1_000_000_000
-        return head if not rem else f"{head} {number_to_swahili(rem)}"
+        return head if not rem else f"{head} na {number_to_swahili(rem)}"
     # Very large bare numerals are more likely to be identifiers and should normally be protected.
     return str(n)
 
@@ -1029,8 +1029,10 @@ _KNOWN_ACRONYMS = {"AI", "API", "GPT", "SUV", "TV", "SMS", "URL", "USB", "CPU", 
 
 def _strip_instruction_wrappers(text: str) -> str:
     """Remove only non-spoken quote/bracket glyphs required by the user's instruction."""
+    raw = str(text or "")
+    raw = re.sub(r"(?m)^\s*(?:[\u4e00-\u9fff]+\s*\d*\s*[:：]\s*)+", "", raw)
     table = str.maketrans("", "", _INTERNAL_WRAPPERS)
-    return str(text or "").translate(table)
+    return raw.translate(table)
 
 
 def _normalize_uppercase_swahili(text: str) -> str:
@@ -1082,6 +1084,46 @@ def _normalize_date_time_context(text: str) -> str:
     # Optional existing "saa" is consumed so it is never duplicated.
     value = re.sub(r"(?:\bsaa\s+)?(\d{1,2}):(\d{2})(?!\d)", clock, value, flags=re.I)
     return value
+_BIBLE_BOOKS = (
+    "Mambo ya Walawi", "Kumbukumbu la Torati", "Mambo ya Nyakati", "Matendo ya Mitume", "Wimbo Ulio Bora",
+    "Ufunuo wa Yohana", "Mwanzo", "Kutoka", "Walawi", "Hesabu", "Yoshua", "Waamuzi", "Ruthu", "Samweli",
+    "Wafalme", "Ezra", "Nehemia", "Esta", "Ayubu", "Zaburi", "Methali", "Mhubiri", "Isaya", "Yeremia",
+    "Maombolezo", "Ezekieli", "Danieli", "Hosea", "Yoeli", "Amosi", "Obadia", "Yona", "Mika", "Nahumu",
+    "Habakuki", "Sefania", "Hagai", "Zekaria", "Malaki", "Mathayo", "Marko", "Luka", "Yohana", "Matendo",
+    "Warumi", "Wakorintho", "Wagalatia", "Waefeso", "Wafilipi", "Wakolosai", "Wathesalonike", "Timotheo",
+    "Tito", "Filemoni", "Waebrania", "Yakobo", "Petro", "Yuda", "Ufunuo",
+    # common alternative spellings
+    "Mithali", "Zefania", "Estheri",
+)
+_BIBLE_REF = re.compile(
+    r"(?P<book>(?:" + "|".join(re.escape(b) for b in sorted(_BIBLE_BOOKS, key=len, reverse=True)) + r")"
+    r"(?:\s+(?:wa|ya)\s+(?:Kwanza|Pili|Tatu))?)\s+(?P<ch>\d{1,3})\s*:\s*(?P<v1>\d{1,3})"
+    r"(?:\s*[-–—]\s*(?:(?P<ch2>\d{1,3})\s*:\s*)?(?P<v2>\d{1,3}))?(?P<more>(?:\s*,\s*\d{1,3}(?!\d|:\d))*)(?!\d|:\d)",
+    re.I,
+)
+
+
+def _normalize_bible_references(text: str) -> str:
+    """Book 3:16 -> Book sura ya tatu mstari wa kumi na sita (never a clock time)."""
+    def word(n) -> str:
+        return _swahili_ordinal_word(int(n))
+
+    def repl(m: re.Match[str]) -> str:
+        book, ch = m.group("book"), m.group("ch")
+        v1, v2, ch2 = m.group("v1"), m.group("v2"), m.group("ch2")
+        more = [x for x in re.findall(r"\d+", m.group("more") or "")]
+        head = f"{book} sura ya {word(ch)}"
+        if ch2 and v2:  # cross-chapter range: 1:1-3:5
+            return f"{head} mstari wa {word(v1)} hadi sura ya {word(ch2)} mstari wa {word(v2)}"
+        units = [f"{word(v1)} hadi ya {word(v2)}" if v2 else word(v1)]
+        units += [word(x) for x in more]
+        if len(units) == 1 and not v2:
+            return f"{head} mstari wa {units[0]}"
+        return f"{head} mistari ya " + " na ya ".join(units)
+
+    return _BIBLE_REF.sub(repl, str(text or ""))
+
+
 def _normalize_bible_number_context(text: str) -> str:
     """Handle the context-sensitive Swahili number forms explicitly requested by the user."""
     value = str(text or "")
@@ -1152,6 +1194,72 @@ def _punctuation_boundaries(text: str, rules: ReflowPolicy | None = None) -> lis
     return out
 
 
+_RUN_WORDS = (r"sifuri|moja|mbili|tatu|nne|tano|sita|saba|nane|tisa|kumi|ishirini|thelathini|arobaini|hamsini|"
+              r"sitini|sabini|themanini|tisini|mia|elfu|laki|milioni|bilioni|kwanza|pili")
+_NUM_RUN = rf"(?:{_RUN_WORDS})(?:\s+(?:na\s+)?(?:{_RUN_WORDS}))*"
+_BOOK_ALT = "|".join(re.escape(b) for b in sorted(_BIBLE_BOOKS, key=len, reverse=True))
+_NO_CUT_PATTERNS = (
+    # a spoken number such as "mia moja na kumi na tisa" is one unit
+    re.compile(rf"(?<![^\W_]){_NUM_RUN}(?![^\W_])", re.I),
+    # Bible reference connectors stay attached to their number; the book stays attached to "sura ya N"
+    re.compile(rf"(?<![^\W_])(?:sura\s+ya|mstari\s+wa|mistari\s+ya|hadi\s+sura\s+ya|hadi\s+ya|na\s+ya)\s+{_NUM_RUN}(?![^\W_])", re.I),
+    re.compile(rf"(?<![^\W_])(?:{_BOOK_ALT})(?:\s+(?:wa|ya)\s+(?:Kwanza|Pili|Tatu))?\s+sura\s+ya\s+{_NUM_RUN}"
+               rf"(?:\s+mstari\s+wa\s+{_NUM_RUN}|\s+mistari\s+ya\s+{_NUM_RUN}\s+hadi\s+ya\s+{_NUM_RUN})?(?![^\W_])", re.I),
+    # chapter + single verse / same-chapter verse range read as one unit
+    re.compile(rf"(?<![^\W_])sura\s+ya\s+{_NUM_RUN}(?:\s+mstari\s+wa\s+{_NUM_RUN}|\s+mistari\s+ya\s+{_NUM_RUN}\s+hadi\s+ya\s+{_NUM_RUN})(?![^\W_])", re.I),
+    # clock times, dates and percentages
+    re.compile(rf"(?<![^\W_])saa\s+{_NUM_RUN}(?:\s+na\s+dakika\s+{_NUM_RUN})?(?![^\W_])", re.I),
+    re.compile(rf"(?<![^\W_])tarehe\s+{_NUM_RUN}\s+mwezi\s+wa\s+{_NUM_RUN}\s+mwaka\s+{_NUM_RUN}(?![^\W_])", re.I),
+    re.compile(rf"(?<![^\W_])asilimia\s+{_NUM_RUN}(?![^\W_])", re.I),
+)
+
+
+def _no_cut_spans(source: str) -> list[tuple[int, int]]:
+    """Spans of spoken numbers / Bible references / times that must never be split across lines."""
+    spans: list[tuple[int, int]] = []
+    for pattern in _NO_CUT_PATTERNS:
+        spans.extend((m.start(), m.end()) for m in pattern.finditer(source))
+    return spans
+
+
+MAX_AUTO_MERGE_WORDS = 24
+
+
+def merge_short_segments_up_to_words(chunks: Iterable[str], max_words: int = MAX_AUTO_MERGE_WORDS) -> list[str]:
+    """Automatically merge adjacent segments whenever their combined word count is <= max_words (24).
+
+    Prioritizes merging the shortest segment first (e.g. 1-2s with 5s, 3s with 4s) and picks the
+    adjacent neighbor (prev or next) whose combined word count lands closest to ~20 words without
+    exceeding ``max_words``.
+    """
+    segs = [re.sub(r"\s+", " ", str(c or "")).strip() for c in chunks if str(c or "").strip()]
+    limit = max(1, int(max_words or MAX_AUTO_MERGE_WORDS))
+    guard = 0
+    while len(segs) > 1 and guard < 300:
+        guard += 1
+        candidates = []
+        for i, seg in enumerate(segs):
+            w_cur = len(_words(seg))
+            if w_cur <= 0 or w_cur >= limit:
+                continue
+            if i > 0:
+                w_prev = len(_words(segs[i - 1]))
+                if 0 < w_prev + w_cur <= limit:
+                    merged = f"{segs[i - 1]} {seg}".strip()
+                    candidates.append((min(w_prev, w_cur), abs(20 - (w_prev + w_cur)), i - 1, i, merged))
+            if i + 1 < len(segs):
+                w_next = len(_words(segs[i + 1]))
+                if 0 < w_cur + w_next <= limit:
+                    merged = f"{seg} {segs[i + 1]}".strip()
+                    candidates.append((min(w_cur, w_next), abs(20 - (w_cur + w_next)), i, i + 1, merged))
+        if not candidates:
+            break
+        _, _, left_i, right_i, merged_text = min(candidates, key=lambda x: (x[0], x[1], x[2]))
+        segs[left_i] = merged_text
+        del segs[right_i]
+    return segs
+
+
 def _instruction_reflow(text: str, *, reference_chars: int | None = None, rules: ReflowPolicy | None = None) -> tuple[list[str], str]:
     """Apply custom segmentation rules based on user reference character limit and natural punctuation."""
     lines = str(text or "").splitlines()
@@ -1215,6 +1323,12 @@ def _instruction_reflow(text: str, *, reference_chars: int | None = None, rules:
 
         positions.append(len(source))
         positions = sorted(set(positions))
+        # Never break inside a spoken number or Bible reference ("ishirini. na tatu").
+        locked = _no_cut_spans(source)
+        if locked:
+            positions = [pos for pos in positions
+                         if pos in (0, len(source)) or not any(a < pos < b for a, b in locked)]
+            strengths = {pos: value for pos, value in strengths.items() if pos in positions}
 
         inf = None
         best: list[tuple | None] = [inf] * len(positions)
@@ -1257,8 +1371,8 @@ def _instruction_reflow(text: str, *, reference_chars: int | None = None, rules:
                 unavoidable_over = 1 if length > ref else 0
                 rhythm_penalty = abs(length - ref) * 0.1
                 
-                bp_map = {0: 0.0, 1: 0.2, 2: 0.5, 3: 1.0, 4: 2.0, 5: 5.0}
-                boundary_penalty = 0.0 if end == len(source) else bp_map.get(strengths.get(end, 5), 5.0)
+                bp_map = {0: 0.0, 1: 0.3, 2: 0.8, 3: 18.0, 4: 35.0, 5: 80.0}
+                boundary_penalty = 0.0 if end == len(source) else bp_map.get(strengths.get(end, 5), 80.0)
                 
                 base = best[i]
                 cost = (
@@ -1288,16 +1402,16 @@ def _instruction_reflow(text: str, *, reference_chars: int | None = None, rules:
         if len(chunks) > 1 and chunks[0] != source:
             chunks.reverse()
 
+        chunks = merge_short_segments_up_to_words(chunks, max_words=MAX_AUTO_MERGE_WORDS)
         for chunk in chunks:
-            if chunk.endswith(','):
-                chunk = chunk[:-1] + '.'
-            elif chunk.endswith('-') or chunk.endswith('–') or chunk.endswith('—'):
-                chunk = re.sub(r'[\-–—]+$', '.', chunk)
-            elif not re.search(r'[.!?。！？,;:，；：]\s*$', chunk):
-                chunk = chunk + '.'
-            all_chunks.append(chunk)
-            if len(chunk) > ref * 1.5:
-                overall_status = "UNSPLITTABLE"
+            if chunk.strip():
+                all_chunks.append(chunk.strip())
+
+    all_chunks = merge_short_segments_up_to_words(all_chunks, max_words=MAX_AUTO_MERGE_WORDS)
+    all_chunks = [ensure_terminal_period(c) for c in all_chunks if ensure_terminal_period(c)]
+    for chunk in all_chunks:
+        if len(_words(chunk)) > MAX_AUTO_MERGE_WORDS and len(chunk) > max(ref * 1.5, 160):
+            overall_status = "UNSPLITTABLE"
 
     if not all_chunks:
         return [], "OK"
@@ -1308,8 +1422,9 @@ def prepare_swahili_speech(text: str, max_chars: int | None = None, *, rules: Re
     cleaned = strip_decorative_symbols(original)
     cleaned = _strip_instruction_wrappers(cleaned)
     cleaned = _normalize_uppercase_swahili(cleaned)
+    cleaned = _normalize_bible_number_context(cleaned)      # "2 Wafalme" -> "Wafalme wa Pili", verse ranges
+    cleaned = _normalize_bible_references(cleaned)          # chapter:verse BEFORE the clock-time rule
     cleaned = _normalize_date_time_context(cleaned)
-    cleaned = _normalize_bible_number_context(cleaned)
     spoken_source, decisions = localize_swahili_numbers(cleaned)
 
     # V0.13.5.91: pasted line breaks are ignored.  7.5-second natural Swahili speech is the primary
@@ -1348,3 +1463,188 @@ def timing_metadata(text: str, status: str = "") -> dict:
         "flow_duration_seconds": int(result["duration"]),
         "timing_status": status or ("UNSPLITTABLE" if result["needs_split"] else "OK"),
     }
+
+
+_VERBATIM_NO_BREAK_AFTER = {
+    "kwa", "ya", "wa", "la", "za", "cha", "vya", "pa", "mwa", "na", "katika", "kwenye",
+    "kama", "ili", "kwamba", "kuwa", "hadi", "mpaka", "bila", "toka", "kutoka",
+    "sura", "mstari", "kitabu", "mtakatifu", "bwana", "mungu", "yesu", "roho", "baba", "mwana",
+    "kumi", "ishirini", "thelathini", "arobaini", "hamsini", "sitini", "sabini", "themanini", "tisini", "mia", "elfu",
+    "the", "a", "an", "of", "to", "in", "for", "with", "on", "at", "from", "by", "that",
+    "de", "el", "en", "con", "por", "para", "que", "du", "des", "le", "les", "dans", "pour",
+}
+
+_VERBATIM_SW_NUM_WORDS = {
+    "moja", "mbili", "tatu", "nne", "tano", "sita", "saba", "nane", "tisa",
+    "kumi", "ishirini", "thelathini", "arobaini", "hamsini", "sitini", "sabini", "themanini", "tisini", "mia", "elfu",
+}
+
+_VERBATIM_CLAUSE_STARTERS = {
+    "lakini", "bali", "kwa", "hivyo", "ikiwa", "kama", "wakati", "ili", "kwamba",
+    "ambapo", "ambaye", "ambalo", "ambao", "ambacho", "ambavyo", "au", "ama",
+    "kisha", "ndipo", "tena", "pia", "hata", "ingawa", "ijapokuwa", "ndiyo", "ndio",
+    "basi", "sasa", "je", "kwanza", "pili", "tatu", "mwisho", "hatimaye",
+    "na", "wala", "ila", "tunakuomba", "ninakuomba", "ninaomba", "tunaomba",
+    "and", "but", "because", "so", "when", "if", "while", "although", "though", "since",
+}
+
+
+def ensure_terminal_period(text: str) -> str:
+    """Ensure a segment ends with an English period '.' (converting any trailing punctuation mark to '.')."""
+    s = " ".join(str(text or "").split()).strip()
+    if not s:
+        return ""
+    s = re.sub(r'[.,!?;:。！？；：，、—–\-…\s]+(["”\'’)\]）】]*)$', r"\1", s).strip()
+    s = re.sub(r"[.,!?;:。！？；：，、—–\-…\s]+$", "", s).strip()
+    if not s:
+        return ""
+    return s if s.endswith(".") else (s + ".")
+
+
+def balance_segments_verbatim(
+    text: str,
+    *,
+    target_sec: float = 7.0,
+    max_sec: float = 7.8,
+    hard_max_sec: float = 8.0,
+) -> list[str]:
+    """Re-segment script text into balanced ~7s segments (strictly <= 8.0s when splittable),
+    strictly prioritizing punctuation boundaries (.,!?;: etc.) over mid-clause word breaks,
+    and ensuring every resulting segment ends with an English period '.'.
+    """
+    import math
+
+    clean = " ".join(str(text or "").split()).strip()
+    if not clean:
+        return []
+    total_sec = _instruction_speech_seconds(clean)
+    if total_sec <= max_sec:
+        return [ensure_terminal_period(clean)]
+
+    # If the text is pure CJK without spaces, fall back to clause/character splitting
+    tokens = clean.split(" ")
+    if len(tokens) <= 1 and re.search(r"[\u3400-\u9fff\u3040-\u30ff]", clean):
+        clauses = [p.strip() for p in re.split(r"(?<=[。！？；，、,.;!?])", clean) if p.strip()]
+        if len(clauses) > 1:
+            tokens = clauses
+        else:
+            return [ensure_terminal_period(clean)]
+
+    n = len(tokens)
+    if n <= 1:
+        return [ensure_terminal_period(clean)]
+
+    min_k = max(2, math.ceil(total_sec / 7.4))
+    ideal_sec = min(float(target_sec), max(4.8, total_sec / min_k))
+
+    break_cost = [0.0] * (n + 1)
+    safe_starters = _VERBATIM_CLAUSE_STARTERS - {"kwa", "wa", "ya", "la", "za", "cha", "vya", "pa", "mwa"}
+
+    for i in range(1, n):
+        prev_tok = tokens[i - 1]
+        next_tok = tokens[i]
+        prev_clean = re.sub(r"[^\w]+$", "", prev_tok, flags=re.UNICODE).lower()
+        next_clean = re.sub(r"^[^\w]+", "", next_tok, flags=re.UNICODE).lower()
+        prev2_clean = re.sub(r"[^\w]+$", "", tokens[i - 2], flags=re.UNICODE).lower() if i >= 2 else ""
+
+        m_punct = re.search(r'([.!?。！？…;:,，；：、—–\-]+)["”\'’)\]）】]*$', prev_tok)
+        punct = m_punct.group(1)[-1] if m_punct else ""
+
+        if punct and punct in ".!?。！？…":
+            if prev2_clean == "kwa" and prev_clean in {"hiyo", "sababu", "mfano"}:
+                c = 4.0
+            else:
+                c = 0.0
+        elif punct and punct in ";:；：—–-":
+            c = 2.5
+        elif punct and punct in ",，、":
+            c = 6.0
+        else:
+            in_scripture_ref = False
+            window_back = [
+                re.sub(r"[^\w]+", "", tokens[k], flags=re.UNICODE).lower()
+                for k in range(max(0, i - 6), i)
+            ]
+            if ("sura" in window_back or "mstari" in window_back) and (
+                prev_clean in _VERBATIM_SW_NUM_WORDS
+                or next_clean in _VERBATIM_SW_NUM_WORDS
+                or next_clean in {"mstari", "wa", "ya", "na"}
+            ):
+                in_scripture_ref = True
+            if prev_clean in _VERBATIM_SW_NUM_WORDS and (
+                next_clean in _VERBATIM_SW_NUM_WORDS or next_clean == "na"
+            ):
+                in_scripture_ref = True
+            if (
+                prev_clean == "na"
+                and prev2_clean in _VERBATIM_SW_NUM_WORDS
+                and next_clean in _VERBATIM_SW_NUM_WORDS
+            ):
+                in_scripture_ref = True
+
+            if in_scripture_ref or prev_clean in _VERBATIM_NO_BREAK_AFTER:
+                c = 950.0
+            elif (prev_clean == "yesu" and next_clean == "kristo") or (
+                prev_clean == "roho" and next_clean in {"mtakatifu", "wa"}
+            ):
+                c = 950.0
+            elif next_clean in safe_starters:
+                c = 480.0
+            else:
+                c = 540.0
+        break_cost[i] = c
+
+    INF = 1e18
+    dp = [INF] * (n + 1)
+    parent = [-1] * (n + 1)
+    dp[0] = 0.0
+
+    for i in range(n):
+        if dp[i] >= INF:
+            continue
+        for j in range(i + 1, n + 1):
+            seg_str = " ".join(tokens[i:j])
+            sec = _instruction_speech_seconds(seg_str)
+            if sec > 10.5 and j > i + 1:
+                break
+
+            if sec > hard_max_sec:
+                dur_cost = 2200.0 + (sec - hard_max_sec) * 1500.0
+            elif sec > max_sec:
+                dur_cost = 180.0 + (sec - max_sec) * 400.0
+            else:
+                diff = sec - ideal_sec
+                if sec >= 4.2:
+                    dur_cost = (diff ** 2) * 1.8
+                    if sec > 7.5:
+                        dur_cost += (sec - 7.5) * 10.0
+                elif sec >= 2.2:
+                    # Complete punctuation-bounded sentence/clause >= 2.2s stays intact rather than triggering a mid-sentence cut (480+)
+                    dur_cost = 12.0 + ((4.2 - sec) ** 2) * 4.5
+                else:
+                    # Tiny fragment (< 2.2s, e.g. 1-2 words like "Bwana,"): avoid leaving as standalone segment
+                    dur_cost = 620.0 + ((2.2 - sec) ** 2) * 150.0
+
+            b_cost = break_cost[j] if j < n else 0.0
+            seg_overhead = 5.0
+            total_c = dp[i] + dur_cost + b_cost + seg_overhead
+            if total_c < dp[j]:
+                dp[j] = total_c
+                parent[j] = i
+
+    res = []
+    cur = n
+    while cur > 0 and parent[cur] >= 0:
+        prev = parent[cur]
+        seg_formatted = ensure_terminal_period(" ".join(tokens[prev:cur]))
+        if seg_formatted:
+            res.append(seg_formatted)
+        cur = prev
+    if cur != 0 or not res:
+        return [ensure_terminal_period(clean)]
+    res.reverse()
+    # Final word-level verbatim guarantee
+    if _words(" ".join(res)) != _words(clean):
+        return [ensure_terminal_period(clean)]
+    return res
+

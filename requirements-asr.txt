@@ -3,7 +3,10 @@ faster-whisper==1.2.1
 ctranslate2==4.8.2
 onnxruntime==1.31.0; sys_platform != "darwin" or platform_machine != "x86_64"
 onnxruntime==1.23.2; sys_platform == "darwin" and platform_machine == "x86_64"
-av==19.0.1
+av==19.0.2
 numpy==2.5.4
 tokenizers==0.23.3
 huggingface-hub==2.2.0
+
+# Bound model-cache locking to the reviewed security fix.
+filelock==4.2.7

@@ -139,7 +139,7 @@ class SettingsPage(QWidget):
         segment_row = QHBoxLayout(segment_wrap)
         segment_row.setContentsMargins(0, 0, 0, 0)
         self.segment_output_root = QLineEdit()
-        self.segment_output_root.setPlaceholderText('各 Flow 通道下载完成后统一回收成品片段的根目录')
+        self.segment_output_root.setPlaceholderText('Flow 通道下载及成品片段统一存放的根目录（留空默认 ~/Downloads/FlowStudio_Channels）')
         segment_row.addWidget(self.segment_output_root, 1)
         segment_pick = QPushButton('浏览…')
         segment_pick.clicked.connect(lambda: self.pick_folder_into(self.segment_output_root, '选择成品片段根目录'))
@@ -230,12 +230,120 @@ class SettingsPage(QWidget):
         outer.addWidget(scroll)
         self.reload()
 
+    def _build_gemini_assistant_box(self):
+        from app.services import software_assistant
+
+        box = QGroupBox('软件助手 · Google Gemini API 设置')
+        layout = QFormLayout(box)
+        layout.setSpacing(8)
+
+        note = QLabel(
+            '用于驱动右下角「软件助手」进行自然语言指令解析与定时巡检。'
+            'Google Gemini Flash 速度极快且拥有免费额度（若留空，软件助手会自动复用内置 OpenAI GPT API 或本地智能引擎）。',
+            objectName='muted',
+        )
+        note.setWordWrap(True)
+        layout.addRow(note)
+
+        self.assistant_model = QComboBox()
+        for model_id, model_label in software_assistant.GEMINI_MODELS:
+            self.assistant_model.addItem(model_label, model_id)
+        layout.addRow('软件助手引擎', self.assistant_model)
+
+        key_wrap = QWidget()
+        key_row = QHBoxLayout(key_wrap)
+        key_row.setContentsMargins(0, 0, 0, 0)
+        key_row.setSpacing(6)
+        self.gemini_api_key = QLineEdit()
+        self.gemini_api_key.setEchoMode(QLineEdit.Password)
+        self.gemini_api_key.setPlaceholderText('粘贴 Google Gemini API Key（例如 AIzaSy...，将加密存入系统钥匙串）')
+        key_row.addWidget(self.gemini_api_key, 1)
+
+        self.gemini_show_btn = QPushButton('显示')
+        self.gemini_show_btn.setCheckable(True)
+        self.gemini_show_btn.toggled.connect(
+            lambda checked: (
+                self.gemini_api_key.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password),
+                self.gemini_show_btn.setText('隐藏' if checked else '显示'),
+            )
+        )
+        key_row.addWidget(self.gemini_show_btn)
+
+        self.gemini_test_btn = QPushButton('测试并保存密钥')
+        self.gemini_test_btn.clicked.connect(self._test_and_save_gemini_key)
+        key_row.addWidget(self.gemini_test_btn)
+
+        self.gemini_clear_btn = QPushButton('清空密钥')
+        self.gemini_clear_btn.clicked.connect(self._clear_gemini_key)
+        key_row.addWidget(self.gemini_clear_btn)
+
+        layout.addRow('Gemini API Key', key_wrap)
+
+        self.gemini_key_status = QLabel('', objectName='muted')
+        self.gemini_key_status.setWordWrap(True)
+        layout.addRow('', self.gemini_key_status)
+        self._refresh_gemini_status_label()
+        return box
+
+    def _refresh_gemini_status_label(self):
+        from app.services import software_assistant
+
+        has_key = bool(software_assistant.get_gemini_api_key())
+        if hasattr(self, 'gemini_api_key') and not self.gemini_api_key.text().strip():
+            self.gemini_api_key.setPlaceholderText(
+                '✓ 已保存在系统钥匙串（直接输入新密钥可覆盖）'
+                if has_key
+                else '粘贴 Google Gemini API Key（例如 AIzaSy...）'
+            )
+        if hasattr(self, 'gemini_key_status'):
+            if has_key:
+                self.gemini_key_status.setText('✓ 当前已配置 Google Gemini API Key。')
+                self.gemini_key_status.setStyleSheet('color:#0F766E;font-weight:600;')
+            else:
+                self.gemini_key_status.setText('未保存 Gemini API Key（当前自动使用内置 GPT API / 本地智能引擎兜底）。')
+                self.gemini_key_status.setStyleSheet('color:#64748B;')
+
+    def _test_and_save_gemini_key(self):
+        from app.services import software_assistant
+
+        entered = self.gemini_api_key.text().strip()
+        chosen_model = str(self.assistant_model.currentData() or 'gemini-3.8-flash')
+        software_assistant.set_assistant_model(chosen_model)
+        if entered:
+            try:
+                software_assistant.save_gemini_api_key(entered)
+                self.gemini_api_key.clear()
+            except Exception as exc:
+                QMessageBox.warning(self, '保存 Gemini Key 失败', str(exc))
+                return
+        ok, msg = software_assistant.test_gemini_connection(entered, chosen_model)
+        self._refresh_gemini_status_label()
+        if ok:
+            self.gemini_key_status.setText('✓ ' + msg)
+            self.gemini_key_status.setStyleSheet('color:#0F766E;font-weight:700;')
+        else:
+            self.gemini_key_status.setText('⚠ ' + msg)
+            self.gemini_key_status.setStyleSheet('color:#DC2626;font-weight:600;')
+        w = self.window()
+        if hasattr(w, 'assistant_sidebar') and w.assistant_sidebar is not None:
+            w.assistant_sidebar.refresh_engine_badge()
+
+    def _clear_gemini_key(self):
+        from app.services import software_assistant
+
+        software_assistant.clear_gemini_api_key()
+        self.gemini_api_key.clear()
+        self._refresh_gemini_status_label()
+        w = self.window()
+        if hasattr(w, 'assistant_sidebar') and w.assistant_sidebar is not None:
+            w.assistant_sidebar.refresh_engine_badge()
+
     def _build_columns(self):
         box = QGroupBox('任务表格列')
         layout = QVBoxLayout(box)
         layout.setSpacing(8)
         note = QLabel(
-            '当前表格模板按表头名称读取需求人员、主播名称、中文文案、外文文案和需求说明。'
+            '当前表格模板按表头名称读取需求人员、主播名称、中文文案、外文文案、需求说明与素材来源（AI副水印关联名，为空不报错）。'
             '图片链接固定在 J 列。日期不从表格读，新任务使用同步当天。'
             '作者和制作情况按表头回写。任务区间仍然是「批量制作中」到「批量已完成」。',
             objectName='muted',
@@ -260,7 +368,7 @@ class SettingsPage(QWidget):
         self.column_table.verticalHeader().setVisible(False)
         self.column_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.column_table.setSelectionMode(QTableWidget.NoSelection)
-        self.column_table.setMinimumHeight(420)
+        self.column_table.setMinimumHeight(456)
         header = self.column_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Fixed)
@@ -506,8 +614,15 @@ class SettingsPage(QWidget):
         repo.set_default_creator(creator)
         repo.set_setting('task_source_sheet_url', self.task_sheet.text().strip())
         repo.set_setting('task_asset_root', self.task_asset_root.text().strip())
-        repo.set_setting('segment_output_root', self.segment_output_root.text().strip())
-        repo.set_setting('flow_download_root', self.segment_output_root.text().strip())
+        seg_root = self.segment_output_root.text().strip()
+        repo.set_setting('segment_output_root', seg_root)
+        repo.set_setting('flow_download_root', seg_root)
+        from app.services import channel_pool
+        repo.set_setting('flow_channel_download_root', seg_root or channel_pool.DEFAULT_CHANNEL_DOWNLOAD_ROOT)
+        try:
+            channel_pool.ensure_defaults()
+        except Exception:
+            pass
         repo.set_setting('drive_upload_root_url', self.drive_upload_root_url.text().strip())
         repo.set_setting('google_oauth_client_path', self.google_oauth_client_path.text().strip())
         repo.set_setting('timeline_fps', self.timeline_fps.currentText())
@@ -528,6 +643,14 @@ class SettingsPage(QWidget):
             try:
                 from app.services.davinci_workflow import ensure_root_layout
                 ensure_root_layout(Path(root))
+            except Exception:
+                pass
+        win = self.window()
+        flow_page = getattr(win, 'flow_task_center', None) if win is not None else None
+        if flow_page is not None:
+            try:
+                flow_page.sync_bridge_config()
+                flow_page.reload_tasks()
             except Exception:
                 pass
         self._source_snapshot = self._settings_snapshot()

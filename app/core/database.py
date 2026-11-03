@@ -3,6 +3,7 @@ from pathlib import Path
 from app.services.perf_diagnostics import measured
 import sqlite3
 import json
+import threading
 import time
 
 # Stable database layout: keep the live DB beside the app, exactly like the
@@ -12,21 +13,71 @@ APP_ROOT = Path(__file__).resolve().parents[2]
 from app.services.app_paths import data_dir
 DB_PATH = data_dir() / "studio.db"
 
+_TLS = threading.local()
+_WAL_READY: set[str] = set()
+_WAL_LOCK = threading.Lock()
+_MAX_IDLE_PER_THREAD = 2
+
+
+def _pool_bucket(db_key: str) -> list["ClosingConnection"]:
+    pool = getattr(_TLS, "pool", None)
+    if pool is None:
+        pool = {}
+        _TLS.pool = pool
+    bucket = pool.get(db_key)
+    if bucket is None:
+        bucket = []
+        pool[db_key] = bucket
+    return bucket
+
+
 class ClosingConnection(sqlite3.Connection):
-    """Commit/rollback normally, then promptly release SQLite caches and handles."""
+    """Commit/rollback normally, then return clean handles to the thread-local pool."""
     @measured('DB_query')
-    def execute(self, *args, **kwargs):
-        return super().execute(*args, **kwargs)
+    def execute(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and (
+            "TEMP" in sql or "temp" in sql or "query_only" in sql or "QUERY_ONLY" in sql
+        ):
+            self._unpoolable = True
+        return super().execute(sql, *args, **kwargs)
 
     @measured('DB_query')
     def executemany(self, *args, **kwargs):
         return super().executemany(*args, **kwargs)
+
+    def _real_close(self):
+        if getattr(self, "_really_closed", False):
+            return
+        self._really_closed = True
+        super().close()
+
+    def close(self):
+        if getattr(self, "_really_closed", False):
+            return
+        if getattr(self, "_context_depth", 0) > 0:
+            return
+        db_key = getattr(self, "_db_key", "")
+        if getattr(self, "_unpoolable", False) or getattr(self, "_had_error", False) or not db_key:
+            self._real_close()
+            return
+        try:
+            if self.in_transaction:
+                super().rollback()
+            bucket = _pool_bucket(db_key)
+            if len(bucket) < _MAX_IDLE_PER_THREAD and self not in bucket:
+                bucket.append(self)
+                return
+        except Exception:
+            pass
+        self._real_close()
 
     def __enter__(self):
         self._context_depth = getattr(self, '_context_depth', 0) + 1
         return super().__enter__()
 
     def __exit__(self, *exc):
+        if exc and exc[0] is not None:
+            self._had_error = True
         try:
             return super().__exit__(*exc)
         finally:
@@ -36,16 +87,42 @@ class ClosingConnection(sqlite3.Connection):
 
 
 def connect():
-    """Open one short-lived SQLite connection using the stable app-local DB.
+    """Return a thread-local pooled SQLite connection using the stable app-local DB.
 
-    WAL + busy_timeout improve concurrent reads/writes without changing the
-    location or lifecycle of the database.  No migration/failover happens here.
+    WAL + busy_timeout + thread-local connection reuse eliminate repeated file-open
+    and PRAGMA overhead while keeping full isolation for nested/concurrent callers.
     """
+    db_str = str(DB_PATH)
+    bucket = _pool_bucket(db_str)
+    while bucket:
+        con = bucket.pop()
+        if not getattr(con, "_really_closed", False):
+            con._had_error = False
+            con._unpoolable = False
+            con._context_depth = 0
+            return con
+
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(DB_PATH), timeout=10.0, factory=ClosingConnection)
+    con = sqlite3.connect(db_str, timeout=10.0, factory=ClosingConnection)
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys = ON")
-    con.execute("PRAGMA busy_timeout = 10000")
+    con._db_key = db_str
+    con._unpoolable = False
+    con._had_error = False
+    con._really_closed = False
+    con._context_depth = 0
+    raw_exec = super(ClosingConnection, con).execute
+    with _WAL_LOCK:
+        if db_str not in _WAL_READY:
+            try:
+                raw_exec("PRAGMA journal_mode = WAL")
+            except Exception:
+                pass
+            _WAL_READY.add(db_str)
+    raw_exec("PRAGMA foreign_keys = ON")
+    raw_exec("PRAGMA busy_timeout = 10000")
+    raw_exec("PRAGMA synchronous = NORMAL")
+    raw_exec("PRAGMA temp_store = MEMORY")
+    raw_exec("PRAGMA cache_size = -16000")
     return con
 
 BASE_SCHEMA = """
@@ -179,6 +256,7 @@ def init_db():
         _ensure_column(con, "hosts", "flow_upload_verified_at", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(con, "hosts", "flow_upload_error", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(con, "hosts", "flow_task_command_id", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "hosts", "flow_aspect_ratio", "TEXT NOT NULL DEFAULT '9:16'")
         _ensure_column(con, "flow_segments", "qc_status", "TEXT NOT NULL DEFAULT '待质检'")
         _ensure_column(con, "flow_segments", "qc_note", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(con, "videos", "edit_status", "TEXT NOT NULL DEFAULT '等待片段'")
@@ -203,6 +281,7 @@ def init_db():
         _ensure_column(con, "videos", "prompt_template_snapshot", "TEXT NOT NULL DEFAULT ''")
 
         _ensure_column(con, "flow_segments", "generation_mode", "TEXT NOT NULL DEFAULT 'FRAME'")
+        _ensure_column(con, "flow_segments", "video_model", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(con, "flow_segments", "generation_command", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(con, "flow_segments", "flow_channel_key", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(con, "flow_segments", "flow_retry_count", "INTEGER NOT NULL DEFAULT 0")
@@ -311,7 +390,6 @@ def init_db():
         """)
         for i in range(1,5):
             con.execute("INSERT OR IGNORE INTO flow_channel_pool(channel_key,role,download_subdir,sort_order) VALUES(?,?,?,?)", (f'CH{i}','normal',f'CH{i}',i))
-        con.execute("INSERT OR IGNORE INTO flow_channel_pool(channel_key,role,download_subdir,sort_order) VALUES('R1','fast','R1',99)")
         con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('flow_channel_pool_enabled','1')")
         con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('flow_channel_download_root','')")
 
@@ -428,12 +506,20 @@ def init_db():
         _ensure_column(con, "asset_jobs", "download_method", "TEXT NOT NULL DEFAULT ''")
 
 
-        # Cover live joins/lookups without changing scheduling or date predicates.
+        # Cover live joins/lookups and FK cascades without changing scheduling or date predicates.
         con.executescript("""
             CREATE INDEX IF NOT EXISTS idx_perf_hosts_recipient ON hosts(recipient_id);
+            CREATE INDEX IF NOT EXISTS idx_perf_videos_host ON videos(host_id);
             CREATE INDEX IF NOT EXISTS idx_perf_segments_video ON flow_segments(video_id);
             CREATE INDEX IF NOT EXISTS idx_perf_dispatch_segment_command ON flow_dispatches(segment_id,command_id,status);
             CREATE INDEX IF NOT EXISTS idx_perf_segments_command ON flow_segments(generation_command);
+            CREATE INDEX IF NOT EXISTS idx_perf_outputs_segment ON flow_outputs(segment_id);
+            CREATE INDEX IF NOT EXISTS idx_perf_qc_decisions_segment ON qc_decisions(segment_id);
+            CREATE INDEX IF NOT EXISTS idx_perf_prompt_hist_segment ON prompt_submission_history(segment_id);
+            CREATE INDEX IF NOT EXISTS idx_perf_prompt_hist_submitted ON prompt_submission_history(submitted_at);
+            CREATE INDEX IF NOT EXISTS idx_perf_api_usage_segment ON api_usage_log(flow_segment_id);
+            CREATE INDEX IF NOT EXISTS idx_perf_source_tasks_video ON source_tasks(video_id);
+            CREATE INDEX IF NOT EXISTS idx_perf_flow_receipts_created ON flow_receipts(created_at);
         """)
         con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('default_creator','')")
         con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('task_source_sheet_url','')")

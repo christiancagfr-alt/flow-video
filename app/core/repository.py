@@ -42,7 +42,13 @@ def delete_recipient(recipient_id):
 def list_hosts(recipient_id, *, work_date=None):
     with read_connection(work_date) as con:
         return con.execute("""
-            SELECT h.*, COUNT(v.id) AS actual_video_count
+            SELECT h.*,
+                   COALESCE(
+                       NULLIF((SELECT value FROM app_settings WHERE key='host_aspect_ratio_' || h.id), ''),
+                       NULLIF((SELECT value FROM app_settings WHERE key='host_aspect_ratio_name_' || TRIM(h.name)), ''),
+                       '9:16'
+                   ) AS aspect_ratio,
+                   COUNT(v.id) AS actual_video_count
             FROM hosts h
             LEFT JOIN videos v ON v.host_id=h.id
             WHERE h.recipient_id=?
@@ -75,6 +81,83 @@ def add_host(recipient_id, name, video_count, image_path=""):
 def delete_host(host_id):
     with connect() as con:
         con.execute("DELETE FROM hosts WHERE id=?", (host_id,))
+
+
+def normalize_aspect_ratio(value) -> str:
+    raw = str(value or "").strip().upper()
+    if raw in ("16:9", "LANDSCAPE", "VIDEO_ASPECT_RATIO_LANDSCAPE", "横屏"):
+        return "16:9"
+    return "9:16"
+
+
+def get_host_aspect_ratio(host_id, *, work_date=None) -> str:
+    if not host_id:
+        return "9:16"
+    hid = int(host_id)
+    with read_connection(work_date) as con:
+        row = con.execute(
+            "SELECT value FROM app_settings WHERE key=?",
+            (f"host_aspect_ratio_{hid}",),
+        ).fetchone()
+        if row and str(row["value"] or "").strip():
+            return normalize_aspect_ratio(row["value"])
+        try:
+            nrow = con.execute("SELECT name FROM hosts WHERE id=?", (hid,)).fetchone()
+            hname = str(nrow["name"] or "").strip() if nrow else ""
+            if hname:
+                by_name = con.execute(
+                    "SELECT value FROM app_settings WHERE key=?",
+                    (f"host_aspect_ratio_name_{hname}",),
+                ).fetchone()
+                if by_name and str(by_name["value"] or "").strip():
+                    return normalize_aspect_ratio(by_name["value"])
+        except Exception:
+            pass
+        try:
+            hrow = con.execute(
+                "SELECT flow_aspect_ratio FROM hosts WHERE id=?",
+                (hid,),
+            ).fetchone()
+            if hrow and str(hrow["flow_aspect_ratio"] or "").strip():
+                return normalize_aspect_ratio(hrow["flow_aspect_ratio"])
+        except Exception:
+            pass
+    return "9:16"
+
+
+def set_host_aspect_ratio(host_id, aspect_ratio: str) -> str:
+    if not host_id:
+        return "9:16"
+    hid = int(host_id)
+    ratio = normalize_aspect_ratio(aspect_ratio)
+    with connect() as con:
+        con.execute(
+            "INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (f"host_aspect_ratio_{hid}", ratio),
+        )
+        try:
+            nrow = con.execute("SELECT name FROM hosts WHERE id=?", (hid,)).fetchone()
+            hname = str(nrow["name"] or "").strip() if nrow else ""
+            if hname:
+                con.execute(
+                    "INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (f"host_aspect_ratio_name_{hname}", ratio),
+                )
+        except Exception:
+            pass
+        try:
+            con.execute(
+                "UPDATE hosts SET flow_aspect_ratio=? WHERE id=?",
+                (ratio, hid),
+            )
+        except Exception:
+            try:
+                con.execute("ALTER TABLE hosts ADD COLUMN flow_aspect_ratio TEXT NOT NULL DEFAULT '9:16'")
+                con.execute("UPDATE hosts SET flow_aspect_ratio=? WHERE id=?", (ratio, hid))
+            except Exception:
+                pass
+    return ratio
+
 
 def list_videos(host_id, *, work_date=None):
     with read_connection(work_date) as con:
@@ -378,8 +461,23 @@ def update_segment_rule(segment_id, rule):
         con.execute("UPDATE flow_segments SET segment_rule=? WHERE id=?", (rule or "", segment_id))
 
 def ensure_flow_segments_for_host(host_id):
+    with read_connection() as rcon:
+        videos = rcon.execute("""
+            SELECT v.* FROM videos v
+            LEFT JOIN flow_segments fs ON fs.video_id = v.id
+            WHERE v.host_id = ?
+            GROUP BY v.id
+            HAVING COUNT(fs.id) = 0
+            ORDER BY v.seq
+        """, (host_id,)).fetchall()
+    if not videos:
+        return
+    try:
+        max_chars = int(get_setting("default_wrap", "0") or 0)
+    except (TypeError, ValueError):
+        max_chars = 0
+    from app.services.reflow_rules import prepare_configured_speech as prepare_swahili_speech
     with connect() as con:
-        videos = con.execute("SELECT * FROM videos WHERE host_id=? ORDER BY seq", (host_id,)).fetchall()
         for v in videos:
             count = con.execute(
                 "SELECT COUNT(*) c FROM flow_segments WHERE video_id=?", (v["id"],)
@@ -389,11 +487,6 @@ def ensure_flow_segments_for_host(host_id):
             source = (v["original_script"] or v["script"] or "").replace("\r\n", "\n").replace("\r", "\n")
             if not source.strip():
                 continue
-            from app.services.reflow_rules import prepare_configured_speech as prepare_swahili_speech
-            try:
-                max_chars = int(get_setting("default_wrap", "0") or 0)
-            except (TypeError, ValueError):
-                max_chars = 0
             prepared = prepare_swahili_speech(source, max_chars=max_chars or None)
             if not prepared.integrity_ok:
                 # Never silently create altered dialogue.  Keep the exact current text as one
@@ -415,6 +508,36 @@ def ensure_flow_segments_for_host(host_id):
                             (v["id"],i,line,float(m.get('estimated_speech_duration') or m.get('estimated_speech_seconds') or 0),
                              int(m.get('flow_duration_seconds') or m.get('duration') or 8),
                              str(m.get('timing_status') or prepared.timing_status if prepared.integrity_ok else 'INTEGRITY_FAILED')))
+
+
+def prompt_global_stats(*, work_date=None):
+    with read_connection(work_date) as con:
+        row = con.execute("""
+            SELECT
+                (SELECT COUNT(h.id) FROM hosts h JOIN recipients r ON r.id = h.recipient_id) AS all_hosts,
+                COUNT(fs.id) AS total_tasks,
+                SUM(CASE WHEN TRIM(COALESCE(fs.prompt, '')) = '' AND COALESCE(fs.status, '') <> '失败' THEN 1 ELSE 0 END) AS pending_all,
+                SUM(CASE WHEN TRIM(COALESCE(fs.prompt, '')) <> '' THEN 1 ELSE 0 END) AS generated_all,
+                SUM(CASE WHEN COALESCE(fs.status, '') = '失败' THEN 1 ELSE 0 END) AS failed_all
+            FROM flow_segments fs
+            JOIN videos v ON v.id = fs.video_id
+            JOIN hosts h ON h.id = v.host_id
+            JOIN recipients r ON r.id = h.recipient_id
+        """).fetchone()
+    hosts_val = int(row["all_hosts"] or 0) if row else 0
+    pending_val = int(row["pending_all"] or 0) if row else 0
+    generated_val = int(row["generated_all"] or 0) if row else 0
+    failed_val = int(row["failed_all"] or 0) if row else 0
+    return {
+        "hosts": hosts_val,
+        "pending": pending_val,
+        "generated": generated_val,
+        "failed": failed_val,
+        "all_hosts": hosts_val,
+        "pending_all": pending_val,
+        "generated_all": generated_val,
+        "failed_all": failed_val,
+    }
 
 
 def list_prompt_tasks(recipient_id=None, host_id=None, status_filter="全部", *, work_date=None):
@@ -440,7 +563,9 @@ def list_prompt_tasks(recipient_id=None, host_id=None, status_filter="全部", *
     sql = f"""
         SELECT
             fs.id segment_id, fs.seg_seq, fs.foreign_text, fs.prompt,
-            COALESCE(fs.generation_mode,'FRAME') generation_mode, fs.ai_original_prompt, fs.segment_rule, fs.status, fs.model,
+            COALESCE(fs.generation_mode,'FRAME') generation_mode, COALESCE(fs.video_model,'') video_model,
+            COALESCE(fs.flow_duration_seconds,8) flow_duration_seconds,
+            fs.ai_original_prompt, fs.segment_rule, fs.status, fs.model,
             fs.input_tokens, fs.cached_tokens, fs.output_tokens, fs.cost_usd,
             COALESCE(fs.prompt_review_status,'待检查') prompt_review_status, COALESCE(fs.prompt_submitted_at,'') prompt_submitted_at,
             v.id video_id, v.seq video_seq, v.chinese_script,
@@ -460,25 +585,45 @@ def list_prompt_tasks(recipient_id=None, host_id=None, status_filter="全部", *
 
 
 def get_prompt_task(segment_id):
+    rows = get_prompt_tasks_by_ids([segment_id])
+    return rows[0] if rows else None
+
+
+def get_prompt_tasks_by_ids(segment_ids):
+    clean_ids = [int(sid) for sid in (segment_ids or []) if sid is not None]
+    if not clean_ids:
+        return []
     with connect() as con:
-        row = con.execute("""
-            SELECT
-                fs.id segment_id, fs.seg_seq, fs.foreign_text, fs.prompt,
-                COALESCE(fs.generation_mode,'FRAME') generation_mode, fs.ai_original_prompt, fs.segment_rule, fs.status, fs.model,
-                fs.input_tokens, fs.cached_tokens, fs.output_tokens, fs.cost_usd,
-                COALESCE(fs.prompt_review_status,'待检查') prompt_review_status, COALESCE(fs.prompt_submitted_at,'') prompt_submitted_at,
-                v.id video_id, v.seq video_seq, v.chinese_script,
-                v.image_path, v.special_requirements, v.performance_mode, v.prompt_template_snapshot,
-                h.id host_id, h.name host_name, h.prompt_rule,
-                r.id recipient_id, r.name recipient_name
-            FROM flow_segments fs
-            JOIN videos v ON v.id=fs.video_id
-            JOIN hosts h ON h.id=v.host_id
-            JOIN recipients r ON r.id=h.recipient_id
-            WHERE fs.id=?
-        """, (segment_id,)).fetchone()
+        rows_out = []
+        # SQLite parameter chunking (max 500 per IN clause)
+        for i in range(0, len(clean_ids), 500):
+            chunk = clean_ids[i:i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            fetched = con.execute(f"""
+                SELECT
+                    fs.id segment_id, fs.seg_seq, fs.foreign_text, fs.prompt,
+                    COALESCE(fs.generation_mode,'FRAME') generation_mode, COALESCE(fs.video_model,'') video_model,
+                    COALESCE(fs.flow_duration_seconds,8) flow_duration_seconds,
+                    fs.ai_original_prompt, fs.segment_rule, fs.status, fs.model,
+                    fs.input_tokens, fs.cached_tokens, fs.output_tokens, fs.cost_usd,
+                    COALESCE(fs.prompt_review_status,'待检查') prompt_review_status, COALESCE(fs.prompt_submitted_at,'') prompt_submitted_at,
+                    v.id video_id, v.seq video_seq, v.chinese_script,
+                    v.image_path, v.special_requirements, v.performance_mode, v.prompt_template_snapshot,
+                    h.id host_id, h.name host_name, h.prompt_rule,
+                    r.id recipient_id, r.name recipient_name
+                FROM flow_segments fs
+                JOIN videos v ON v.id=fs.video_id
+                JOIN hosts h ON h.id=v.host_id
+                JOIN recipients r ON r.id=h.recipient_id
+                WHERE fs.id IN ({placeholders})
+            """, chunk).fetchall()
+            rows_out.extend(fetched)
+        if not rows_out:
+            return []
         from app.services.performance_types import apply_choices
-        return apply_choices(con,[row])[0] if row else None
+        enriched = apply_choices(con, rows_out)
+        by_id = {int(r["segment_id"]): r for r in enriched}
+        return [by_id[sid] for sid in clean_ids if sid in by_id]
 
 def save_prompt_result(segment_id, original_prompt, final_prompt, status, model,
                        input_tokens=0, cached_tokens=0, output_tokens=0, cost_usd=0.0):
@@ -642,6 +787,23 @@ def prompt_usage_breakdown(*, work_date=None):
         return dict(row)
 
 
+def daily_api_usage_breakdown(day: str | None = None):
+    """Exact GPT API usage & cost incurred on a local calendar day (YYYY-MM-DD)."""
+    target_day = str(day or _time.strftime("%Y-%m-%d")).strip()
+    with read_connection() as con:
+        row = con.execute("""
+            SELECT
+                COALESCE(SUM(input_tokens), 0) input_tokens,
+                COALESCE(SUM(cached_tokens), 0) cached_tokens,
+                COALESCE(SUM(output_tokens), 0) output_tokens,
+                COALESCE(SUM(cost_usd), 0) cost_usd,
+                COUNT(*) request_count
+            FROM api_usage_log
+            WHERE date(created_at, 'localtime') = ?
+        """, (target_day,)).fetchone()
+        return {"day": target_day, **dict(row)}
+
+
 
 
 
@@ -665,7 +827,9 @@ def list_flow_tasks(recipient_id=None, host_id=None, status_filter="全部", *, 
     sql = f"""
         SELECT
             fs.id segment_id, fs.seg_seq, fs.foreign_text, fs.prompt,
-            COALESCE(fs.generation_mode,'FRAME') generation_mode, fs.flow_status, fs.flow_output_path, COALESCE(fs.flow_output_url,'') flow_output_url, fs.flow_error,
+            COALESCE(fs.generation_mode,'FRAME') generation_mode, COALESCE(fs.video_model,'') video_model,
+            COALESCE(fs.flow_duration_seconds,8) flow_duration_seconds,
+            fs.flow_status, fs.flow_output_path, COALESCE(fs.flow_output_url,'') flow_output_url, fs.flow_error,
             CASE 
                 WHEN fs.seg_seq >= 1000 AND (fs.foreign_text LIKE '[辅助图] %' OR fs.foreign_text LIKE '%[LEGACY_AUX]%') THEN 'CAMERA_AUX_IMAGE'
                 WHEN fs.seg_seq >= 1000 AND fs.foreign_text LIKE '%[B-roll]%' THEN 'BROLL_IMAGE'
@@ -1051,7 +1215,7 @@ def save_manual_prompt_results(segment_prompt_map):
 
 
 def list_qc_segments(recipient_id=None, host_id=None, status_filter="全部", *, work_date=None):
-    where = ["fs.flow_status='已完成'", "TRIM(fo.output_path)<>''"]
+    where = ["fs.flow_status='已完成'", "TRIM(fo.output_path)<>''", "COALESCE(v.edit_status,'')<>'已放弃'"]
     args = []
     if recipient_id:
         where.append("r.id=?")
@@ -1125,6 +1289,8 @@ def _current_edit_segments(con, video_ids=None):
 
 
 def editing_stage(status, ready=None):
+    if status == '已放弃':
+        return 'ABANDONED'
     if status in ('待准备', '等待片段', '素材待齐', '需要画面处理', ''):
         return 'WAITING_MATERIAL'
     if status in ('等待剪辑', '待剪辑', '待导入DaVinci', 'AUTO_EDIT_PENDING'):
@@ -1141,7 +1307,7 @@ def editing_stage(status, ready=None):
 
 
 def list_edit_queue(recipient_id=None, host_id=None, *, work_date=None):
-    where, args = [], []
+    where, args = ["COALESCE(v.edit_status,'')<>'已放弃'", "COALESCE(v.status,'')<>'已放弃'"], []
     if recipient_id:
         where.append('r.id=?'); args.append(recipient_id)
     if host_id:
@@ -1155,13 +1321,64 @@ def list_edit_queue(recipient_id=None, host_id=None, *, work_date=None):
             FROM videos v JOIN hosts h ON h.id=v.host_id JOIN recipients r ON r.id=h.recipient_id
             """ + clause + ' ORDER BY r.id DESC,h.id,v.seq', args).fetchall()
         segments = _current_edit_segments(con, [r['video_id'] for r in rows]) if rows else []
+        ratio_by_host = {}
+        if rows:
+            try:
+                for srow in con.execute(
+                    "SELECT key, value FROM app_settings WHERE key LIKE 'host_aspect_ratio_%'"
+                ).fetchall():
+                    k = str(srow['key'] or '')
+                    tail = k[len('host_aspect_ratio_'):]
+                    if tail.isdigit() and str(srow['value'] or '').strip():
+                        ratio_by_host[int(tail)] = normalize_aspect_ratio(srow['value'])
+            except Exception:
+                pass
+            missing_hids = sorted({
+                int(r['host_id']) for r in rows
+                if r['host_id'] is not None and int(r['host_id']) not in ratio_by_host
+            })
+            if missing_hids:
+                try:
+                    marks = ','.join('?' for _ in missing_hids)
+                    for hrow in con.execute(
+                        f"SELECT id, flow_aspect_ratio FROM hosts WHERE id IN ({marks})",
+                        missing_hids,
+                    ).fetchall():
+                        if str(hrow['flow_aspect_ratio'] or '').strip():
+                            ratio_by_host[int(hrow['id'])] = normalize_aspect_ratio(hrow['flow_aspect_ratio'])
+                except Exception:
+                    pass
     grouped = {}
     for segment in segments:
         grouped.setdefault(segment['video_id'], []).append(segment)
     result = []
     for raw in rows:
         row = dict(raw)
+        row['aspect_ratio'] = (
+            ratio_by_host.get(int(row['host_id']), '9:16')
+            if row.get('host_id') is not None else '9:16'
+        )
         parts = grouped.get(row['video_id'], [])
+        # 整条完整视频只要有任意有效片段被标记为「已放弃」，整条视频即作废，不进入自动剪辑队列。
+        if parts and any(
+            str(p.get('flow_status') or '') == '已放弃'
+            or str(p.get('prompt_review_status') or '') == '已放弃'
+            for p in parts
+        ):
+            continue
+        materials_ready = row['edit_status'] not in ('待准备', '等待片段', '素材待齐', '需要画面处理', '')
+        # 上游跳过未做（从未提交到 Flow）或已从 Flow 撤回排队的任务尚未进入生产管线，不计入「素材待齐」。
+        if not materials_ready:
+            entered_pipeline = bool(parts) and any(
+                str(p.get('prompt_review_status') or '') == '已提交'
+                or str(p.get('flow_status') or '') not in ('', '待生成', '已放弃')
+                or bool(str(p.get('generation_command') or '').strip())
+                or bool(p.get('download_valid'))
+                or bool(p.get('material_valid'))
+                for p in parts
+            )
+            if not entered_pipeline:
+                continue
         row['segment_count'] = len(parts)
         row['completed_segments'] = sum(p['download_valid'] for p in parts)
         row['qc_passed'] = sum(p['material_valid'] for p in parts)
@@ -1171,7 +1388,7 @@ def list_edit_queue(recipient_id=None, host_id=None, *, work_date=None):
             '生成失败': sum(not p['download_valid'] and p['qc_status']!='退回' and p['flow_status']=='失败' for p in parts),
             '等待生成 / 下载': sum(not p['download_valid'] and p['qc_status']!='退回' and p['flow_status']!='失败' for p in parts),
         }
-        row['materials_ready'] = row['edit_status'] not in ('待准备', '等待片段', '素材待齐', '需要画面处理', '')
+        row['materials_ready'] = materials_ready
         row['editing_stage'] = editing_stage(row['edit_status'])
         result.append(row)
     return result
@@ -1551,7 +1768,7 @@ def channel_browser_group(channel_key):
     return 'B' if str(channel_key or '').startswith('B-') else 'A'
 
 
-def ensure_channel_pool(normal_count=7, include_fast=True, *, browser_b_enabled=None, browser_b_normal_count=None, browser_b_fast_enabled=None):
+def ensure_channel_pool(normal_count=7, include_fast=False, *, browser_b_enabled=None, browser_b_normal_count=None, browser_b_fast_enabled=None):
     """
     Browser A keeps legacy keys CH1..CHn + R1 for compatibility.
     Browser B uses B-CH1..B-CHn + B-R1.
@@ -1813,83 +2030,91 @@ def reconcile_selected_date_unfinished_tasks(*, work_date):
 
     allowed={int(r['id']) for r in scoped_rows}
     requeued=[];restored=[]
-    with connect() as con:
-        published=_published_generation_commands(con)
-        owner_table=bool(con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_command_owners'").fetchone())
-        receipt_table=bool(con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='flow_receipts'").fetchone())
-        for base in scoped_rows:
-            sid=int(base['id'])
-            # Re-read under the write connection so a receipt arriving between the
-            # scoped snapshot and this repair cannot be overwritten.
-            row=con.execute("""SELECT id,COALESCE(NULLIF(flow_status,''),'待生成') flow_status,
-                                      COALESCE(generation_command,'') generation_command,
-                                      COALESCE(flow_channel_key,'') flow_channel_key,
-                                      COALESCE(flow_output_path,'') flow_output_path
-                                 FROM flow_segments WHERE id=?""",(sid,)).fetchone()
-            if not row or sid not in allowed or str(row['flow_status'])=='已完成' or str(row['flow_output_path'] or '').strip():
-                continue
-            status=str(row['flow_status'] or '待生成')
-            cmd=str(row['generation_command'] or '').strip()
+    # Plain waiting rows without a command_id cannot be stranded or missing command identity;
+    # only inspect rows that carry a command_id or claim an active submission state.
+    inspect_rows=[
+        base for base in scoped_rows
+        if str(base.get('generation_command') or '').strip()
+        or str(base.get('flow_status') or '待生成') in ('已提交','生成中','下载中')
+    ]
+    if inspect_rows:
+        with connect() as con:
+            published=_published_generation_commands(con)
+            owner_table=bool(con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_command_owners'").fetchone())
+            receipt_table=bool(con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='flow_receipts'").fetchone())
+            for base in inspect_rows:
+                sid=int(base['id'])
+                # Re-read under the write connection so a receipt arriving between the
+                # scoped snapshot and this repair cannot be overwritten.
+                row=con.execute("""SELECT id,COALESCE(NULLIF(flow_status,''),'待生成') flow_status,
+                                          COALESCE(generation_command,'') generation_command,
+                                          COALESCE(flow_channel_key,'') flow_channel_key,
+                                          COALESCE(flow_output_path,'') flow_output_path
+                                     FROM flow_segments WHERE id=?""",(sid,)).fetchone()
+                if not row or sid not in allowed or str(row['flow_status'])=='已完成' or str(row['flow_output_path'] or '').strip():
+                    continue
+                status=str(row['flow_status'] or '待生成')
+                cmd=str(row['generation_command'] or '').strip()
 
-            # Inconsistent legacy rows can lose generation_command while a dispatch
-            # still carries the immutable command identity.  Restore that identity
-            # instead of generating a duplicate.
-            if not cmd and status in ('已提交','生成中','下载中'):
-                candidates=con.execute("""SELECT command_id,status,submitted_at,created_at
-                    FROM flow_dispatches WHERE segment_id=? AND
-                    (status IN ('submitted','downloading','detected') OR TRIM(COALESCE(submitted_at,''))<>'')
-                    ORDER BY id DESC""",(sid,)).fetchall()
-                unique=[]
-                for d in candidates:
-                    c=str(d['command_id'] or '').strip()
-                    if c and c not in unique:unique.append(c)
-                if len(unique)==1:
-                    con.execute("UPDATE flow_segments SET generation_command=? WHERE id=? AND TRIM(COALESCE(generation_command,''))=''",(unique[0],sid))
-                    restored.append(sid)
+                # Inconsistent legacy rows can lose generation_command while a dispatch
+                # still carries the immutable command identity.  Restore that identity
+                # instead of generating a duplicate.
+                if not cmd and status in ('已提交','生成中','下载中'):
+                    candidates=con.execute("""SELECT command_id,status,submitted_at,created_at
+                        FROM flow_dispatches WHERE segment_id=? AND
+                        (status IN ('submitted','downloading','detected') OR TRIM(COALESCE(submitted_at,''))<>'')
+                        ORDER BY id DESC""",(sid,)).fetchall()
+                    unique=[]
+                    for d in candidates:
+                        c=str(d['command_id'] or '').strip()
+                        if c and c not in unique:unique.append(c)
+                    if len(unique)==1:
+                        con.execute("UPDATE flow_segments SET generation_command=? WHERE id=? AND TRIM(COALESCE(generation_command,''))=''",(unique[0],sid))
+                        restored.append(sid)
+                        continue
+
+                if not cmd or status not in ('待生成','已准备'):
+                    # Unknown submitted/running ownership or non-waiting statuses must never be reset here.
                     continue
 
-            if not cmd:
-                # Unknown submitted/running ownership must be inspected, never regenerated.
-                continue
+                # Short-circuit from cheapest to most expensive check so active/submitted commands
+                # never trigger a full-table LIKE scan of flow_receipts on every 2s tick.
+                protected = (
+                    (cmd in published)
+                    or bool(owner_table and con.execute("SELECT 1 FROM browser_command_owners WHERE command_id=? LIMIT 1",(cmd,)).fetchone())
+                    or bool(con.execute("""SELECT 1 FROM flow_dispatches WHERE segment_id=? AND command_id=? AND
+                        (status IN ('submitted','downloading','detected') OR TRIM(COALESCE(submitted_at,''))<>'') LIMIT 1""",(sid,cmd)).fetchone())
+                    or bool(con.execute("SELECT 1 FROM flow_outputs WHERE segment_id=? AND command_id=? LIMIT 1",(sid,cmd)).fetchone())
+                    or bool(receipt_table and con.execute("SELECT 1 FROM flow_receipts WHERE payload LIKE ? AND payload LIKE ? LIMIT 1",
+                        (f'%{cmd}%',f'%\"segment_id\": {sid}%')).fetchone())
+                )
 
-            # Any one of these is durable evidence that this exact command may still
-            # produce a paid result.  Do not automatically submit it again.
-            is_published=cmd in published
-            has_owner=bool(owner_table and con.execute("SELECT 1 FROM browser_command_owners WHERE command_id=? LIMIT 1",(cmd,)).fetchone())
-            has_submit_dispatch=bool(con.execute("""SELECT 1 FROM flow_dispatches WHERE segment_id=? AND command_id=? AND
-                (status IN ('submitted','downloading','detected') OR TRIM(COALESCE(submitted_at,''))<>'') LIMIT 1""",(sid,cmd)).fetchone())
-            has_output=bool(con.execute("SELECT 1 FROM flow_outputs WHERE segment_id=? AND command_id=? LIMIT 1",(sid,cmd)).fetchone())
-            # Receipts are append-only evidence from the plugin. LIKE is deliberately
-            # conservative: a false positive protects work; it can never cause duplicate generation.
-            has_receipt=bool(receipt_table and con.execute("SELECT 1 FROM flow_receipts WHERE payload LIKE ? AND payload LIKE ? LIMIT 1",
-                (f'%{cmd}%',f'%\"segment_id\": {sid}%')).fetchone())
-            protected=is_published or has_owner or has_submit_dispatch or has_output or has_receipt
+                if not protected:
+                    con.execute("""UPDATE flow_dispatches SET status='cancelled',stage='CANCELLED',
+                        error=CASE WHEN TRIM(COALESCE(error,''))='' THEN '自动恢复：当前日期未完成任务无提交证据' ELSE error END,
+                        last_update_at=?
+                        WHERE segment_id=? AND command_id=? AND status IN ('planned','queued')""",(_time.time(),sid,cmd))
+                    con.execute("""UPDATE flow_segments SET generation_command='',flow_status='待生成',flow_channel_key='',flow_error=''
+                        WHERE id=? AND generation_command=? AND flow_status IN ('待生成','已准备')""",(sid,cmd))
+                    # Release only this obsolete command's submission slot; another newer
+                    # command on the same channel cannot be cleared by this statement.
+                    con.execute("""UPDATE flow_channel_pool SET task_command_id='',last_status='空闲 · 已恢复当前日期等待任务'
+                        WHERE task_command_id=?""",(cmd,))
+                    requeued.append(sid)
 
-            if status in ('待生成','已准备') and not protected:
-                con.execute("""UPDATE flow_dispatches SET status='cancelled',stage='CANCELLED',
-                    error=CASE WHEN TRIM(COALESCE(error,''))='' THEN '自动恢复：当前日期未完成任务无提交证据' ELSE error END,
-                    last_update_at=?
-                    WHERE segment_id=? AND command_id=? AND status IN ('planned','queued')""",(_time.time(),sid,cmd))
-                con.execute("""UPDATE flow_segments SET generation_command='',flow_status='待生成',flow_channel_key='',flow_error=''
-                    WHERE id=? AND generation_command=? AND flow_status IN ('待生成','已准备')""",(sid,cmd))
-                # Release only this obsolete command's submission slot; another newer
-                # command on the same channel cannot be cleared by this statement.
-                con.execute("""UPDATE flow_channel_pool SET task_command_id='',last_status='空闲 · 已恢复当前日期等待任务'
-                    WHERE task_command_id=?""",(cmd,))
-                requeued.append(sid)
-
-    # Return a fresh audit after repair.  The UI uses this to prove that the selected
-    # date was actually scanned instead of merely showing a timer heartbeat.
-    with read_connection(day) as scoped:
-        rows=[dict(r) for r in scoped.execute("""
-            SELECT fs.id,COALESCE(NULLIF(fs.flow_status,''),'待生成') flow_status,
-                   COALESCE(fs.generation_command,'') generation_command,
-                   COALESCE(fs.flow_output_path,'') flow_output_path
-              FROM flow_segments fs
-             WHERE TRIM(COALESCE(fs.prompt,''))<>''
-               AND COALESCE(fs.prompt_review_status,'待检查')='已提交'
-               AND COALESCE(NULLIF(fs.flow_status,''),'待生成')<>'已完成'
-        """).fetchall()]
+    if requeued or restored:
+        with read_connection(day) as scoped:
+            rows=[dict(r) for r in scoped.execute("""
+                SELECT fs.id,COALESCE(NULLIF(fs.flow_status,''),'待生成') flow_status,
+                       COALESCE(fs.generation_command,'') generation_command,
+                       COALESCE(fs.flow_output_path,'') flow_output_path
+                  FROM flow_segments fs
+                 WHERE TRIM(COALESCE(fs.prompt,''))<>''
+                   AND COALESCE(fs.prompt_review_status,'待检查')='已提交'
+                   AND COALESCE(NULLIF(fs.flow_status,''),'待生成')<>'已完成'
+            """).fetchall()]
+    else:
+        rows = scoped_rows
     return {
         'work_date':day,
         'unfinished':len(rows),
@@ -1915,24 +2140,30 @@ def recover_orphaned_waiting_commands(*, work_date=None):
     """
     recovered=[]
     released_channels=[]
-    allowed_segments=None
-    if work_date is not None:
-        with read_connection(work_date) as scoped:
-            allowed_segments={int(r[0]) for r in scoped.execute("SELECT id FROM flow_segments").fetchall()}
-        if not allowed_segments:
-            return {'segments':[], 'channels':[]}
     with connect() as con:
+        if work_date is not None:
+            rows=con.execute("""SELECT fs.id,fs.generation_command,fs.flow_status,fs.flow_channel_key,
+                                       COALESCE(fs.flow_output_path,'') flow_output_path
+                                  FROM flow_segments fs
+                                  JOIN videos v ON v.id=fs.video_id
+                                  JOIN hosts h ON h.id=v.host_id
+                                  JOIN recipients r ON r.id=h.recipient_id
+                                 WHERE r.work_date=?
+                                   AND fs.flow_status IN ('待生成','已准备')
+                                   AND TRIM(COALESCE(fs.generation_command,''))<>''""",
+                             (str(work_date),)).fetchall()
+        else:
+            rows=con.execute("""SELECT id,generation_command,flow_status,flow_channel_key,COALESCE(flow_output_path,'') flow_output_path
+                                  FROM flow_segments
+                                 WHERE flow_status IN ('待生成','已准备')
+                                   AND TRIM(COALESCE(generation_command,''))<>''""").fetchall()
+        if not rows:
+            return {'segments':[], 'channels':[]}
         published=_published_generation_commands(con)
         owner_table=bool(con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_command_owners'").fetchone())
-        rows=con.execute("""SELECT id,generation_command,flow_status,flow_channel_key,COALESCE(flow_output_path,'') flow_output_path
-                              FROM flow_segments
-                             WHERE flow_status IN ('待生成','已准备')
-                               AND TRIM(COALESCE(generation_command,''))<>''""").fetchall()
         orphan_cmds=set()
         for row in rows:
             sid=int(row['id']); cmd=str(row['generation_command'] or '')
-            if allowed_segments is not None and sid not in allowed_segments:
-                continue
             if cmd in published or row['flow_output_path']:
                 continue
             if owner_table and con.execute("SELECT 1 FROM browser_command_owners WHERE command_id=? LIMIT 1",(cmd,)).fetchone():
@@ -1984,9 +2215,9 @@ def recover_unconfirmed_preclick_dispatches(*, work_date=None, grace_seconds=12)
     - a short grace period avoids racing an event still being committed.
     """
     now=float(_time.time())
+    grace=max(3.0,float(grace_seconds or 0))
     recovered=[];released=[];commands=set()
     with connect() as con:
-        published=_published_generation_commands(con)
         args=[]; date_sql=''
         if work_date is not None:
             date_sql=' AND r.work_date=?'; args.append(str(work_date))
@@ -1999,8 +2230,25 @@ def recover_unconfirmed_preclick_dispatches(*, work_date=None, grace_seconds=12)
                 JOIN recipients r ON r.id=h.recipient_id
                 WHERE d.status='submitted' AND fs.generation_command=d.command_id
                   AND fs.flow_status IN ('已准备','已提交')"""+date_sql,args).fetchall()
+        if not rows:
+            return {'segments':[],'channels':[],'commands':[]}
+        published=_published_generation_commands(con)
+        candidates=[]
+        for row in rows:
+            cmd=str(row['command_id'] or ''); sid=int(row['segment_id'])
+            if not cmd or cmd in published:
+                continue
+            last=float(row['last_update_at'] or 0)
+            if last and now-last < grace:
+                continue
+            candidates.append(row)
+        if not candidates:
+            return {'segments':[],'channels':[],'commands':[]}
+        cand_cmds=sorted({str(r['command_id']) for r in candidates})
+        like_clauses=' OR '.join(['payload LIKE ?']*len(cand_cmds))
+        like_args=[f'%{c}%' for c in cand_cmds]
         receipt_states={}; terminal_commands=set()
-        for rr in con.execute("SELECT payload FROM flow_receipts"):
+        for rr in con.execute(f"SELECT payload FROM flow_receipts WHERE {like_clauses}", like_args):
             try: event=_json.loads(rr['payload'] or '{}')
             except Exception: continue
             cmd=str(event.get('command_id') or '')
@@ -2011,12 +2259,9 @@ def recover_unconfirmed_preclick_dispatches(*, work_date=None, grace_seconds=12)
             receipt_states.setdefault((cmd,sid),set()).add((typ,state))
             if typ.startswith('video_download_') or (typ=='generation_task_status' and state in ('success','uncertain','failed')):
                 terminal_commands.add((cmd,sid))
-        for row in rows:
+        for row in candidates:
             cmd=str(row['command_id'] or ''); sid=int(row['segment_id'])
-            if not cmd or cmd in published or (cmd,sid) in terminal_commands:
-                continue
-            last=float(row['last_update_at'] or 0)
-            if last and now-last < max(3,float(grace_seconds or 0)):
+            if (cmd,sid) in terminal_commands:
                 continue
             events=receipt_states.get((cmd,sid),set())
             states={state for typ,state in events if typ=='generation_task_status'}
@@ -2199,6 +2444,17 @@ def release_submitted_channel_commands():
                 if int(cur.rowcount or 0):
                     released.append(key)
                 continue
+            if cmd not in published:
+                uploading=con.execute("""SELECT 1 FROM flow_channel_pool
+                    WHERE channel_key=? AND upload_command_id=? AND upload_state IN ('queued','uploading')
+                    LIMIT 1""",(key,cmd)).fetchone()
+                if not uploading:
+                    cur=con.execute("""UPDATE flow_channel_pool
+                        SET task_command_id='',last_status='空闲 · 等待新任务'
+                        WHERE channel_key=? AND task_command_id=?""",(key,cmd))
+                    if int(cur.rowcount or 0):
+                        released.append(key)
+                    continue
             pending=con.execute("""SELECT 1 FROM flow_dispatches d
                 JOIN flow_segments fs ON fs.id=d.segment_id
                 WHERE d.command_id=? AND fs.generation_command=?
@@ -2213,6 +2469,267 @@ def release_submitted_channel_commands():
             if int(cur.rowcount or 0):
                 released.append(key)
     return released
+
+
+def self_heal_stalled_scheduler_state(
+    *,
+    work_date=None,
+    now=None,
+    idle_heartbeat_channels=None,
+    uncertain_grace_seconds=120,
+    zombie_generating_seconds=1200,
+    max_auto_retries=2,
+):
+    """Self-heal three non-recovering scheduler deadlocks without duplicating active renders:
+    1) Channel idle-heartbeat reconciliation: unlock channels whose live tab continuously
+       reports `command_id=''` (or whose command is no longer published as executable).
+    2) Uncertain/unconfirmed pre-submit closure: close `planned/queued` (`已准备`) dispatches
+       whose wave already finished and produced no output within `uncertain_grace_seconds`.
+    3) Zombie `生成中/已提交` closure: reclaim segments stuck > `zombie_generating_seconds`
+       with no output file and no active recent download, capped at `max_auto_retries`.
+    """
+    now = float(now or _time.time())
+    idle_map = {str(k): float(v) for k, v in dict(idle_heartbeat_channels or {}).items() if k}
+    uncertain_grace = max(45.0, float(uncertain_grace_seconds or 120))
+    zombie_timeout = max(300.0, float(zombie_generating_seconds or 1200))
+    retry_cap = max(1, int(max_auto_retries or 2))
+
+    released_channels = []
+    retired_commands = []
+    uncertain_requeued = []
+    uncertain_failed = []
+    zombie_requeued = []
+    zombie_failed = []
+
+    with connect() as con:
+        published = set(_published_generation_commands(con))
+        has_pending_dl = bool(
+            con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='flow_pending_downloads'").fetchone()
+        )
+        has_redo = bool(
+            con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='flow_redo'").fetchone()
+        )
+
+        # --- Guardrail 1: Channel idle-heartbeat & non-executable slot reconciliation ---
+        ch_rows = con.execute(
+            "SELECT channel_key,task_command_id,upload_state,upload_command_id FROM flow_channel_pool WHERE enabled=1 AND task_command_id<>''"
+        ).fetchall()
+        for ch in ch_rows:
+            key = str(ch['channel_key'] or '')
+            cmd = str(ch['task_command_id'] or '')
+            if not key or not cmd:
+                continue
+            if str(ch['upload_command_id'] or '') == cmd and str(ch['upload_state'] or '') in ('queued', 'uploading'):
+                continue
+            if cmd not in published:
+                cur = con.execute(
+                    "UPDATE flow_channel_pool SET task_command_id='',last_status='空闲 · 已自动释放已完成波次' WHERE channel_key=? AND task_command_id=?",
+                    (key, cmd),
+                )
+                if int(cur.rowcount or 0):
+                    released_channels.append(key)
+                continue
+            if key in idle_map:
+                stat = con.execute(
+                    """SELECT MIN(CASE WHEN COALESCE(release_at,0)>0 THEN release_at ELSE COALESCE(last_update_at,0) END) started_at,
+                              MAX(COALESCE(last_update_at,0)) last_update_at
+                         FROM flow_dispatches WHERE command_id=?""",
+                    (cmd,),
+                ).fetchone()
+                started_at = float((stat['started_at'] if stat else 0) or 0)
+                last_upd = float((stat['last_update_at'] if stat else 0) or 0)
+                if (not started_at or (now - started_at) >= 30.0) and (not last_upd or (now - last_upd) >= 25.0):
+                    cur = con.execute(
+                        "UPDATE flow_channel_pool SET task_command_id='',last_status='空闲 · 心跳对账已释放通道' WHERE channel_key=? AND task_command_id=?",
+                        (key, cmd),
+                    )
+                    if int(cur.rowcount or 0):
+                        released_channels.append(key)
+                    retired_commands.append(cmd)
+                    published.discard(cmd)
+
+        date_sql = ''
+        date_args = []
+        if work_date is not None:
+            date_sql = ' AND r.work_date=?'
+            date_args.append(str(work_date))
+
+        def _drop_pending_dl(target_cmd, target_sid):
+            if not has_pending_dl:
+                return
+            for p_row in con.execute("SELECT event_id,payload FROM flow_pending_downloads").fetchall():
+                try:
+                    ev = _json.loads(p_row['payload'] or '{}')
+                except Exception:
+                    continue
+                if str(ev.get('command_id') or '') == target_cmd and int(ev.get('segment_id') or 0) == int(target_sid):
+                    con.execute("DELETE FROM flow_pending_downloads WHERE event_id=?", (p_row['event_id'],))
+
+        def _apply_segment_recovery(sid, cmd, qc_status, tag_reason, fail_label):
+            prior_auto = int(
+                con.execute(
+                    "SELECT COUNT(DISTINCT command_id) FROM flow_dispatches WHERE segment_id=? AND status='cancelled' AND error LIKE '自动恢复:%'",
+                    (int(sid),),
+                ).fetchone()[0]
+                or 0
+            )
+            con.execute(
+                """UPDATE flow_dispatches SET status='cancelled',stage='CANCELLED',error=?,last_update_at=?
+                   WHERE segment_id=? AND command_id=? AND status<>'detected'""",
+                (f"自动恢复: {tag_reason}", now, int(sid), str(cmd)),
+            )
+            _drop_pending_dl(str(cmd), int(sid))
+            if prior_auto >= retry_cap:
+                con.execute(
+                    """UPDATE flow_segments SET generation_command='',flow_status='失败',flow_channel_key='',
+                              flow_error=? WHERE id=? AND generation_command=?""",
+                    (f"连续 {retry_cap} 次生成超时，已停止自动重试（{fail_label}）", int(sid), str(cmd)),
+                )
+                return False
+            con.execute(
+                """UPDATE flow_segments SET generation_command='',flow_status='待生成',flow_channel_key='',
+                          flow_error='' WHERE id=? AND generation_command=?""",
+                (int(sid), str(cmd)),
+            )
+            if has_redo and str(qc_status or '') == '退回':
+                con.execute("INSERT OR IGNORE INTO flow_redo(segment_id) VALUES(?)", (int(sid),))
+            return True
+
+        # --- Guardrail 2: Uncertain / unconfirmed `planned`/`queued` dispatches past grace window ---
+        uncertain_rows = con.execute(
+            """SELECT d.id dispatch_id,d.segment_id,d.command_id,d.release_at,d.last_update_at,
+                      fs.qc_status,
+                      CAST(strftime('%s', NULLIF(TRIM(COALESCE(fs.flow_submitted_at,'')),'')) AS REAL) submitted_epoch,
+                      CAST(strftime('%s', NULLIF(TRIM(COALESCE(d.created_at,'')),'')) AS REAL) dispatch_epoch
+                 FROM flow_dispatches d
+                 JOIN flow_segments fs ON fs.id=d.segment_id AND fs.generation_command=d.command_id
+                 JOIN videos v ON v.id=fs.video_id
+                 JOIN hosts h ON h.id=v.host_id
+                 JOIN recipients r ON r.id=h.recipient_id
+                WHERE d.status IN ('planned','queued')
+                  AND fs.flow_status IN ('待生成','已准备')
+                  AND TRIM(COALESCE(fs.flow_output_path,''))=''
+                  AND NOT EXISTS (SELECT 1 FROM flow_outputs fo WHERE fo.segment_id=fs.id AND fo.command_id=d.command_id)"""
+            + date_sql,
+            date_args,
+        ).fetchall()
+        seen_uncertain = set()
+        for row in uncertain_rows:
+            sid = int(row['segment_id'])
+            cmd = str(row['command_id'] or '')
+            if not cmd or cmd in published or (sid, cmd) in seen_uncertain:
+                continue
+            # V-timeout: a row whose current command already reached a real submit attempt
+            # (flow_submitted_at written by a running/success receipt) is handled only by the
+            # fixed per-video timeout in Guardrail 3, never by this short grace window.
+            _sub = float(row['submitted_epoch'] or 0)
+            _dsp = float(row['dispatch_epoch'] or 0)
+            if _sub and (not _dsp or _sub + 1 >= _dsp):
+                continue
+            ref_ts = max(float(row['last_update_at'] or 0), float(row['release_at'] or 0))
+            if ref_ts > 0 and (now - ref_ts) < uncertain_grace:
+                continue
+            seen_uncertain.add((sid, cmd))
+            if _apply_segment_recovery(sid, cmd, row['qc_status'], '提交待确认超时未生成', '提交状态未确认，请手动检查'):
+                uncertain_requeued.append(sid)
+            else:
+                uncertain_failed.append(sid)
+
+        # --- Guardrail 3 (V-timeout): fixed per-video timeout, all dates ---
+        # 每个视频从插件真实点击生成（flow_submitted_at）开始固定计时；之后的任何回执都不会重置计时，
+        # 也不再因为命令仍在 Bridge 发布列表 / 仍占着通道而跳过。
+        # 超时且本地没有扫描到视频：第一次自动重新提交；再次超时就标记「失败」进入异常，不再自动重做。
+        # 最终失败保留 generation_command，迟到的视频仍可被下载回执或文件夹扫描收下并转为「已完成」。
+        timeout_minutes = max(1, int(round(zombie_timeout / 60.0)))
+        timeout_rows = con.execute(
+            """SELECT fs.id segment_id,fs.generation_command command_id,fs.qc_status,
+                      CAST(strftime('%s', NULLIF(TRIM(COALESCE(fs.flow_submitted_at,'')),'')) AS REAL) submitted_epoch,
+                      (SELECT MAX(CAST(strftime('%s', NULLIF(TRIM(COALESCE(d.created_at,'')),'')) AS REAL)) FROM flow_dispatches d
+                         WHERE d.segment_id=fs.id AND d.command_id=fs.generation_command) dispatch_epoch,
+                      (SELECT MAX(CASE WHEN d.status='downloading' THEN COALESCE(d.last_update_at,0) ELSE 0 END) FROM flow_dispatches d
+                         WHERE d.segment_id=fs.id AND d.command_id=fs.generation_command) downloading_ts
+                 FROM flow_segments fs
+                WHERE TRIM(COALESCE(fs.generation_command,''))<>''
+                  AND fs.flow_status IN ('已准备','已提交','生成中')
+                  AND TRIM(COALESCE(fs.flow_output_path,''))=''
+                  AND NOT EXISTS (SELECT 1 FROM flow_outputs fo WHERE fo.segment_id=fs.id AND fo.command_id=fs.generation_command)"""
+        ).fetchall()
+        for row in timeout_rows:
+            sid = int(row['segment_id'])
+            cmd = str(row['command_id'] or '')
+            submitted = float(row['submitted_epoch'] or 0)
+            dispatched = float(row['dispatch_epoch'] or 0)
+            if not cmd or not submitted:
+                continue   # 还没真正点击生成（仍在插件队列里），不计时
+            if dispatched and submitted + 1 < dispatched:
+                continue   # flow_submitted_at 是上一次尝试留下的，当前命令还没点击生成
+            if (now - submitted) < zombie_timeout:
+                continue
+            dl_ts = float(row['downloading_ts'] or 0)
+            if dl_ts > 0 and (now - dl_ts) < 120.0:
+                continue   # 正在下载中，给下载收尾留一点时间
+            prior_timeouts = int(
+                con.execute(
+                    "SELECT COUNT(DISTINCT command_id) FROM flow_dispatches WHERE segment_id=? AND status='cancelled' AND error LIKE '自动恢复: 生成超时%'",
+                    (sid,),
+                ).fetchone()[0]
+                or 0
+            )
+            if prior_timeouts >= retry_cap:
+                msg = (f"连续 {prior_timeouts + 1} 次生成超时，已停止自动重试"
+                       f"（每次等待 {timeout_minutes} 分钟仍未下载到视频；视频若稍后下载完成会自动转为已完成）")
+                con.execute(
+                    """UPDATE flow_dispatches SET error=?,last_update_at=?
+                       WHERE segment_id=? AND command_id=? AND status NOT IN ('detected','cancelled')""",
+                    (f"生成超时：{timeout_minutes} 分钟未下载到视频", now, sid, cmd),
+                )
+                cur = con.execute(
+                    """UPDATE flow_segments SET flow_status='失败',flow_error=?
+                       WHERE id=? AND generation_command=? AND flow_status IN ('已准备','已提交','生成中')""",
+                    (msg, sid, cmd),
+                )
+                if int(cur.rowcount or 0):
+                    zombie_failed.append(sid)
+                continue
+            con.execute(
+                """UPDATE flow_dispatches SET status='cancelled',stage='CANCELLED',error=?,last_update_at=?
+                   WHERE segment_id=? AND command_id=? AND status<>'detected'""",
+                (f"自动恢复: 生成超时 {timeout_minutes} 分钟未下载到视频，自动重新提交", now, sid, cmd),
+            )
+            _drop_pending_dl(cmd, sid)
+            cur = con.execute(
+                """UPDATE flow_segments SET generation_command='',flow_status='待生成',flow_channel_key='',
+                          flow_error='' WHERE id=? AND generation_command=?""",
+                (sid, cmd),
+            )
+            if int(cur.rowcount or 0):
+                if has_redo and str(row['qc_status'] or '') == '退回':
+                    con.execute("INSERT OR IGNORE INTO flow_redo(segment_id) VALUES(?)", (sid,))
+                zombie_requeued.append(sid)
+
+        if retired_commands:
+            setting = con.execute("SELECT value FROM app_settings WHERE key='flow_host_jobs_v124'").fetchone()
+            if setting:
+                try:
+                    jobs = _json.loads(setting['value'] or '[]')
+                    if isinstance(jobs, list):
+                        retired_set = set(retired_commands)
+                        jobs = [j for j in jobs if str((j or {}).get('command_id') or '') not in retired_set]
+                        con.execute(
+                            "UPDATE app_settings SET value=? WHERE key='flow_host_jobs_v124'",
+                            (_json.dumps(jobs, ensure_ascii=False),),
+                        )
+                except Exception:
+                    pass
+
+    return {
+        'released_channels': sorted(set(released_channels)),
+        'retired_commands': sorted(set(retired_commands)),
+        'uncertain_requeued': sorted(set(uncertain_requeued)),
+        'uncertain_failed': sorted(set(uncertain_failed)),
+        'zombie_requeued': sorted(set(zombie_requeued)),
+        'zombie_failed': sorted(set(zombie_failed)),
+    }
 
 
 def channel_pool_load(channel_key):
@@ -2324,7 +2841,7 @@ def _browser_pool_default_config():
         a_count=7
     groups=[{
         'id':'A','enabled':True,'normal_count':a_count,
-        'fast_enabled':get_setting('flow_pool_fast_enabled','1')!='0',
+        'fast_enabled':get_setting('flow_pool_fast_enabled','0')=='1',
         'profile':get_setting('flow_browser_a_profile',get_setting('chrome_profile_directory','Default')) or 'Default',
     }]
     if get_setting('flow_browser_b_enabled','0')=='1' or int(get_setting('flow_pool_b_normal_count','0') or 0)>0:
@@ -2459,7 +2976,7 @@ def ensure_channel_pool(normal_count=None, include_fast=None, *, browser_b_enabl
     groups=list_browser_groups(True)
     a=next((g for g in groups if g['id']=='A'),None)
     if not a:
-        a={'id':'A','enabled':True,'normal_count':7,'fast_enabled':True,'profile':'Default'}; groups.append(a)
+        a={'id':'A','enabled':True,'normal_count':7,'fast_enabled':False,'profile':'Default'}; groups.append(a)
     if normal_count is not None:
         try: a['normal_count']=max(1,int(normal_count))
         except Exception: pass
@@ -2917,7 +3434,15 @@ def qc_bundle(segment_id):
 def list_qc_segments(recipient_id=None, host_id=None, status_filter="全部", *, work_date=None):
     history=status_filter=='退回'
     output_join='fo.segment_id=fs.id' + ('' if history else ' AND fo.command_id=fs.generation_command')
-    where=["TRIM(fo.output_path)<>''"] if history else ["fs.flow_status='已完成'","TRIM(fo.output_path)<>''"]
+    dedup_clause=(
+        "NOT EXISTS (SELECT 1 FROM flow_outputs fo2 "
+        "WHERE fo2.segment_id=fo.segment_id AND fo2.command_id=fo.command_id AND fo2.output_path=fo.output_path "
+        "AND (((CASE WHEN fo2.media_id LIKE 'local:%' OR fo2.media_id LIKE 'plugin:%' THEN 1 ELSE 0 END) "
+        "< (CASE WHEN fo.media_id LIKE 'local:%' OR fo.media_id LIKE 'plugin:%' THEN 1 ELSE 0 END)) "
+        "OR ((CASE WHEN fo2.media_id LIKE 'local:%' OR fo2.media_id LIKE 'plugin:%' THEN 1 ELSE 0 END) "
+        "= (CASE WHEN fo.media_id LIKE 'local:%' OR fo.media_id LIKE 'plugin:%' THEN 1 ELSE 0 END) AND fo2.id < fo.id)))"
+    )
+    where=(["TRIM(fo.output_path)<>''", dedup_clause] if history else ["fs.flow_status='已完成'","TRIM(fo.output_path)<>''", dedup_clause])
     args=[]
     if recipient_id:where.append('r.id=?');args.append(recipient_id)
     if host_id:where.append('h.id=?');args.append(host_id)
@@ -2929,7 +3454,7 @@ def list_qc_segments(recipient_id=None, host_id=None, status_filter="全部", *,
     clause=' WHERE '+' AND '.join(where)
     with read_connection(work_date) as con:
         return con.execute(f"""SELECT fs.id segment_id,fo.id output_id,r.id recipient_id,r.name recipient_name,h.id host_id,h.name host_name,
-            v.id video_id,v.seq video_seq,v.image_path,v.chinese_script,v.script full_foreign_text,fs.seg_seq,fs.foreign_text,fs.prompt,COALESCE(fs.generation_mode,'FRAME') generation_mode,fs.flow_status,fs.flow_error,
+            v.id video_id,v.seq video_seq,v.image_path,v.chinese_script,v.script full_foreign_text,fs.seg_seq,fs.foreign_text,fs.prompt,COALESCE(fs.generation_mode,'FRAME') generation_mode,COALESCE(fs.video_model,'') video_model,fs.flow_status,fs.flow_error,
             fo.output_path flow_output_path,COALESCE(fs.flow_output_url,'') flow_output_url,COALESCE(fo.qc_status,'待质检') qc_status,COALESCE(fs.qc_note,'') qc_note,
             COALESCE(lq.status,'pending') local_qc_status,COALESCE(aq.light,'') ai_qc_light,COALESCE(aq.summary,'') ai_qc_summary,
             COALESCE(sa.analysis_json,'') speech_analysis_json,COALESCE(lq.result_json,'') local_qc_json,COALESCE(aq.result_json,'') ai_qc_json
@@ -2943,7 +3468,7 @@ def list_qc_segments(recipient_id=None, host_id=None, status_filter="全部", *,
 def get_qc_output(output_id):
     with connect() as con:
         return con.execute("""SELECT fs.id segment_id,fo.id output_id,r.id recipient_id,r.name recipient_name,h.id host_id,h.name host_name,
-            v.id video_id,v.seq video_seq,v.image_path,v.chinese_script,v.script full_foreign_text,fs.seg_seq,fs.foreign_text,fs.prompt,COALESCE(fs.generation_mode,'FRAME') generation_mode,fs.flow_status,fs.flow_error,
+            v.id video_id,v.seq video_seq,v.image_path,v.chinese_script,v.script full_foreign_text,fs.seg_seq,fs.foreign_text,fs.prompt,COALESCE(fs.generation_mode,'FRAME') generation_mode,COALESCE(fs.video_model,'') video_model,fs.flow_status,fs.flow_error,
             fo.output_path flow_output_path,COALESCE(fs.flow_output_url,'') flow_output_url,COALESCE(fo.qc_status,'待质检') qc_status,COALESCE(fs.qc_note,'') qc_note,
             COALESCE(lq.status,'pending') local_qc_status,COALESCE(aq.light,'') ai_qc_light,COALESCE(aq.summary,'') ai_qc_summary,
             COALESCE(sa.analysis_json,'') speech_analysis_json,COALESCE(lq.result_json,'') local_qc_json,COALESCE(aq.result_json,'') ai_qc_json
@@ -3116,13 +3641,20 @@ def is_obsolete_flow_command(command_id):
 
 
 def _safe_remove_exact_files(paths, protected_paths=()):
-    """Delete only exact recorded production files that are not referenced elsewhere."""
+    """Move only exact recorded production files that are not referenced elsewhere to Trash (or recovery dir), never permanently unlinking them."""
+    import shutil as _shutil
+    from .database import DB_PATH
+    try:
+        from PySide6.QtCore import QFile as _QFile
+    except Exception:
+        _QFile = None
     protected=set()
     for value in protected_paths:
         try: protected.add(str(Path(str(value)).expanduser().resolve()))
         except Exception: protected.add(str(value))
     deleted=[]; failed=[]
     video_ext={'.mp4','.mov','.m4v','.webm','.mkv','.avi'}
+    recovery_dir=None
     for value in dict.fromkeys(str(x or '').strip() for x in paths if str(x or '').strip()):
         try:
             path=Path(value).expanduser()
@@ -3130,7 +3662,22 @@ def _safe_remove_exact_files(paths, protected_paths=()):
             if resolved in protected or path.suffix.lower() not in video_ext:
                 continue
             if path.is_file():
-                path.unlink(); deleted.append(str(path))
+                trashed=False
+                if _QFile is not None:
+                    try:
+                        res=_QFile.moveToTrash(str(path))
+                        trashed=bool(res[0]) if isinstance(res,tuple) else bool(res)
+                    except Exception:
+                        trashed=False
+                if not trashed and path.is_file():
+                    if recovery_dir is None:
+                        recovery_dir=DB_PATH.parent/'deleted_host_recovery'/f'overwrite_{int(_time.time())}_{_uuid.uuid4().hex[:8]}'
+                        recovery_dir.mkdir(parents=True,exist_ok=True)
+                    dest=recovery_dir/path.name
+                    if dest.exists():
+                        dest=recovery_dir/f'{path.stem}_{_uuid.uuid4().hex[:6]}{path.suffix}'
+                    _shutil.move(str(path),str(dest))
+                deleted.append(str(path))
         except Exception as exc:
             failed.append({'path':value,'error':str(exc)})
     return deleted,failed
@@ -3216,6 +3763,8 @@ def replace_host_prompt_submission(host_id, *, work_date=None):
                       'speech_analysis','local_qc_results','ai_qc_results','qc_decisions'):
             con.execute(f"DELETE FROM {table} WHERE segment_id IN ({qs})",sids)
         con.execute(f"DELETE FROM editing_history WHERE video_id IN ({qv})",vids)
+        if con.execute("SELECT 1 FROM sqlite_master WHERE name='davinci_video_state'").fetchone():
+            con.execute(f"DELETE FROM davinci_video_state WHERE video_id IN ({qv})",vids)
 
         con.execute(f"""UPDATE videos SET edit_status='等待片段',edit_output_path='',
             upload_status='未上传',upload_target='',upload_url='',upload_confirm_mode='',upload_confirmed_at='',drive_file_url=''
@@ -3265,13 +3814,14 @@ def submit_prompt_segments_to_flow(segment_ids):
     submitted=skipped=0
     with connect() as con:
         for sid in ids:
-            row=con.execute("SELECT prompt,prompt_review_status,flow_status FROM flow_segments WHERE id=?",(sid,)).fetchone()
+            row=con.execute("SELECT video_id,prompt,prompt_review_status,flow_status FROM flow_segments WHERE id=?",(sid,)).fetchone()
             if not row or not str(row['prompt'] or '').strip():
                 skipped+=1; continue
             if str(row['prompt_review_status'] or '')=='已提交':
                 skipped+=1; continue
             con.execute("INSERT INTO prompt_submission_history(segment_id,prompt_snapshot) VALUES(?,?)",(sid,str(row['prompt'] or '')))
-            con.execute("UPDATE flow_segments SET prompt_review_status='已提交',prompt_submitted_at=CURRENT_TIMESTAMP,flow_status=CASE WHEN flow_status IN ('','失败') THEN '待生成' ELSE flow_status END WHERE id=?",(sid,))
+            con.execute("UPDATE flow_segments SET prompt_review_status='已提交',prompt_submitted_at=CURRENT_TIMESTAMP,flow_status=CASE WHEN flow_status IN ('','失败','已放弃') THEN '待生成' ELSE flow_status END WHERE id=?",(sid,))
+            con.execute("UPDATE videos SET edit_status='等待片段' WHERE id=? AND COALESCE(edit_status,'')='已放弃'",(int(row['video_id']),))
             submitted+=1
     return {'submitted':submitted,'skipped':skipped}
 
@@ -3314,9 +3864,11 @@ def set_segment_qc_decision(segment_id, decision, reason=''):
         video_id=int(row['video_id'])
         counts=con.execute("SELECT COUNT(*) total,SUM(CASE WHEN qc_status='通过' THEN 1 ELSE 0 END) passed FROM flow_segments WHERE video_id=?",(video_id,)).fetchone()
         if counts and int(counts['total'] or 0)>0 and int(counts['passed'] or 0)==int(counts['total'] or 0):
-            con.execute("UPDATE videos SET edit_status='等待剪辑' WHERE id=?",(video_id,))
+            con.execute("UPDATE videos SET edit_status='等待剪辑' WHERE id=? AND COALESCE(edit_status,'')<>'已放弃'",(video_id,))
         else:
-            con.execute("UPDATE videos SET edit_status='等待片段' WHERE id=?",(video_id,))
+            con.execute("UPDATE videos SET edit_status='等待片段' WHERE id=? AND COALESCE(edit_status,'')<>'已放弃'",(video_id,))
+            if con.execute("SELECT 1 FROM sqlite_master WHERE name='davinci_video_state'").fetchone():
+                con.execute("DELETE FROM davinci_video_state WHERE video_id=?",(video_id,))
     return True
 
 def update_qc_segment_prompt(segment_id, prompt):
@@ -3572,7 +4124,61 @@ def normalize_generation_mode(value):
     return 'MATERIAL' if raw in ('MATERIAL','VIDEO_REFERENCES','素材') else 'FRAME'
 
 
-def set_segment_generation_mode(segment_id, mode, *, allow_active_rework=False, force_silent=False, reason='切换生成模式'):
+def normalize_segment_video_model(value):
+    raw=str(value or '').strip()
+    if raw.lower() in ('flow_omni','omni','omini','abra','gemini_omni'):
+        return 'flow_omni'
+    return raw
+
+
+def _set_segment_generation_mode_in_con(con, sid, mode, *, allow_active_rework=False, force_silent=False, reason='切换生成模式', clear_video_model=False):
+    row=con.execute("SELECT * FROM flow_segments WHERE id=?",(sid,)).fetchone()
+    if not row: raise ValueError('任务片段不存在')
+    old=normalize_generation_mode(row['generation_mode'] if 'generation_mode' in row.keys() else 'FRAME')
+    old_vmodel=normalize_segment_video_model(row['video_model'] if 'video_model' in row.keys() else '')
+    if old==mode and (not clear_video_model or not old_vmodel):
+        return {'changed':False,'rework':False,'mode':mode}
+    active=bool(str(row['generation_command'] or '').strip()) or str(row['flow_status'] or '') in ('已提交','生成中','下载中','已完成')
+    if active and not (allow_active_rework or force_silent):
+        raise ValueError('当前片段已进入 Flow 执行；请从质检/返工入口切换模式，或勾选后点击【重新提交】。')
+    if active and not force_silent:
+        cmd=str(row['generation_command'] or '')
+        out=str(row['flow_output_path'] or '')
+        if cmd:
+            con.execute("UPDATE flow_outputs SET qc_status='旧版本失效' WHERE segment_id=? AND command_id=?",(sid,cmd))
+        elif out:
+            con.execute("UPDATE flow_outputs SET qc_status='旧版本失效' WHERE segment_id=? AND output_path=?",(sid,out))
+        if clear_video_model:
+            con.execute("""UPDATE flow_segments SET generation_mode=?,video_model='',generation_command='',flow_status='待生成',
+                flow_output_path='',flow_output_url='',flow_error='',flow_channel_key='R1',
+                flow_retry_count=COALESCE(flow_retry_count,0)+1,flow_submitted_at='',flow_completed_at='',
+                qc_status='退回',qc_note=?,qc_reject_reason=?,qc_decided_at=CURRENT_TIMESTAMP WHERE id=?""",
+                (mode,reason,reason,sid))
+        else:
+            con.execute("""UPDATE flow_segments SET generation_mode=?,generation_command='',flow_status='待生成',
+                flow_output_path='',flow_output_url='',flow_error='',flow_channel_key='R1',
+                flow_retry_count=COALESCE(flow_retry_count,0)+1,flow_submitted_at='',flow_completed_at='',
+                qc_status='退回',qc_note=?,qc_reject_reason=?,qc_decided_at=CURRENT_TIMESTAMP WHERE id=?""",
+                (mode,reason,reason,sid))
+        con.execute("INSERT OR REPLACE INTO flow_redo(segment_id,created_at) VALUES(?,CURRENT_TIMESTAMP)",(sid,))
+        con.execute("DELETE FROM flow_recovery WHERE segment_id=?",(sid,))
+        meta=con.execute("""SELECT r.name recipient_name,h.name host_name,v.performance_mode,fs.prompt
+            FROM flow_segments fs JOIN videos v ON v.id=fs.video_id JOIN hosts h ON h.id=v.host_id
+            JOIN recipients r ON r.id=h.recipient_id WHERE fs.id=?""",(sid,)).fetchone()
+        if meta:
+            con.execute("""INSERT INTO qc_decisions(segment_id,decision,reason,recipient_name,host_name,performance_mode,prompt_snapshot)
+                VALUES(?,?,?,?,?,?,?)""",(sid,'退回',reason,meta['recipient_name'] or '',meta['host_name'] or '',meta['performance_mode'] or 'TALKING',meta['prompt'] or ''))
+        from app.services.workflow import reconcile_video_qc
+        reconcile_video_qc(int(row['video_id']), con)
+        return {'changed':True,'rework':True,'mode':mode}
+    if clear_video_model:
+        con.execute("UPDATE flow_segments SET generation_mode=?,video_model='' WHERE id=?",(mode,sid))
+    else:
+        con.execute("UPDATE flow_segments SET generation_mode=? WHERE id=?",(mode,sid))
+    return {'changed':True,'rework':False,'mode':mode}
+
+
+def set_segment_generation_mode(segment_id, mode, *, allow_active_rework=False, force_silent=False, reason='切换生成模式', clear_video_model=False):
     """Write the single authoritative segment mode.
 
     Pre-execution changes only update the shared field. If the current revision has already
@@ -3581,25 +4187,66 @@ def set_segment_generation_mode(segment_id, mode, *, allow_active_rework=False, 
     """
     sid=int(segment_id); mode=normalize_generation_mode(mode)
     with connect() as con:
+        return _set_segment_generation_mode_in_con(
+            con, sid, mode, allow_active_rework=allow_active_rework, force_silent=force_silent, reason=reason, clear_video_model=clear_video_model
+        )
+
+
+def set_generation_mode_for_segments(segment_ids, mode, force_silent=False, clear_video_model=False):
+    mode=normalize_generation_mode(mode); changed=blocked=0; changed_ids=[]
+    ids=[int(x) for x in segment_ids]
+    if not ids:
+        return {'changed':0,'blocked':0,'mode':mode,'changed_ids':[]}
+    with connect() as con:
+        for sid in ids:
+            try:
+                result=_set_segment_generation_mode_in_con(
+                    con, sid, mode, allow_active_rework=False, force_silent=force_silent, clear_video_model=clear_video_model
+                )
+                if result.get('changed'):
+                    changed += 1
+                    changed_ids.append(sid)
+            except ValueError:
+                blocked += 1
+    return {'changed':changed,'blocked':blocked,'mode':mode,'changed_ids':changed_ids}
+
+
+def set_segment_video_model(segment_id, video_model='flow_omni', *, duration_seconds=8, allow_active_rework=False, force_silent=False, reason='切换模型'):
+    sid=int(segment_id)
+    vmodel=normalize_segment_video_model(video_model)
+    dur=int(duration_seconds or 8) if int(duration_seconds or 8) in (4,6,8) else 8
+    with connect() as con:
         row=con.execute("SELECT * FROM flow_segments WHERE id=?",(sid,)).fetchone()
         if not row: raise ValueError('任务片段不存在')
-        old=normalize_generation_mode(row['generation_mode'] if 'generation_mode' in row.keys() else 'FRAME')
-        if old==mode: return {'changed':False,'rework':False,'mode':mode}
+        old_vmodel=normalize_segment_video_model(row['video_model'] if 'video_model' in row.keys() else '')
+        if old_vmodel==vmodel:
+            return {'changed':False,'rework':False,'video_model':vmodel}
         active=bool(str(row['generation_command'] or '').strip()) or str(row['flow_status'] or '') in ('已提交','生成中','下载中','已完成')
         if active and not (allow_active_rework or force_silent):
-            raise ValueError('当前片段已进入 Flow 执行；请从质检/返工入口切换模式，或勾选后点击【重新提交】。')
-        if active and not force_silent:
+            raise ValueError('当前片段已进入 Flow 执行；请从质检/返工入口切换模型，或勾选后点击【重新提交】。')
+        text=str(row['foreign_text'] or '')
+        if vmodel == 'flow_omni':
+            con.execute(
+                """INSERT INTO flow_duration_choices(segment_id,dialogue,force_submit,duration,locked)
+                   VALUES(?,?,1,?,1)
+                   ON CONFLICT(segment_id) DO UPDATE SET dialogue=excluded.dialogue,force_submit=1,duration=excluded.duration,locked=1""",
+                (sid, text, dur),
+            )
+            con.execute("UPDATE flow_segments SET video_model=?, flow_duration_seconds=? WHERE id=?", (vmodel, dur, sid))
+        else:
+            con.execute("UPDATE flow_segments SET video_model=? WHERE id=?", (vmodel, sid))
+        if active and allow_active_rework and not force_silent:
             cmd=str(row['generation_command'] or '')
             out=str(row['flow_output_path'] or '')
             if cmd:
                 con.execute("UPDATE flow_outputs SET qc_status='旧版本失效' WHERE segment_id=? AND command_id=?",(sid,cmd))
             elif out:
                 con.execute("UPDATE flow_outputs SET qc_status='旧版本失效' WHERE segment_id=? AND output_path=?",(sid,out))
-            con.execute("""UPDATE flow_segments SET generation_mode=?,generation_command='',flow_status='待生成',
+            con.execute("""UPDATE flow_segments SET video_model=?,generation_command='',flow_status='待生成',
                 flow_output_path='',flow_output_url='',flow_error='',flow_channel_key='R1',
                 flow_retry_count=COALESCE(flow_retry_count,0)+1,flow_submitted_at='',flow_completed_at='',
                 qc_status='退回',qc_note=?,qc_reject_reason=?,qc_decided_at=CURRENT_TIMESTAMP WHERE id=?""",
-                (mode,reason,reason,sid))
+                (vmodel,reason,reason,sid))
             con.execute("INSERT OR REPLACE INTO flow_redo(segment_id,created_at) VALUES(?,CURRENT_TIMESTAMP)",(sid,))
             con.execute("DELETE FROM flow_recovery WHERE segment_id=?",(sid,))
             meta=con.execute("""SELECT r.name recipient_name,h.name host_name,v.performance_mode,fs.prompt
@@ -3608,25 +4255,50 @@ def set_segment_generation_mode(segment_id, mode, *, allow_active_rework=False, 
             if meta:
                 con.execute("""INSERT INTO qc_decisions(segment_id,decision,reason,recipient_name,host_name,performance_mode,prompt_snapshot)
                     VALUES(?,?,?,?,?,?,?)""",(sid,'退回',reason,meta['recipient_name'] or '',meta['host_name'] or '',meta['performance_mode'] or 'TALKING',meta['prompt'] or ''))
-            return {'changed':True,'rework':True,'mode':mode}
-        con.execute("UPDATE flow_segments SET generation_mode=? WHERE id=?",(mode,sid))
-        return {'changed':True,'rework':False,'mode':mode}
+            from app.services.workflow import reconcile_video_qc
+            reconcile_video_qc(int(row['video_id']), con)
+            return {'changed':True,'rework':True,'video_model':vmodel}
+        return {'changed':True,'rework':False,'video_model':vmodel}
 
 
-def set_generation_mode_for_segments(segment_ids, mode, force_silent=False):
-    mode=normalize_generation_mode(mode); changed=blocked=0
-    for sid in [int(x) for x in segment_ids]:
-        try:
-            result=set_segment_generation_mode(sid,mode,allow_active_rework=False,force_silent=force_silent)
-            changed += 1 if result.get('changed') else 0
-        except ValueError:
-            blocked += 1
-    return {'changed':changed,'blocked':blocked,'mode':mode}
+def set_video_model_for_segments(segment_ids, video_model='flow_omni', duration_seconds=8, force_silent=True):
+    vmodel=normalize_segment_video_model(video_model)
+    dur=int(duration_seconds or 8) if int(duration_seconds or 8) in (4,6,8) else 8
+    ids=[int(x) for x in segment_ids]
+    if not ids:
+        return {'changed':0,'blocked':0,'video_model':vmodel,'duration':dur,'changed_ids':[]}
+    changed=blocked=0
+    changed_ids=[]
+    with connect() as con:
+        for sid in ids:
+            row=con.execute("SELECT * FROM flow_segments WHERE id=?",(sid,)).fetchone()
+            if not row:
+                blocked += 1
+                continue
+            active=bool(str(row['generation_command'] or '').strip()) or str(row['flow_status'] or '') in ('已提交','生成中','下载中','已完成')
+            if active and not force_silent:
+                blocked += 1
+                continue
+            text=str(row['foreign_text'] or '')
+            con.execute(
+                "UPDATE flow_segments SET video_model=?, flow_duration_seconds=? WHERE id=?",
+                (vmodel, dur, sid),
+            )
+            if vmodel == 'flow_omni':
+                con.execute(
+                    """INSERT INTO flow_duration_choices(segment_id,dialogue,force_submit,duration,locked)
+                       VALUES(?,?,1,?,1)
+                       ON CONFLICT(segment_id) DO UPDATE SET dialogue=excluded.dialogue,force_submit=1,duration=excluded.duration,locked=1""",
+                    (sid, text, dur),
+                )
+            changed += 1
+            changed_ids.append(sid)
+    return {'changed':changed,'blocked':blocked,'video_model':vmodel,'duration':dur,'changed_ids':changed_ids}
 
 
 def set_first_segment_mode_for_videos(video_ids, mode='MATERIAL', force_silent=False):
     vids=sorted({int(x) for x in video_ids}); ids=[]
-    if not vids: return {'changed':0,'blocked':0,'mode':normalize_generation_mode(mode)}
+    if not vids: return {'changed':0,'blocked':0,'mode':normalize_generation_mode(mode),'changed_ids':[]}
     q=','.join('?' for _ in vids)
     with connect() as con:
         rows=con.execute(f"""SELECT fs.id FROM flow_segments fs
@@ -3637,8 +4309,68 @@ def set_first_segment_mode_for_videos(video_ids, mode='MATERIAL', force_silent=F
     return set_generation_mode_for_segments(ids,mode,force_silent=force_silent)
 
 
-def _assert_prompt_copy_editable(con, video_id):
+def sync_dialogue_into_prompt(prompt_text, old_dialogue='', new_dialogue=''):
+    import re as _re
+    prompt_str = str(prompt_text or '').strip()
+    new_clean = ' '.join(str(new_dialogue or '').split())
+    old_clean = ' '.join(str(old_dialogue or '').split())
+    if not prompt_str or not new_clean:
+        return prompt_str
+    if _re.search(r'(?m)^(文案\s*[:：]\s*).*$', prompt_str):
+        return _re.sub(
+            r'(?m)^(文案\s*[:：]\s*).*$',
+            lambda m: f"{m.group(1)}{new_clean}",
+            prompt_str,
+            count=1,
+        )
+    if _re.search(r'(文案\s*[:：]\s*)([^\n\r]*)', prompt_str):
+        return _re.sub(
+            r'(文案\s*[:：]\s*)([^\n\r]*)',
+            lambda m: f"{m.group(1)}{new_clean}",
+            prompt_str,
+            count=1,
+        )
+    if old_clean and old_clean in prompt_str:
+        return prompt_str.replace(old_clean, new_clean, 1)
+    return prompt_str
+
+
+def _cleanup_deleted_segment_downstream(con, sid):
+    sid = int(sid)
+    row = con.execute("SELECT generation_command, flow_output_path FROM flow_segments WHERE id=?", (sid,)).fetchone()
+    commands = set()
+    paths = []
+    if row:
+        if str(row["generation_command"] or "").strip():
+            commands.add(str(row["generation_command"]).strip())
+        if str(row["flow_output_path"] or "").strip():
+            paths.append(str(row["flow_output_path"]).strip())
+    for old in con.execute("SELECT command_id, output_path FROM flow_outputs WHERE segment_id=?", (sid,)):
+        if str(old[0] or "").strip():
+            commands.add(str(old[0]).strip())
+        if str(old[1] or "").strip():
+            paths.append(str(old[1]).strip())
+    for old in con.execute("SELECT command_id, download_path FROM flow_dispatches WHERE segment_id=?", (sid,)):
+        if str(old[0] or "").strip():
+            commands.add(str(old[0]).strip())
+        if str(old[1] or "").strip():
+            paths.append(str(old[1]).strip())
+    for cmd in commands:
+        con.execute("INSERT OR IGNORE INTO flow_obsolete_segments(segment_id,command_id) VALUES(?,?)", (sid, cmd))
+    for table in (
+        "flow_dispatches", "flow_outputs", "flow_redo", "flow_failure_attempts",
+        "flow_recovery", "speech_analysis", "local_qc_results", "ai_qc_results",
+        "qc_decisions", "flow_duration_choices", "prompt_submission_history",
+    ):
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+            con.execute(f"DELETE FROM {table} WHERE segment_id=?", (sid,))
+    return paths
+
+
+def _assert_prompt_copy_editable(con, video_id, *, allow_submitted=True):
     rows=con.execute("SELECT * FROM flow_segments WHERE video_id=? ORDER BY seg_seq,id",(int(video_id),)).fetchall()
+    if allow_submitted:
+        return rows
     for row in rows:
         active=bool(str(row['generation_command'] or '').strip()) or str(row['prompt_review_status'] or '')=='已提交' or str(row['flow_status'] or '') not in ('','待生成','失败','已准备')
         if active:
@@ -3649,7 +4381,7 @@ def _assert_prompt_copy_editable(con, video_id):
     return rows
 
 
-def _save_manual_segment_type(con, sid, text, mode=None):
+def _save_manual_segment_type(con, sid, text, mode=None, source=None):
     import json
     from app.services.performance_types import choices
     from app.core import work_dates
@@ -3658,7 +4390,8 @@ def _save_manual_segment_type(con, sid, text, mode=None):
     previous=saved.get(str(sid),{})
     mode=mode or previous.get('mode') or row['performance_mode']
     if mode not in ('TALKING','PRAYING'):raise ValueError('请选择睁眼或闭眼')
-    saved[str(sid)]={'text':text,'mode':mode,'source':'manual'}
+    src=source or previous.get('source') or 'manual'
+    saved[str(sid)]={'text':text,'mode':mode,'source':src}
     valid={str(r[0]) for r in con.execute('SELECT id FROM flow_segments WHERE video_id=?',(row['video_id'],))}
     data={'work_date':work_dates.video_work_date(con,row['video_id']),'segments':{k:v for k,v in saved.items() if k in valid}}
     con.execute('INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
@@ -3671,41 +4404,622 @@ def set_prompt_segment_type(segment_id, mode):
         row=con.execute('SELECT video_id,foreign_text FROM flow_segments WHERE id=?',(int(segment_id),)).fetchone()
         if not row:raise ValueError('任务片段不存在')
         _assert_prompt_copy_editable(con,row['video_id'])
-        _reset_prompt_after_copy_change(con,int(segment_id),row['foreign_text'])
-        _save_manual_segment_type(con,int(segment_id),row['foreign_text'],mode)
+        _reset_prompt_after_copy_change(con,int(segment_id),row['foreign_text'],preserve_and_sync_prompt=False)
+        _save_manual_segment_type(con,int(segment_id),row['foreign_text'],mode,source='manual')
 
 
-def _reset_prompt_after_copy_change(con, sid, text):
+def _reset_prompt_after_copy_change(con, sid, text, mode=None, source=None, manual_lock_val=1, preserve_and_sync_prompt=True):
     from app.services.speech_preparation import timing_metadata
     meta=timing_metadata(text)
-    con.execute("""UPDATE flow_segments SET foreign_text=?,prompt='',ai_original_prompt='',status='待处理',model='',
-        input_tokens=0,cached_tokens=0,output_tokens=0,cost_usd=0,prompt_review_status='待检查',prompt_submitted_at='',
-        estimated_speech_duration=?,flow_duration_seconds=?,timing_status=?,manual_text_lock=1 WHERE id=?""",
-        (text,float(meta.get('estimated_speech_duration') or 0),int(meta.get('flow_duration_seconds') or 0),str(meta.get('timing_status') or ''),int(sid)))
-    _save_manual_segment_type(con,sid,text)
+    cur_row=con.execute("SELECT foreign_text, prompt, video_model FROM flow_segments WHERE id=?", (int(sid),)).fetchone()
+    old_text=str(cur_row["foreign_text"] or "") if cur_row else ""
+    old_prompt=str(cur_row["prompt"] or "").strip() if cur_row else ""
+    vmodel=str(cur_row["video_model"] or "") if cur_row else ""
+    est_dur=float(meta.get('estimated_speech_duration') or 0)
+    flow_dur=8 if vmodel=='flow_omni' else int(meta.get('flow_duration_seconds') or 0)
+    t_status='MANUAL_DURATION_LOCK' if vmodel=='flow_omni' else str(meta.get('timing_status') or '')
+    if preserve_and_sync_prompt and old_prompt:
+        synced_prompt = sync_dialogue_into_prompt(old_prompt, old_text, text)
+        con.execute("""UPDATE flow_segments SET foreign_text=?,prompt=?,status='文案已改',
+            prompt_review_status='待检查',
+            estimated_speech_duration=?,flow_duration_seconds=?,timing_status=?,manual_text_lock=? WHERE id=?""",
+            (text,synced_prompt,est_dur,flow_dur,t_status,int(manual_lock_val),int(sid)))
+    else:
+        con.execute("""UPDATE flow_segments SET foreign_text=?,prompt='',ai_original_prompt='',status='待处理',model='',
+            input_tokens=0,cached_tokens=0,output_tokens=0,cost_usd=0,prompt_review_status='待检查',prompt_submitted_at='',
+            estimated_speech_duration=?,flow_duration_seconds=?,timing_status=?,manual_text_lock=? WHERE id=?""",
+            (text,est_dur,flow_dur,t_status,int(manual_lock_val),int(sid)))
+    _save_manual_segment_type(con,sid,text,mode=mode,source=source)
 
 
 def edit_prompt_segment_text(segment_id, text):
-    """Edit one pre-Flow segment; blank text deletes it. Never touches video numbering."""
-    sid=int(segment_id); text=' '.join(str(text or '').split())
+    """Edit one segment (including already-submitted segments); blank text deletes it; multiline text splits into consecutive segments. Never touches video numbering."""
+    sid=int(segment_id)
+    parts=[' '.join(line.split()) for line in str(text or '').replace('\r\n','\n').replace('\r','\n').split('\n')]
+    parts=[p for p in parts if p]
     with connect() as con:
         con.execute('BEGIN IMMEDIATE')
-        row=con.execute("SELECT id,video_id,seg_seq FROM flow_segments WHERE id=?",(sid,)).fetchone()
+        row=con.execute("SELECT id,video_id,seg_seq,COALESCE(generation_mode,'FRAME') generation_mode,COALESCE(video_model,'') video_model,COALESCE(segment_rule,'') segment_rule FROM flow_segments WHERE id=?",(sid,)).fetchone()
         if not row: raise ValueError('任务片段不存在')
-        rows=_assert_prompt_copy_editable(con,int(row['video_id']))
-        if not text:
-            con.execute("DELETE FROM flow_duration_choices WHERE segment_id=?",(sid,))
+        vid=int(row['video_id'])
+        rows=_assert_prompt_copy_editable(con,vid)
+        from app.services.performance_types import choices
+        from app.services.speech_preparation import timing_metadata
+        saved_choices=choices(con,vid)
+        prev_choice=saved_choices.get(str(sid),{})
+        inherited_mode=prev_choice.get('mode')
+        inherited_source=prev_choice.get('source')
+        new_sids=[]
+        if not parts:
+            _cleanup_deleted_segment_downstream(con, sid)
             con.execute("DELETE FROM flow_segments WHERE id=?",(sid,))
         else:
-            _reset_prompt_after_copy_change(con,sid,text)
-        # Compact only segment sequence inside the same complete video. videos.seq is untouched.
-        remaining=con.execute("SELECT id FROM flow_segments WHERE video_id=? ORDER BY seg_seq,id",(int(row['video_id']),)).fetchall()
-        for i,r in enumerate(remaining,1): con.execute("UPDATE flow_segments SET seg_seq=? WHERE id=?",(-i,int(r['id'])))
-        for i,r in enumerate(remaining,1): con.execute("UPDATE flow_segments SET seg_seq=? WHERE id=?",(i,int(r['id'])))
-        script_rows=con.execute("SELECT foreign_text FROM flow_segments WHERE video_id=? ORDER BY seg_seq,id",(int(row['video_id']),)).fetchall()
+            lock_val = 2 if len(parts) > 1 else 1
+            _reset_prompt_after_copy_change(con,sid,parts[0],mode=inherited_mode,source=inherited_source,manual_lock_val=lock_val,preserve_and_sync_prompt=True)
+            for idx,part in enumerate(parts[1:],1):
+                meta=timing_metadata(part)
+                gmode=str(row['generation_mode'] or 'FRAME')
+                vmodel=str(row['video_model'] or '')
+                est_dur=float(meta.get('estimated_speech_duration') or 0)
+                flow_dur=8 if vmodel=='flow_omni' else int(meta.get('flow_duration_seconds') or 8)
+                t_status='MANUAL_DURATION_LOCK' if vmodel=='flow_omni' else str(meta.get('timing_status') or '')
+                cur=con.execute("""INSERT INTO flow_segments(
+                    video_id,seg_seq,foreign_text,prompt,ai_original_prompt,status,model,
+                    generation_mode,video_model,segment_rule,prompt_review_status,prompt_submitted_at,
+                    estimated_speech_duration,flow_duration_seconds,timing_status,manual_text_lock
+                ) VALUES(?,?,?,'','','待处理','',?,?,?,'待检查','',?,?,?,2)""",
+                (vid,-1000-idx,part,gmode,vmodel,str(row['segment_rule'] or ''),est_dur,flow_dur,t_status))
+                child_id=int(cur.lastrowid)
+                new_sids.append(child_id)
+                _save_manual_segment_type(con,child_id,part,mode=inherited_mode,source=inherited_source)
+        # Compact only segment sequence inside the same complete video, inserting new_sids right after sid.
+        ordered_ids=[]
+        for r in rows:
+            rid=int(r['id'])
+            if rid==sid:
+                if parts:
+                    ordered_ids.append(sid)
+                    ordered_ids.extend(new_sids)
+            else:
+                ordered_ids.append(rid)
+        for i,rid in enumerate(ordered_ids,1): con.execute("UPDATE flow_segments SET seg_seq=? WHERE id=?",(-i,int(rid)))
+        for i,rid in enumerate(ordered_ids,1): con.execute("UPDATE flow_segments SET seg_seq=? WHERE id=?",(i,int(rid)))
+        script_rows=con.execute("SELECT foreign_text FROM flow_segments WHERE video_id=? ORDER BY seg_seq,id",(vid,)).fetchall()
         production=' '.join(str(r['foreign_text'] or '').strip() for r in script_rows if str(r['foreign_text'] or '').strip())
-        con.execute("UPDATE videos SET script=?,production_script=? WHERE id=?",(production,production,int(row['video_id'])))
-    return True
+        con.execute("UPDATE videos SET script=?,production_script=?,edit_status='等待片段' WHERE id=?",(production,production,vid))
+        if con.execute("SELECT 1 FROM sqlite_master WHERE name='davinci_video_state'").fetchone():
+            con.execute("DELETE FROM davinci_video_state WHERE video_id=?",(vid,))
+    return {'segment_ids': ([sid]+new_sids) if parts else [], 'next_segment_id': new_sids[0] if new_sids else (sid if parts else None)}
+
+
+_AUTO_MERGE_SIG_CACHE = {}
+
+
+def auto_merge_ungenerated_short_segments(work_date=None, max_words=24):
+    """Automatically merge adjacent ungenerated (no prompt yet) segments within the same video
+    and same eye/performance mode whenever their combined word count is <= max_words (default 24).
+    """
+    import json
+    from app.core import work_dates
+    from app.services.performance_types import choices
+    from app.services.speech_preparation import timing_metadata
+    from app.services.text_processing import _words
+
+    limit = max(1, int(max_words or 24))
+    day = work_dates.normalize_scope(work_date) if work_date else work_dates.active()
+    with read_connection(day) as rcon:
+        vrows = rcon.execute("""
+            SELECT v.id, v.performance_mode, COUNT(fs.id) AS seg_cnt, MAX(fs.id) AS max_sid
+            FROM videos v
+            JOIN flow_segments fs ON fs.video_id = v.id
+            WHERE TRIM(COALESCE(fs.prompt, '')) = ''
+              AND COALESCE(fs.manual_text_lock, 0) < 2
+              AND COALESCE(fs.prompt_review_status, '待检查') NOT IN ('已提交', '已放弃')
+              AND COALESCE(fs.flow_status, '') != '已放弃'
+              AND COALESCE(v.edit_status, '') != '已放弃'
+            GROUP BY v.id
+            HAVING COUNT(fs.id) >= 2
+            ORDER BY v.id
+        """).fetchall()
+    if not vrows:
+        return 0
+
+    sig = tuple((int(r["id"]), int(r["seg_cnt"]), int(r["max_sid"])) for r in vrows)
+    if _AUTO_MERGE_SIG_CACHE.get((day, limit)) == sig:
+        return 0
+
+    merged_videos = 0
+    for vrow in vrows:
+        vid = int(vrow["id"])
+        v_mode = "PRAYING" if str(vrow["performance_mode"] or "").upper() == "PRAYING" else "TALKING"
+        with connect() as con:
+            try:
+                con.execute("BEGIN IMMEDIATE")
+                rows = _assert_prompt_copy_editable(con, vid, allow_submitted=False)
+            except Exception:
+                continue
+            if len(rows) <= 1:
+                continue
+            saved = choices(con, vid)
+            style_modes_by_sid = {}
+            if v_mode == "PRAYING":
+                try:
+                    from app.services import eye_states
+                    from app.services.speech_preparation import prepare_swahili_speech
+                    srow = con.execute("SELECT payload FROM video_source_styles WHERE video_id=?", (vid,)).fetchone()
+                    snap = json.loads(srow[0]).get("外文内容", {}) if srow and srow[0] else {}
+                    blks = [(t.strip(), m) for t, m in eye_states.blocks(snap, "PRAYING") if t.strip()]
+                    if any(m == "TALKING" for _, m in blks):
+                        blk_word_modes = []
+                        for btxt, bmode in blks:
+                            prep_txt = prepare_swahili_speech(btxt).spoken_text
+                            for w in _words(prep_txt):
+                                blk_word_modes.append(bmode)
+                        total_row_words = sum(len(_words(str(r["foreign_text"] or ""))) for r in rows if int(r["seg_seq"] or 0) < 1000)
+                        if blk_word_modes and len(blk_word_modes) == total_row_words:
+                            pos_w = 0
+                            for r in rows:
+                                if int(r["seg_seq"] or 0) >= 1000:
+                                    continue
+                                rw = _words(str(r["foreign_text"] or ""))
+                                span_modes = set(blk_word_modes[pos_w : pos_w + len(rw)])
+                                pos_w += len(rw)
+                                if "TALKING" in span_modes:
+                                    style_modes_by_sid[int(r["id"])] = "TALKING"
+                except Exception:
+                    pass
+
+            from app.services.speech_preparation import _instruction_speech_seconds, ensure_terminal_period
+            items = []
+            for r in rows:
+                sid = int(r["id"])
+                txt = " ".join(str(r["foreign_text"] or "").split())
+                is_aux = int(r["seg_seq"] or 0) >= 1000 or txt.startswith("[LEGACY_AUX]")
+                has_prompt = bool(str(r["prompt"] or "").strip())
+                is_manual_split = int(r["manual_text_lock"] or 0) >= 2
+                is_submitted = str(r["prompt_review_status"] or "待检查") == "已提交"
+                ch = saved.get(str(sid), {})
+                eff_mode = (style_modes_by_sid.get(sid) or ch.get("mode") or v_mode or "TALKING").upper()
+                eff_mode = "PRAYING" if eff_mode == "PRAYING" else "TALKING"
+                eff_source = "sheet_color" if sid in style_modes_by_sid else (ch.get("source") or ("sheet_color" if ch else "unclassified"))
+                is_locked_red = (v_mode == "PRAYING" and eff_mode == "TALKING")
+                items.append({
+                    "id": sid,
+                    "text": txt,
+                    "words": len(_words(txt)),
+                    "mode": eff_mode,
+                    "source": eff_source,
+                    "vmodel": str(r["video_model"] or ""),
+                    "can_merge": (not is_aux) and (not has_prompt) and (not is_manual_split) and (not is_submitted) and (not is_locked_red) and bool(txt),
+                })
+
+            removed_ids = []
+            guard = 0
+            while len(items) > 1 and guard < 300:
+                guard += 1
+                candidates = []
+                for i, cur in enumerate(items):
+                    if not cur["can_merge"] or cur["words"] <= 0 or cur["words"] >= limit:
+                        continue
+                    if i > 0:
+                        prev = items[i - 1]
+                        comb_txt = f"{prev['text']} {cur['text']}".strip()
+                        if prev["can_merge"] and prev["mode"] == cur["mode"] and 0 < prev["words"] + cur["words"] <= limit and _instruction_speech_seconds(comb_txt) <= 7.8:
+                            comb = prev["words"] + cur["words"]
+                            candidates.append((min(prev["words"], cur["words"]), abs(16 - comb), i - 1, i))
+                    if i + 1 < len(items):
+                        nxt = items[i + 1]
+                        comb_txt = f"{cur['text']} {nxt['text']}".strip()
+                        if nxt["can_merge"] and cur["mode"] == nxt["mode"] and 0 < cur["words"] + nxt["words"] <= limit and _instruction_speech_seconds(comb_txt) <= 7.8:
+                            comb = cur["words"] + nxt["words"]
+                            candidates.append((min(cur["words"], nxt["words"]), abs(16 - comb), i, i + 1))
+                if not candidates:
+                    break
+                _, _, left_i, right_i = min(candidates, key=lambda x: (x[0], x[1], x[2]))
+                left_item = items[left_i]
+                right_item = items[right_i]
+                merged_txt = ensure_terminal_period(f"{left_item['text']} {right_item['text']}".strip())
+                left_item["text"] = merged_txt
+                left_item["words"] = len(_words(merged_txt))
+                if left_item["source"] == "unclassified" and right_item["source"] != "unclassified":
+                    left_item["source"] = right_item["source"]
+                removed_ids.append(right_item["id"])
+                del items[right_i]
+
+            if not removed_ids:
+                continue
+
+            for rem_id in removed_ids:
+                con.execute("DELETE FROM flow_duration_choices WHERE segment_id=?", (int(rem_id),))
+                con.execute("DELETE FROM flow_segments WHERE id=?", (int(rem_id),))
+
+            for seq, item in enumerate(items, 1):
+                con.execute("UPDATE flow_segments SET seg_seq=? WHERE id=?", (-seq, int(item["id"])))
+            for seq, item in enumerate(items, 1):
+                meta = timing_metadata(item["text"])
+                vmodel = item["vmodel"]
+                est_dur = float(meta.get("estimated_speech_duration") or 0)
+                flow_dur = 8 if vmodel == "flow_omni" else int(meta.get("flow_duration_seconds") or 8)
+                t_status = "MANUAL_DURATION_LOCK" if vmodel == "flow_omni" else str(meta.get("timing_status") or "")
+                con.execute("""
+                    UPDATE flow_segments
+                    SET seg_seq=?, foreign_text=?, estimated_speech_duration=?, flow_duration_seconds=?, timing_status=?,
+                        manual_text_lock=CASE WHEN COALESCE(manual_text_lock,0)>=2 THEN manual_text_lock ELSE 1 END
+                    WHERE id=?
+                """, (seq, item["text"], est_dur, flow_dur, t_status, int(item["id"])))
+
+            new_saved = {
+                str(item["id"]): {
+                    "text": item["text"],
+                    "mode": item["mode"],
+                    "source": item["source"] if item["source"] in ("sheet_color", "manual") else "sheet_color",
+                }
+                for item in items
+            }
+            data = {
+                "work_date": work_dates.video_work_date(con, vid),
+                "source": "sheet_color",
+                "segments": new_saved,
+            }
+            con.execute(
+                "INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (f"segment_eye_types:{vid}", json.dumps(data, ensure_ascii=False)),
+            )
+            production = " ".join(item["text"] for item in items if item["text"])
+            con.execute("UPDATE videos SET script=?, production_script=? WHERE id=?", (production, production, vid))
+            merged_videos += 1
+    if merged_videos == 0:
+        _AUTO_MERGE_SIG_CACHE[(day, limit)] = sig
+    else:
+        _AUTO_MERGE_SIG_CACHE.pop((day, limit), None)
+    return merged_videos
+
+
+def ai_reorganize_video_segments(video_ids, *, target_sec=7.0, max_sec=7.8, hard_max_sec=8.0):
+    """Re-segment the specified videos' scripts so each segment is balanced around ~7s
+    (strictly <= 8s when splittable) WITHOUT modifying any character of the original text.
+    Preserves contiguous TALKING/PRAYING performance_mode blocks, sheet_color/manual sources,
+    and updates existing prompts if every segment already had a prompt.
+    """
+    import json
+    from app.core import work_dates
+    from app.services.performance_types import choices
+    from app.services.text_processing import _words
+    from app.services.speech_preparation import (
+        _instruction_speech_seconds,
+        balance_segments_verbatim,
+        ensure_terminal_period,
+        prepare_swahili_speech,
+        timing_metadata,
+    )
+
+    clean_vids = sorted({int(v) for v in (video_ids or []) if v is not None and int(v) > 0})
+    if not clean_vids:
+        return {
+            "videos_processed": 0,
+            "videos_changed": 0,
+            "old_segments": 0,
+            "new_segments": 0,
+            "avg_seconds": 0.0,
+            "max_seconds": 0.0,
+            "changed_segment_ids": [],
+        }
+
+    videos_processed = 0
+    videos_changed = 0
+    videos_skipped_locked = 0
+    old_seg_total = 0
+    new_seg_total = 0
+    all_new_durs = []
+    changed_segment_ids = []
+
+    with connect() as con:
+        con.execute("BEGIN IMMEDIATE")
+        for vid in clean_vids:
+            vrow = con.execute("SELECT id, performance_mode FROM videos WHERE id=?", (vid,)).fetchone()
+            if not vrow:
+                continue
+            v_mode = "PRAYING" if str(vrow["performance_mode"] or "").upper() == "PRAYING" else "TALKING"
+            rows = list(con.execute("SELECT * FROM flow_segments WHERE video_id=? ORDER BY seg_seq, id", (vid,)).fetchall())
+            if not rows:
+                continue
+
+            normal_rows = []
+            aux_rows = []
+            for r in rows:
+                txt = " ".join(str(r["foreign_text"] or "").split()).strip()
+                is_aux = int(r["seg_seq"] or 0) >= 1000 or txt.startswith("[LEGACY_AUX]")
+                if is_aux:
+                    aux_rows.append(r)
+                elif txt:
+                    normal_rows.append(r)
+
+            if not normal_rows:
+                continue
+
+            videos_processed += 1
+            old_seg_total += len(normal_rows)
+            saved = choices(con, vid)
+
+            # Resolve red (TALKING) vs black (PRAYING) blocks in PRAYING scripts so red segments are never merged with normal segments
+            groups = []
+            used_style_blocks = False
+            if v_mode == "PRAYING":
+                try:
+                    from app.services import eye_states
+                    srow = con.execute("SELECT payload FROM video_source_styles WHERE video_id=?", (vid,)).fetchone()
+                    snap = json.loads(srow[0]).get("外文内容", {}) if srow and srow[0] else {}
+                    blks = [(t.strip(), m) for t, m in eye_states.blocks(snap, "PRAYING") if t.strip()]
+                    if any(m == "TALKING" for _, m in blks):
+                        prep_blks = []
+                        all_blk_words = []
+                        for btxt, bmode in blks:
+                            ptxt = " ".join(prepare_swahili_speech(btxt).spoken_text.split()).strip()
+                            if ptxt:
+                                prep_blks.append((ptxt, "PRAYING" if bmode == "PRAYING" else "TALKING"))
+                                all_blk_words.extend(_words(ptxt))
+                        row_words = _words(" ".join(str(r["foreign_text"] or "") for r in normal_rows))
+                        # First check if current normal_rows already have pure TALKING/PRAYING segments matching saved choices
+                        saved_talking_sids = {
+                            int(r["id"])
+                            for r in normal_rows
+                            if str(saved.get(str(r["id"]), {}).get("mode") or "").upper() == "TALKING"
+                        }
+                        if saved_talking_sids:
+                            for r in normal_rows:
+                                sid = int(r["id"])
+                                txt = " ".join(str(r["foreign_text"] or "").split()).strip()
+                                ch = saved.get(str(sid), {})
+                                eff_mode = "TALKING" if sid in saved_talking_sids else "PRAYING"
+                                eff_source = ch.get("source") or "sheet_color"
+                                if eff_mode == "TALKING":
+                                    # Red segment inside PRAYING video: isolate it so it never merges with PRAYING or other segments
+                                    groups.append({
+                                        "mode": "TALKING",
+                                        "source": eff_source,
+                                        "texts": [txt],
+                                        "rows": [r],
+                                        "locked_red": True,
+                                    })
+                                elif groups and groups[-1]["mode"] == "PRAYING" and not groups[-1].get("locked_red"):
+                                    groups[-1]["texts"].append(txt)
+                                    groups[-1]["rows"].append(r)
+                                else:
+                                    groups.append({
+                                        "mode": "PRAYING",
+                                        "source": eff_source,
+                                        "texts": [txt],
+                                        "rows": [r],
+                                        "locked_red": False,
+                                    })
+                            used_style_blocks = True
+                        elif prep_blks and all_blk_words == row_words:
+                            for ptxt, bmode in prep_blks:
+                                groups.append({
+                                    "mode": bmode,
+                                    "source": "sheet_color",
+                                    "texts": [ptxt],
+                                    "rows": list(normal_rows),
+                                    "locked_red": (bmode == "TALKING"),
+                                })
+                            used_style_blocks = True
+                except Exception:
+                    pass
+
+            if not used_style_blocks:
+                for r in normal_rows:
+                    sid = int(r["id"])
+                    txt = " ".join(str(r["foreign_text"] or "").split()).strip()
+                    ch = saved.get(str(sid), {})
+                    eff_mode = (ch.get("mode") or v_mode or "TALKING").upper()
+                    eff_mode = "PRAYING" if eff_mode == "PRAYING" else "TALKING"
+                    eff_source = ch.get("source") or ("sheet_color" if ch else "unclassified")
+                    is_locked_red = (v_mode == "PRAYING" and eff_mode == "TALKING")
+                    if is_locked_red:
+                        groups.append({
+                            "mode": "TALKING",
+                            "source": eff_source,
+                            "texts": [txt],
+                            "rows": [r],
+                            "locked_red": True,
+                        })
+                    elif groups and groups[-1]["mode"] == eff_mode and not groups[-1].get("locked_red"):
+                        groups[-1]["texts"].append(txt)
+                        groups[-1]["rows"].append(r)
+                        if groups[-1]["source"] == "unclassified" and eff_source != "unclassified":
+                            groups[-1]["source"] = eff_source
+                    else:
+                        groups.append({
+                            "mode": eff_mode,
+                            "source": eff_source,
+                            "texts": [txt],
+                            "rows": [r],
+                            "locked_red": False,
+                        })
+
+            planned = []
+            for grp in groups:
+                joined_txt = " ".join(grp["texts"]).strip()
+                if grp.get("locked_red") and _instruction_speech_seconds(joined_txt) <= hard_max_sec:
+                    # Red (TALKING) segment in a closed-eye (PRAYING) script is locked and never merged or re-cut if <= 8.0s
+                    balanced_txts = [ensure_terminal_period(joined_txt)]
+                else:
+                    balanced_txts = balance_segments_verbatim(
+                        joined_txt,
+                        target_sec=target_sec,
+                        max_sec=max_sec,
+                        hard_max_sec=hard_max_sec,
+                    )
+                for btxt in balanced_txts:
+                    if not btxt:
+                        continue
+                    planned.append({
+                        "text": ensure_terminal_period(btxt),
+                        "mode": grp["mode"],
+                        "source": grp["source"],
+                        "template_rows": grp["rows"],
+                    })
+
+            orig_full = " ".join(" ".join(str(r["foreign_text"] or "").split()).strip() for r in normal_rows).strip()
+            new_full = " ".join(p["text"] for p in planned).strip()
+            if _words(orig_full) != _words(new_full) or not planned:
+                # Safety guard: never allow any word mutation
+                for r in normal_rows:
+                    all_new_durs.append(_instruction_speech_seconds(str(r["foreign_text"] or "")))
+                new_seg_total += len(normal_rows)
+                continue
+
+            old_texts = [" ".join(str(r["foreign_text"] or "").split()).strip() for r in normal_rows]
+            new_texts = [p["text"] for p in planned]
+            for btxt in new_texts:
+                all_new_durs.append(_instruction_speech_seconds(btxt))
+            new_seg_total += len(new_texts)
+
+            if old_texts == new_texts:
+                # Ensure manual_text_lock=2 so auto_merge doesn't undo it
+                for r in normal_rows:
+                    con.execute("UPDATE flow_segments SET manual_text_lock=2 WHERE id=?", (int(r["id"]),))
+                continue
+
+            videos_changed += 1
+            old_count = len(normal_rows)
+            new_count = len(planned)
+            first_gmode = str(normal_rows[0]["generation_mode"] or "FRAME")
+            rest_gmode = str(normal_rows[1]["generation_mode"] or "FRAME") if len(normal_rows) > 1 else first_gmode
+
+            kept_sids = []
+            for idx, item in enumerate(planned):
+                btxt = item["text"]
+                meta = timing_metadata(btxt)
+                est_dur = float(meta.get("estimated_speech_duration") or 0)
+                t_rows = item["template_rows"]
+                ref_row = t_rows[min(idx, len(t_rows) - 1)]
+                vmodel = str(ref_row["video_model"] or "")
+                seg_rule = str(ref_row["segment_rule"] or "")
+                gmode = first_gmode if idx == 0 else (
+                    str(normal_rows[idx]["generation_mode"] or rest_gmode) if idx < old_count else rest_gmode
+                )
+                flow_dur = 8 if vmodel == "flow_omni" else int(meta.get("flow_duration_seconds") or 8)
+                t_status = "MANUAL_DURATION_LOCK" if vmodel == "flow_omni" else str(meta.get("timing_status") or "")
+
+                if idx < old_count:
+                    sid = int(normal_rows[idx]["id"])
+                    old_t = " ".join(str(normal_rows[idx]["foreign_text"] or "").split()).strip()
+                    old_p = str(normal_rows[idx]["prompt"] or "").strip()
+                    if old_t == btxt:
+                        con.execute(
+                            """UPDATE flow_segments
+                               SET generation_mode=?, estimated_speech_duration=?, flow_duration_seconds=?,
+                                   timing_status=?, manual_text_lock=2
+                               WHERE id=?""",
+                            (gmode, est_dur, flow_dur, t_status, sid),
+                        )
+                    elif old_p:
+                        synced_p = sync_dialogue_into_prompt(old_p, old_t, btxt)
+                        con.execute(
+                            """UPDATE flow_segments
+                               SET foreign_text=?, prompt=?, status='文案已改', prompt_review_status='待检查',
+                                   generation_mode=?, estimated_speech_duration=?, flow_duration_seconds=?,
+                                   timing_status=?, manual_text_lock=2
+                               WHERE id=?""",
+                            (btxt, synced_p, gmode, est_dur, flow_dur, t_status, sid),
+                        )
+                    else:
+                        con.execute(
+                            """UPDATE flow_segments
+                               SET foreign_text=?, prompt='', ai_original_prompt='', status='待处理', model='',
+                                   input_tokens=0, cached_tokens=0, output_tokens=0, cost_usd=0,
+                                   prompt_review_status='待检查', prompt_submitted_at='',
+                                   generation_mode=?, estimated_speech_duration=?, flow_duration_seconds=?,
+                                   timing_status=?, manual_text_lock=2
+                               WHERE id=?""",
+                            (btxt, gmode, est_dur, flow_dur, t_status, sid),
+                        )
+                    kept_sids.append((sid, item))
+                    changed_segment_ids.append(sid)
+                else:
+                    # Try to sync prompt from template row if template row had a prompt
+                    tmpl_p = str(ref_row["prompt"] or "").strip()
+                    tmpl_t = " ".join(str(ref_row["foreign_text"] or "").split()).strip()
+                    synced_p = sync_dialogue_into_prompt(tmpl_p, tmpl_t, btxt) if tmpl_p else ""
+                    new_status = "文案已改" if synced_p else "待处理"
+                    cur = con.execute(
+                        """INSERT INTO flow_segments(
+                            video_id, seg_seq, foreign_text, prompt, ai_original_prompt, status, model,
+                            generation_mode, video_model, segment_rule, prompt_review_status, prompt_submitted_at,
+                            estimated_speech_duration, flow_duration_seconds, timing_status, manual_text_lock
+                        ) VALUES(?,?,?,?,?,?,?, ?,?,?,'待检查','', ?,?,?,2)""",
+                        (
+                            vid,
+                            -2000 - idx,
+                            btxt,
+                            synced_p,
+                            "",
+                            new_status,
+                            str(ref_row["model"] or "") if synced_p else "",
+                            gmode,
+                            vmodel,
+                            seg_rule,
+                            est_dur,
+                            flow_dur,
+                            t_status,
+                        ),
+                    )
+                    child_id = int(cur.lastrowid)
+                    kept_sids.append((child_id, item))
+                    changed_segment_ids.append(child_id)
+
+            if old_count > new_count:
+                for rem_row in normal_rows[new_count:]:
+                    rem_sid = int(rem_row["id"])
+                    _cleanup_deleted_segment_downstream(con, rem_sid)
+                    con.execute("DELETE FROM flow_segments WHERE id=?", (rem_sid,))
+
+            # Renumber normal segments 1..N
+            for seq, (sid, _) in enumerate(kept_sids, 1):
+                con.execute("UPDATE flow_segments SET seg_seq=? WHERE id=?", (-seq, int(sid)))
+            for seq, (sid, _) in enumerate(kept_sids, 1):
+                con.execute("UPDATE flow_segments SET seg_seq=? WHERE id=?", (seq, int(sid)))
+
+            # Save eye types for all kept segments
+            new_saved = {}
+            for sid, item in kept_sids:
+                src = item["source"] if item["source"] in ("sheet_color", "manual") else "sheet_color"
+                new_saved[str(sid)] = {
+                    "text": item["text"],
+                    "mode": item["mode"],
+                    "source": src,
+                }
+            data = {
+                "work_date": work_dates.video_work_date(con, vid),
+                "source": "sheet_color",
+                "segments": new_saved,
+            }
+            con.execute(
+                "INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (f"segment_eye_types:{vid}", json.dumps(data, ensure_ascii=False)),
+            )
+            production = " ".join(item["text"] for _, item in kept_sids if item["text"]).strip()
+            con.execute(
+                "UPDATE videos SET script=?, production_script=?, edit_status=CASE WHEN COALESCE(edit_status,'')='已放弃' THEN '已放弃' ELSE '等待片段' END WHERE id=?",
+                (production, production, vid),
+            )
+            if con.execute("SELECT 1 FROM sqlite_master WHERE name='davinci_video_state'").fetchone():
+                con.execute("DELETE FROM davinci_video_state WHERE video_id=?", (vid,))
+
+    _AUTO_MERGE_SIG_CACHE.clear()
+    avg_sec = (sum(all_new_durs) / len(all_new_durs)) if all_new_durs else 0.0
+    max_sec_actual = max(all_new_durs) if all_new_durs else 0.0
+    return {
+        "videos_processed": videos_processed,
+        "videos_changed": videos_changed,
+        "videos_skipped_locked": videos_skipped_locked,
+        "old_segments": old_seg_total,
+        "new_segments": new_seg_total,
+        "avg_seconds": round(avg_sec, 2),
+        "max_seconds": round(max_sec_actual, 2),
+        "changed_segment_ids": changed_segment_ids,
+    }
 
 
 def merge_prompt_segment(segment_id, direction, mode=None):
@@ -3725,16 +5039,18 @@ def merge_prompt_segment(segment_id, direction, mode=None):
             keep=int(target['id']); remove=sid; merged=(other+' '+current).strip()
         else:
             keep=sid; remove=int(target['id']); merged=(current+' '+other).strip()
-        _reset_prompt_after_copy_change(con,keep,merged)
-        con.execute("DELETE FROM flow_duration_choices WHERE segment_id=?",(remove,))
+        _reset_prompt_after_copy_change(con,keep,merged,preserve_and_sync_prompt=True)
+        _cleanup_deleted_segment_downstream(con,remove)
         con.execute("DELETE FROM flow_segments WHERE id=?",(remove,))
-        _save_manual_segment_type(con,keep,merged,mode)
+        _save_manual_segment_type(con,keep,merged,mode,source='manual' if mode else None)
         remaining=con.execute("SELECT id FROM flow_segments WHERE video_id=? ORDER BY seg_seq,id",(int(row['video_id']),)).fetchall()
         for i,r in enumerate(remaining,1): con.execute("UPDATE flow_segments SET seg_seq=? WHERE id=?",(-i,int(r['id'])))
         for i,r in enumerate(remaining,1): con.execute("UPDATE flow_segments SET seg_seq=? WHERE id=?",(i,int(r['id'])))
         script_rows=con.execute("SELECT foreign_text FROM flow_segments WHERE video_id=? ORDER BY seg_seq,id",(int(row['video_id']),)).fetchall()
         production=' '.join(str(r['foreign_text'] or '').strip() for r in script_rows if str(r['foreign_text'] or '').strip())
-        con.execute("UPDATE videos SET script=?,production_script=? WHERE id=?",(production,production,int(row['video_id'])))
+        con.execute("UPDATE videos SET script=?,production_script=?,edit_status='等待片段' WHERE id=?",(production,production,int(row['video_id'])))
+        if con.execute("SELECT 1 FROM sqlite_master WHERE name='davinci_video_state'").fetchone():
+            con.execute("DELETE FROM davinci_video_state WHERE video_id=?",(int(row['video_id']),))
     return True
 
 
@@ -3754,3 +5070,257 @@ def rework_qc_segment_prompt(segment_id, prompt):
         con.execute("DELETE FROM flow_recovery WHERE segment_id=?",(sid,))
         con.execute("INSERT INTO prompt_submission_history(segment_id,prompt_snapshot) VALUES(?,?)",(sid,prompt))
     return True
+
+
+_COPY_UNDO_DOWNSTREAM_TABLES = (
+    "flow_dispatches",
+    "flow_outputs",
+    "flow_redo",
+    "flow_failure_attempts",
+    "flow_recovery",
+    "speech_analysis",
+    "local_qc_results",
+    "ai_qc_results",
+    "qc_decisions",
+    "flow_duration_choices",
+    "prompt_submission_history",
+)
+
+
+def snapshot_video_copy_state(video_ids) -> dict:
+    """Capture a complete, lossless per-video copy & segment snapshot for Undo/Redo in Prompt Center."""
+    vids = sorted({int(v) for v in (video_ids or []) if v})
+    if not vids:
+        return {"videos": {}}
+    videos_state: dict[int, dict] = {}
+    with connect() as con:
+        existing_tables = {
+            str(r[0])
+            for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        for vid in vids:
+            vrow = con.execute(
+                "SELECT id, host_id, seq, script, production_script, edit_status, special_requirements "
+                "FROM videos WHERE id=?",
+                (vid,),
+            ).fetchone()
+            if not vrow:
+                continue
+            segs = [
+                dict(r)
+                for r in con.execute(
+                    "SELECT * FROM flow_segments WHERE video_id=? ORDER BY seg_seq, id",
+                    (vid,),
+                ).fetchall()
+            ]
+            sids = [int(s["id"]) for s in segs]
+            erow = con.execute(
+                "SELECT value FROM app_settings WHERE key=?",
+                (f"segment_eye_types:{vid}",),
+            ).fetchone()
+            eye_raw = str(erow[0]) if (erow is not None and erow[0] is not None) else None
+            davinci_rows = None
+            if "davinci_video_state" in existing_tables:
+                davinci_rows = [
+                    dict(r)
+                    for r in con.execute(
+                        "SELECT * FROM davinci_video_state WHERE video_id=?", (vid,)
+                    ).fetchall()
+                ]
+            downstream: dict[str, list[dict]] = {}
+            obsolete_rows: list[dict] = []
+            if sids:
+                sp = ",".join("?" for _ in sids)
+                for tbl in _COPY_UNDO_DOWNSTREAM_TABLES:
+                    if tbl in existing_tables:
+                        downstream[tbl] = [
+                            dict(r)
+                            for r in con.execute(
+                                f"SELECT * FROM {tbl} WHERE segment_id IN ({sp})", sids
+                            ).fetchall()
+                        ]
+                if "flow_obsolete_segments" in existing_tables:
+                    obsolete_rows = [
+                        dict(r)
+                        for r in con.execute(
+                            f"SELECT * FROM flow_obsolete_segments WHERE segment_id IN ({sp})",
+                            sids,
+                        ).fetchall()
+                    ]
+            videos_state[vid] = {
+                "video": dict(vrow),
+                "segments": segs,
+                "eye_types_raw": eye_raw,
+                "davinci_rows": davinci_rows,
+                "downstream": downstream,
+                "obsolete": obsolete_rows,
+            }
+    return {"videos": videos_state}
+
+
+def restore_video_copy_state(snapshot: dict) -> dict:
+    """Atomically restore per-video copy & segment state captured by snapshot_video_copy_state."""
+    raw_videos = (snapshot or {}).get("videos") or {}
+    videos_map = {int(k): v for k, v in raw_videos.items() if v}
+    if not videos_map:
+        return {"restored_videos": 0, "segment_ids": []}
+
+    restored_sids: list[int] = []
+    with connect() as con:
+        con.execute("BEGIN IMMEDIATE")
+        existing_tables = {
+            str(r[0])
+            for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        valid_seg_cols = [
+            str(r["name"])
+            for r in con.execute("PRAGMA table_info(flow_segments)").fetchall()
+        ]
+        table_cols_cache: dict[str, list[str]] = {}
+
+        def _cols_for(tbl: str) -> list[str]:
+            if tbl not in table_cols_cache:
+                table_cols_cache[tbl] = [
+                    str(r["name"])
+                    for r in con.execute(f"PRAGMA table_info({tbl})").fetchall()
+                ]
+            return table_cols_cache[tbl]
+
+        # Phase 1: Safety validation before mutating any row
+        cur_rows_by_vid: dict[int, list] = {}
+        for vid, vstate in videos_map.items():
+            if not con.execute("SELECT 1 FROM videos WHERE id=?", (vid,)).fetchone():
+                raise ValueError(f"目标完整视频（ID={vid}）已不存在，无法执行撤销。")
+            cur_rows = con.execute(
+                "SELECT id, generation_command, prompt_review_status, flow_status "
+                "FROM flow_segments WHERE video_id=?",
+                (vid,),
+            ).fetchall()
+            cur_rows_by_vid[vid] = cur_rows
+            old_cmds = {
+                str(s.get("generation_command") or "").strip()
+                for s in (vstate.get("segments") or [])
+                if str(s.get("generation_command") or "").strip()
+            }
+            old_submitted_sids = {
+                int(s["id"])
+                for s in (vstate.get("segments") or [])
+                if str(s.get("prompt_review_status") or "") == "已提交"
+            }
+            for crow in cur_rows:
+                cmd = str(crow["generation_command"] or "").strip()
+                if cmd and cmd not in old_cmds:
+                    raise ValueError(
+                        "该视频在修改后已有片段派发至 Flow 生成队列，为保护正在执行的生成任务，无法直接撤销。"
+                    )
+                if (
+                    str(crow["prompt_review_status"] or "") == "已提交"
+                    and int(crow["id"]) not in old_submitted_sids
+                ):
+                    raise ValueError(
+                        "该视频在修改后已新提交至 Flow 队列；如需回退文案，请先在「提交历史」中撤回排队。"
+                    )
+
+        # Phase 2: Atomic per-video restoration
+        for vid, vstate in videos_map.items():
+            segs = list(vstate.get("segments") or [])
+            snap_sids = {int(s["id"]) for s in segs}
+            cur_sids = {int(r["id"]) for r in cur_rows_by_vid.get(vid, ())}
+            extra_sids = sorted(cur_sids - snap_sids)
+            for esid in extra_sids:
+                _cleanup_deleted_segment_downstream(con, esid)
+                con.execute("DELETE FROM flow_segments WHERE id=?", (esid,))
+
+            # Shift remaining rows to negative seg_seq so UNIQUE(video_id, seg_seq) never collides
+            con.execute(
+                "UPDATE flow_segments SET seg_seq = -100000 - id WHERE video_id=?",
+                (vid,),
+            )
+
+            for seg in segs:
+                cols = [c for c in valid_seg_cols if c in seg]
+                placeholders = ",".join("?" for _ in cols)
+                updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+                con.execute(
+                    f"INSERT INTO flow_segments ({','.join(cols)}) VALUES ({placeholders}) "
+                    f"ON CONFLICT(id) DO UPDATE SET {updates}",
+                    [seg[c] for c in cols],
+                )
+                restored_sids.append(int(seg["id"]))
+
+            eye_key = f"segment_eye_types:{vid}"
+            eye_raw = vstate.get("eye_types_raw")
+            if eye_raw is not None:
+                con.execute(
+                    "INSERT INTO app_settings(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (eye_key, eye_raw),
+                )
+            else:
+                con.execute("DELETE FROM app_settings WHERE key=?", (eye_key,))
+
+            vrow = vstate.get("video") or {}
+            if vrow:
+                con.execute(
+                    "UPDATE videos SET script=?, production_script=?, edit_status=?, special_requirements=? "
+                    "WHERE id=?",
+                    (
+                        str(vrow.get("script") or ""),
+                        str(vrow.get("production_script") or ""),
+                        str(vrow.get("edit_status") or "等待片段"),
+                        str(vrow.get("special_requirements") or ""),
+                        vid,
+                    ),
+                )
+
+            if "davinci_video_state" in existing_tables and vstate.get("davinci_rows") is not None:
+                con.execute("DELETE FROM davinci_video_state WHERE video_id=?", (vid,))
+                dcols_all = _cols_for("davinci_video_state")
+                for drow in vstate["davinci_rows"]:
+                    dcols = [c for c in dcols_all if c in drow]
+                    if dcols:
+                        con.execute(
+                            f"INSERT OR REPLACE INTO davinci_video_state ({','.join(dcols)}) "
+                            f"VALUES ({','.join('?' for _ in dcols)})",
+                            [drow[c] for c in dcols],
+                        )
+
+            if snap_sids:
+                sids_sorted = sorted(snap_sids)
+                sp = ",".join("?" for _ in sids_sorted)
+                for tbl, saved_rows in (vstate.get("downstream") or {}).items():
+                    if tbl not in existing_tables:
+                        continue
+                    con.execute(f"DELETE FROM {tbl} WHERE segment_id IN ({sp})", sids_sorted)
+                    tcols_all = _cols_for(tbl)
+                    for drow in saved_rows:
+                        tcols = [c for c in tcols_all if c in drow]
+                        if tcols:
+                            con.execute(
+                                f"INSERT OR REPLACE INTO {tbl} ({','.join(tcols)}) "
+                                f"VALUES ({','.join('?' for _ in tcols)})",
+                                [drow[c] for c in tcols],
+                            )
+                if "flow_obsolete_segments" in existing_tables and "obsolete" in vstate:
+                    con.execute(
+                        f"DELETE FROM flow_obsolete_segments WHERE segment_id IN ({sp})",
+                        sids_sorted,
+                    )
+                    ocols_all = _cols_for("flow_obsolete_segments")
+                    for orow in vstate["obsolete"]:
+                        ocols = [c for c in ocols_all if c in orow]
+                        if ocols:
+                            con.execute(
+                                f"INSERT OR IGNORE INTO flow_obsolete_segments ({','.join(ocols)}) "
+                                f"VALUES ({','.join('?' for _ in ocols)})",
+                                [orow[c] for c in ocols],
+                            )
+
+    _AUTO_MERGE_SIG_CACHE.clear()
+    try:
+        from app.services import sheet_style
+        for vid in videos_map:
+            sheet_style._snapshot_cache.pop(int(vid), None)
+    except Exception:
+        pass
+    return {"restored_videos": len(videos_map), "segment_ids": restored_sids}

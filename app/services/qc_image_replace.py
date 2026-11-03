@@ -41,6 +41,7 @@ def _video_context(video_id: int, work_date=None) -> dict:
         segments = con.execute(
             """SELECT id segment_id,seg_seq,foreign_text,prompt,ai_original_prompt,segment_rule,status,model,
                       COALESCE(generation_mode,'FRAME') generation_mode,
+                      COALESCE(video_model,'') video_model,
                       COALESCE(generation_command,'') generation_command,
                       COALESCE(flow_status,'待生成') flow_status,
                       COALESCE(flow_output_path,'') flow_output_path,
@@ -155,12 +156,6 @@ def generate_replacement_prompts(video_id: int, replacement_image: str, work_dat
     context = get_replacement_context(video_id, work_date=work_date)
     image_path = str(resolve_path(replacement_image))
     mode = 'PRAYING' if str(context.get('performance_mode') or '').upper() == 'PRAYING' else 'TALKING'
-    template = str(context.get('prompt_template_snapshot') or '').strip()
-    if not template:
-        key = 'praying_base_prompt' if mode == 'PRAYING' else 'talking_base_prompt'
-        template = str(repo.get_setting(key, '') or '').strip()
-        if not template:
-            raise RuntimeError(f'{mode} 基础模板尚未设置，不能重新生成提示词。')
 
     persona_raw = repo.get_setting(f"host_persona_{int(context['host_id'])}_{mode.lower()}", '')
     try:
@@ -183,7 +178,7 @@ def generate_replacement_prompts(video_id: int, replacement_image: str, work_dat
         'image_rule': str(context.get('special_requirements') or ''),
         'video_seq': int(context['video_seq']),
         'performance_mode': mode,
-        'template_snapshot': template,
+        'template_snapshot': '',
         'segments': [
             {
                 'segment_id': int(seg['segment_id']),
@@ -195,7 +190,7 @@ def generate_replacement_prompts(video_id: int, replacement_image: str, work_dat
         ],
     }
     core = repo.get_setting('core_prompt', DEFAULT_CORE_PROMPT) or DEFAULT_CORE_PROMPT
-    effective_core = str(core).strip() + '\n\n【当前表演模式基础模板】\n' + template
+    effective_core = str(core).strip()
     model = repo.get_setting('openai_model', 'gpt-5.6-luna')
     image_detail = repo.get_setting('image_detail', 'low') or 'low'
     result = openai_service.generate_prompts_for_image(
@@ -248,7 +243,7 @@ def _same_identity(current: dict, expected: dict) -> bool:
     return now_segments == old_segments
 
 
-def commit_replacement(generated: dict, final_prompts: dict[int, str] | None = None, *, target_generation_mode=None, mode_touched=False) -> dict:
+def commit_replacement(generated: dict, final_prompts: dict[int, str] | None = None, *, target_generation_mode=None, mode_touched=False, target_video_model=None, video_model_touched=False) -> dict:
     """Replace source image through the existing REWORK chain.
 
     GPT regeneration is optional. Active/late old revisions are superseded by clearing their
@@ -296,6 +291,7 @@ def commit_replacement(generated: dict, final_prompts: dict[int, str] | None = N
     if cost_parts: cost_parts[-1]=total_cost-sum(cost_parts[:-1])
     model=str(generated.get('model') or repo.get_setting('openai_model','gpt-5.6-luna'))
     normalized_mode=repo.normalize_generation_mode(target_generation_mode) if mode_touched else None
+    normalized_vmodel=repo.normalize_segment_video_model(target_video_model) if video_model_touched else None
 
     try:
         with database.connect() as con:
@@ -307,7 +303,7 @@ def commit_replacement(generated: dict, final_prompts: dict[int, str] | None = N
             actual_day=work_dates.recipient_work_date(con,int(db_video['recipient_id']))
             if actual_day!=scope_day: raise ValueError(f'提交前检测到任务日期已变为 {actual_day}，当前工作日期为 {scope_day}，已阻止跨日期写入。')
             latest_segments=con.execute("""SELECT id segment_id,seg_seq,foreign_text,prompt,ai_original_prompt,model,
-                COALESCE(generation_mode,'FRAME') generation_mode,COALESCE(flow_status,'待生成') flow_status,
+                COALESCE(generation_mode,'FRAME') generation_mode,COALESCE(video_model,'') video_model,COALESCE(flow_status,'待生成') flow_status,
                 COALESCE(generation_command,'') generation_command,COALESCE(flow_output_path,'') flow_output_path
                 FROM flow_segments WHERE video_id=? ORDER BY seg_seq,id""",(video_id,)).fetchall()
             verify={'video_id':int(db_video['video_id']),'work_date':scope_day,'host_id':int(db_video['host_id']),'recipient_id':int(db_video['recipient_id']),
@@ -325,17 +321,24 @@ def commit_replacement(generated: dict, final_prompts: dict[int, str] | None = N
             con.execute("UPDATE videos SET image_path=?,asset_status='已准备',edit_status='等待片段' WHERE id=?",(str(new_path),video_id))
             for index,seg in enumerate(latest_segments):
                 sid=int(seg['segment_id']); mode=normalized_mode or repo.normalize_generation_mode(seg['generation_mode'])
+                vmodel=normalized_vmodel if video_model_touched else repo.normalize_segment_video_model(seg['video_model'])
                 if used_gpt:
                     original_prompt=generated_ai_prompts.get(sid) or generated_prompts.get(sid) or prompt_map[sid]
-                    con.execute("""UPDATE flow_segments SET ai_original_prompt=?,prompt=?,status='已生成',model=?,input_tokens=?,cached_tokens=?,output_tokens=?,cost_usd=?,generation_mode=?,
+                    con.execute("""UPDATE flow_segments SET ai_original_prompt=?,prompt=?,status='已生成',model=?,input_tokens=?,cached_tokens=?,output_tokens=?,cost_usd=?,generation_mode=?,video_model=?,
                         prompt_review_status='已提交',prompt_submitted_at=CURRENT_TIMESTAMP,generation_command='',flow_status='待生成',flow_output_path='',flow_output_url='',flow_error='',flow_channel_key='R1',
                         flow_retry_count=COALESCE(flow_retry_count,0)+1,flow_submitted_at='',flow_completed_at='',qc_status='退回',qc_note='替换图片',qc_reject_reason='替换图片',qc_decided_at=CURRENT_TIMESTAMP WHERE id=?""",
-                        (original_prompt,prompt_map[sid],model,input_parts[index],cache_parts[index],output_parts[index],cost_parts[index],mode,sid))
+                        (original_prompt,prompt_map[sid],model,input_parts[index],cache_parts[index],output_parts[index],cost_parts[index],mode,vmodel,sid))
                 else:
-                    con.execute("""UPDATE flow_segments SET prompt=?,generation_mode=?,prompt_review_status='已提交',prompt_submitted_at=CURRENT_TIMESTAMP,
+                    con.execute("""UPDATE flow_segments SET prompt=?,generation_mode=?,video_model=?,prompt_review_status='已提交',prompt_submitted_at=CURRENT_TIMESTAMP,
                         generation_command='',flow_status='待生成',flow_output_path='',flow_output_url='',flow_error='',flow_channel_key='R1',
                         flow_retry_count=COALESCE(flow_retry_count,0)+1,flow_submitted_at='',flow_completed_at='',qc_status='退回',qc_note='替换图片',qc_reject_reason='替换图片',qc_decided_at=CURRENT_TIMESTAMP WHERE id=?""",
-                        (prompt_map[sid],mode,sid))
+                        (prompt_map[sid],mode,vmodel,sid))
+                if vmodel=='flow_omni':
+                    con.execute("UPDATE flow_segments SET flow_duration_seconds=8 WHERE id=?",(sid,))
+                    con.execute("""INSERT INTO flow_duration_choices(segment_id,dialogue,force_submit,duration,locked)
+                        VALUES(?,?,1,8,1)
+                        ON CONFLICT(segment_id) DO UPDATE SET dialogue=excluded.dialogue,force_submit=1,duration=8,locked=1""",
+                        (sid,str(seg['foreign_text'] or '')))
                 con.execute("INSERT OR REPLACE INTO flow_redo(segment_id,created_at) VALUES(?,CURRENT_TIMESTAMP)",(sid,))
                 con.execute("DELETE FROM flow_recovery WHERE segment_id=?",(sid,))
                 con.execute("INSERT INTO prompt_submission_history(segment_id,prompt_snapshot) VALUES(?,?)",(sid,prompt_map[sid]))

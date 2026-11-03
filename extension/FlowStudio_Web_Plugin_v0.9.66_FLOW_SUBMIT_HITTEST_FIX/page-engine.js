@@ -183,6 +183,13 @@
   }
   const modes = ['VIDEO_EXTEND','VIDEO_FRAMES','VIDEO_REFERENCES','IMAGE','IMAGE_EDIT'];
   const models = ['abra','veo_3_1_lite','veo_3_1_fast','veo_3_1_quality','veo_3_1_lite_low_priority'];
+  function normalizeVideoModel(value, fallback='veo_3_1_lite_low_priority') {
+    const raw = String(value ?? '').trim();
+    if (!raw) return fallback;
+    const lower = raw.toLowerCase();
+    if (['abra','flow_omni','omni','omini','gemini_omni'].includes(lower)) return 'abra';
+    return raw;
+  }
   function aspectValue(value) {
     const text=String(value??'9:16').trim().toUpperCase().replace(/\s/g,'').replace('：',':');
     if (['9:16','PORTRAIT','VERTICAL','竖版','竖屏','VIDEO_ASPECT_RATIO_PORTRAIT'].includes(text)) return 'PORTRAIT';
@@ -203,25 +210,26 @@
     } while (Date.now()<until);
     let normalized;try { normalized=actual==null?null:aspectValue(actual); } catch (_) {}
     if (normalized!==expected) throw new Error('FLOW_ASPECT_NOT_CONFIRMED:expected='+expected+';actual='+String(actual));
-    const model=detail.model || 'veo_3_1_lite_low_priority';
+    const model=normalizeVideoModel(detail.model, 'veo_3_1_lite_low_priority');
     if (signal(service,v=>models.includes(v))()!==model) throw new Error('FLOW_MODEL_NOT_CONFIRMED');
     const materialMode=(detail.mode||'VIDEO_FRAMES')==='VIDEO_REFERENCES';
-    const effectiveDuration=materialMode?8:Number(detail.duration||8);
+    const fixed8s=materialMode || model==='abra';
+    const effectiveDuration=fixed8s?8:Number(detail.duration||8);
     // MATERIAL / VIDEO_REFERENCES is fixed by Flow at 8s. Flow may keep the last
     // FRAME duration in its hidden signal even though MATERIAL exposes no duration picker.
     // Force the hidden duration signal to 8 and verify it after asset selection; never use
     // the FRAME duration picker in MATERIAL mode.
     const durationSignal=constructorSignal(service,/this\.(\w+)=[^;]+8\);/,'duration');
-    if (materialMode && Number(durationSignal())!==8) durationSignal.set(8);
+    if (fixed8s && Number(durationSignal())!==8) durationSignal.set(8);
     if (Number(durationSignal())!==effectiveDuration) throw new Error('FLOW_DURATION_NOT_CONFIRMED:expected='+effectiveDuration+';actual='+String(durationSignal()));
     // 选择参考图后 Flow 可能把“每次生成数量”重置为界面默认值（如 x2）；提交前再强制为 1，避免一次提交生成两个视频。
     try{const _o=constructorSignal(service,/this\.(\w+)=[^;]+1\);/,'outputs');if(Number(_o())!==1)_o.set(1);}catch(_){}
-    return {aspect_ratio:expected,model,duration:effectiveDuration,duration_policy:materialMode?'FLOW_FIXED_8S':'SELECTABLE'};
+    return {aspect_ratio:expected,model,duration:effectiveDuration,duration_policy:fixed8s?'FLOW_FIXED_8S':'SELECTABLE'};
   }
   function configure(service,detail) {
     const mode = detail.mode || 'VIDEO_FRAMES';
     if (!['VIDEO_REFERENCES','VIDEO_FRAMES'].includes(mode)) throw new Error('UNSUPPORTED_MODE:'+mode);
-    const model = detail.model || 'veo_3_1_lite_low_priority';
+    const model = normalizeVideoModel(detail.model, 'veo_3_1_lite_low_priority');
     if (!models.includes(model)) throw new Error('UNSUPPORTED_MODEL:'+model);
     signal(service,v => modes.includes(v)).set(mode);
     if (typeof service.setAspectRatio !== 'function') throw new Error('FLOW_ASPECT_METHOD_NOT_FOUND');
@@ -232,7 +240,7 @@
     // duration internally. Set the same hidden duration signal to 8 before attaching the
     // reference asset. FRAME behavior is unchanged and still uses the requested 4/6/8s.
     const durationSignal=constructorSignal(service,/this\.(\w+)=[^;]+8\);/,'duration');
-    durationSignal.set(mode==='VIDEO_REFERENCES' ? 8 : Number(detail.duration || 8));
+    durationSignal.set((mode==='VIDEO_REFERENCES' || model==='abra') ? 8 : Number(detail.duration || 8));
   }
   function stateSnapshot(service) {
     const result=new Map();
@@ -619,13 +627,184 @@
     return true;
   }
   const videoResults=new Map();
+  const resolvedVideoUrls=new Map();
+  const inFlightVideoResolves=new Map();
+  let cachedFlowHelpers=null;
+  function getFlowHelpers(instance) {
+    const ns=window[exportName]||{};
+    let queryClient=null,lc=null,mediaService=null,ffMethod=null;
+    const candidates=[];
+    if(instance&&typeof instance==='object'){
+      for(const v of Object.values(instance)){
+        if(v&&typeof v==='object'){
+          candidates.push(v);
+          for(const sub of Object.values(v))if(sub&&typeof sub==='object')candidates.push(sub);
+        }
+      }
+    }
+    for(const obj of candidates){
+      if(!queryClient && obj.queryCache && typeof obj.queryCache.findAll==='function')queryClient=obj;
+      if(!queryClient && obj.Bb?.queryCache && typeof obj.Bb.queryCache.findAll==='function')queryClient=obj.Bb;
+      if(!lc && obj.Bb?.queryCache && obj.na && typeof obj.na.fetch==='function'){
+        lc=obj;
+      }
+      if(!mediaService){
+        const proto=Object.getPrototypeOf(obj);
+        if(proto && proto!==Object.prototype){
+          for(const k of Reflect.ownKeys(proto)){
+            const fn=Object.getOwnPropertyDescriptor(proto,k)?.value;
+            if(typeof fn==='function'&&k!=='constructor'&&source(fn).includes('queryKey:["MEDIA"')){
+              mediaService=obj;ffMethod=fn;break;
+            }
+          }
+        }
+      }
+    }
+    if(!cachedFlowHelpers){
+      let d6aFn=typeof ns.D6a==='function'?ns.D6a:null;
+      let grFn=typeof ns.GR==='function'?ns.GR:null;
+      let pxFn=typeof ns.px==='function'?ns.px:null;
+      for(const fn of Object.values(ns)){
+        if(typeof fn!=='function')continue;
+        const s=source(fn);
+        if(!d6aFn && s.includes('tf`') && s.includes('qf`'))d6aFn=fn;
+        if(!grFn && s.includes('options:"d"'))grFn=fn;
+      }
+      cachedFlowHelpers={d6aFn,grFn,pxFn};
+    }
+    return {ns,queryClient,lc,mediaService,ffMethod,...cachedFlowHelpers};
+  }
+  function formatFlowDownloadUrl(rawUrl,lc,grFn) {
+    if(!rawUrl||typeof rawUrl!=='string')return null;
+    const trimmed=rawUrl.trim();
+    if(!trimmed.startsWith('https://'))return null;
+    if(trimmed.includes('storage.googleapis.com')||trimmed.includes('/video/'))return FlowStudioResults.videoURL(trimmed);
+    try{
+      const u=new URL(trimmed);
+      if(u.hostname.endsWith('googleusercontent.com')||u.hostname==='flow.google.com'){
+        if(/=(?:s\d+|w\d+|h\d+)/i.test(u.pathname))return null;
+        u.hostname='flow.google.com';
+        if(/=(?:mm,[^/?#]+|d)$/i.test(u.pathname)){
+          u.pathname=u.pathname.replace(/=(?:mm,[^/?#]+|d)$/i,'=mm,22,15');
+        }else if(!u.pathname.includes('=')){
+          u.pathname=u.pathname+'=mm,22,15';
+        }
+        if(typeof location!=='undefined'){
+          const m=location.pathname.match(/\/u\/(\d+)/);
+          const au=(new URLSearchParams(location.search)).get('authuser')||(m?m[1]:'');
+          if(au&&!u.searchParams.has('authuser'))u.searchParams.set('authuser',au);
+        }
+        return FlowStudioResults.videoURL(u.toString());
+      }
+    }catch(_){}
+    return FlowStudioResults.videoURL(trimmed);
+  }
+  function extractFirstHttpsUrl(val,depth=0,seen=new WeakSet()) {
+    if(depth>14||val==null)return null;
+    if(typeof val==='string'){
+      if(!val.startsWith('https://'))return null;
+      return formatFlowDownloadUrl(val,null,null);
+    }
+    if(typeof val!=='object'||seen.has(val))return null;
+    seen.add(val);
+    if(typeof val.toJSON==='function'){
+      try{const j=val.toJSON();if(j&&j!==val){const hit=extractFirstHttpsUrl(j,depth+1,seen);if(hit)return hit;}}catch(_){}
+    }
+    const list=Array.isArray(val)?val:(val instanceof Map?[...val.values()]:Object.values(val));
+    for(const item of list){
+      const hit=extractFirstHttpsUrl(item,depth+1,seen);
+      if(hit)return hit;
+    }
+    return null;
+  }
+  async function resolveFlowVideoUrl(instance,fileId,rawQb,forceRefresh=false) {
+    if(!fileId||typeof fileId!=='string')return null;
+    if(forceRefresh){
+      resolvedVideoUrls.delete(fileId);
+      inFlightVideoResolves.delete(fileId);
+    }else{
+      const cached=resolvedVideoUrls.get(fileId);
+      if(cached)return cached;
+    }
+    const helpers=getFlowHelpers(instance);
+    const save=url=>{
+      const formatted=formatFlowDownloadUrl(url,helpers.lc,helpers.grFn);
+      if(formatted){
+        resolvedVideoUrls.set(fileId,formatted);
+        while(resolvedVideoUrls.size>1000)resolvedVideoUrls.delete(resolvedVideoUrls.keys().next().value);
+      }
+      return formatted;
+    };
+    const readCachedSources=()=>{
+      if(rawQb&&typeof rawQb==='string'&&rawQb.startsWith('https://')){
+        const hit=save(rawQb);if(hit)return hit;
+      }
+      try{
+        const all=helpers.queryClient?.queryCache?.findAll?.()||[];
+        for(const q of all){
+          const k=q?.queryKey;
+          const data=q?.state?.data;
+          if(!data)continue;
+          if(Array.isArray(k)&&k[1]===fileId){
+            if(k[0]==='VIDEO_URLS'&&data.cj){
+              const hit=save(data.cj);if(hit)return hit;
+            }
+            if(k[0]==='MEDIA'){
+              const hit=save(extractFirstHttpsUrl(data));if(hit)return hit;
+            }
+          }
+          if(data.ni instanceof Map && data.ni.has(fileId)){
+            const proto=data.ni.get(fileId);
+            const hit=save(extractFirstHttpsUrl(proto));
+            if(hit)return hit;
+          }
+        }
+      }catch(_){}
+      return null;
+    };
+    if(!forceRefresh){
+      const fromCache=readCachedSources();
+      if(fromCache)return fromCache;
+    }
+    if(inFlightVideoResolves.has(fileId))return inFlightVideoResolves.get(fileId);
+    const task=(async()=>{
+      try{
+        if(typeof helpers.d6aFn==='function'&&helpers.lc){
+          try{
+            const ctrl=typeof AbortController!=='undefined'?new AbortController():{signal:undefined};
+            const res=await helpers.d6aFn(helpers.lc,{mediaId:fileId,fe:undefined,Ud:false,signal:ctrl.signal});
+            if(res&&res.cj){
+              const hit=save(res.cj);if(hit)return hit;
+            }
+          }catch(_){}
+        }
+        if(helpers.mediaService&&typeof helpers.ffMethod==='function'){
+          try{
+            const proto=await helpers.ffMethod.call(helpers.mediaService,fileId);
+            const hit=save(extractFirstHttpsUrl(proto));
+            if(hit)return hit;
+          }catch(_){}
+        }
+        if(forceRefresh){
+          const fallback=readCachedSources();
+          if(fallback)return fallback;
+        }
+      }finally{
+        inFlightVideoResolves.delete(fileId);
+      }
+      return null;
+    })();
+    inFlightVideoResolves.set(fileId,task);
+    return task;
+  }
   function recordVideoResults(body) {
     for(const row of FlowStudioResults.records(body)) {
       const previous=videoResults.get(row.id);
+      if(previous?.url && !row.url)row.url=previous.url;
       videoResults.delete(row.id);
       videoResults.set(row.id,row);
       while(!videoResults._scanning && videoResults.size>2000)videoResults.delete(videoResults.keys().next().value);
-      if(row.status==='ready' && (!previous || previous.status!=='ready' || previous.url!==row.url || previous.media_id!==row.media_id)) {
+      if(row.status==='ready' && row.url && (!previous || previous.status!=='ready' || previous.url!==row.url || previous.media_id!==row.media_id)) {
         const EventCtor=window.CustomEvent||(typeof CustomEvent==='function'?CustomEvent:null);
         if(EventCtor)window.dispatchEvent(new EventCtor('FLOW_STUDIO_VIDEO_READY',{detail:{row}}));
       } else if(row.status==='failed' && previous?.status!=='failed') {
@@ -648,17 +827,46 @@
     });
     resourceObserver.observe({type:'resource',buffered:true});
   } catch (_) {}
-  function completedVideos(ids) {
+  async function completedVideos(ids,refreshIds=[]) {
     videoResults._scanning=true;
+    const refreshSet=new Set(Array.isArray(refreshIds)?refreshIds:[]);
+    for(const rid of refreshSet){
+      resolvedVideoUrls.delete(rid);
+      const prev=videoResults.get(rid);
+      if(prev)videoResults.set(rid,{...prev,url:null});
+    }
     try{
-    let catalog=[],error='';
-    try { catalog=mediaList(context().instance);recordVideoResults(catalog); } catch (e) {error=String(e.message||e);}
-    recordLoadedVideoResources();
+    let catalog=[],error='',instance=null;
+    try { instance=context().instance;catalog=mediaList(instance);recordVideoResults(catalog); } catch (e) {error=String(e.message||e);}
+    if(!refreshSet.size)recordLoadedVideoResources();
     const linkDiagnostics=[];
     for(const item of catalog){
       if(!(ids||[]).includes(item.id))continue;
       const link=FlowStudioResults.catalogLinks(item,videoResults);
-      for(const row of link.rows)videoResults.set(row.id,row);
+      for(const row of link.rows){
+        if(row.status==='ready'){
+          const fileId=row.media_id||row.id;
+          const forceRefresh=refreshSet.has(item.id)||refreshSet.has(row.id)||(!!fileId&&refreshSet.has(fileId));
+          if(forceRefresh){
+            resolvedVideoUrls.delete(fileId);
+            resolvedVideoUrls.delete(row.id);
+          }
+          let rawQb=forceRefresh?null:(row.url||videoResults.get(fileId)?.url||videoResults.get(row.id)?.url||null);
+          if(!rawQb){
+            for(const v of Object.values(item)){
+              if(v&&typeof v==='object'&&v.id===fileId&&typeof v.Qb==='string')rawQb=v.Qb;
+            }
+          }
+          if(forceRefresh||!rawQb||!rawQb.includes('/video/')){
+            const resolved=await resolveFlowVideoUrl(instance,fileId,rawQb,forceRefresh);
+            if(resolved)row.url=resolved;
+          }
+          if(row.url&&fileId){
+            videoResults.set(fileId,{...row,id:fileId,media_id:fileId});
+          }
+        }
+        videoResults.set(row.id,row);
+      }
       linkDiagnostics.push({id:item.id,reason:link.reason,paths:link.paths,fields:FlowStudioResults.catalogShape(item)});
     }
     // Already-rendered videos remain discoverable after page refresh. Match exact media IDs only.
@@ -751,7 +959,7 @@
   }
   function validateDuration(detail) {
     // The generation center submits approved text without a second speech-length gate.
-    if ((detail.mode||'VIDEO_FRAMES')==='VIDEO_REFERENCES') {
+    if ((detail.mode||'VIDEO_FRAMES')==='VIDEO_REFERENCES' || normalizeVideoModel(detail.model)==='abra') {
       detail.duration=8;
       return;
     }
@@ -923,9 +1131,12 @@
     validateDuration(detail);
     if (!String(detail.prompt || '').trim()) throw new Error('EMPTY_PROMPT');
     const catalog=mediaList(instance);
-    const matches = catalog.filter(x => x.type === 'IMAGE' && (detail.image_id ? x.id === detail.image_id && normal(x.displayName) === normal(detail.image_name) : normal(x.displayName) === normal(detail.image_name)));
-    if (matches.length !== 1) throw new Error(matches.length ? 'AMBIGUOUS_IMAGE_NAME：同名图片超过一张，请清理重复素材' : 'IMAGE_NOT_UPLOADED:'+detail.image_name);
-    let item = matches[0]; const select = selectMethod(instance);
+    const nameMatches = catalog.filter(x => x.type === 'IMAGE' && normal(x.displayName) === normal(detail.image_name));
+    const exactMatches = detail.image_id ? nameMatches.filter(x => x.id === detail.image_id) : nameMatches;
+    const pool = exactMatches.length ? exactMatches : nameMatches;
+    if (!pool.length) throw new Error('IMAGE_NOT_UPLOADED:'+detail.image_name);
+    let item = pool.find(x => { const f=flowAssetFlags(x); return !f.loading && !f.error; }) || pool[0];
+    const select = selectMethod(instance);
     // All generation modes must consume a finished Flow IMAGE asset. A catalog placeholder
     // created immediately after drag/drop is not permission to start the first submission.
     if(typeof waitExistingFlowImageAssetReady==='function')item=await waitExistingFlowImageAssetReady(instance,item,20000);
@@ -1095,7 +1306,10 @@
         return reply({ok:true,ids,reason,diag});
       }catch(e){return reply({ok:false,error:String(e.message||e)});}
     }
-    if(d.action==='scan_video_results')return reply({ok:true,...completedVideos(d.ids)});
+    if(d.action==='scan_video_results'){
+      try{return reply({ok:true,...await completedVideos(d.ids,d.refresh_ids)});}
+      catch(e){return reply({ok:false,error:String(e.message||e)});}
+    }
     if (d.action === 'scan_media') {
       try { reply({ok:true,media:scan()}); } catch(e) { reply({ok:false,error:String(e.message || e)}); }
       return;

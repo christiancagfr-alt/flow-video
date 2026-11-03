@@ -3,7 +3,7 @@ from PySide6.QtCore import Qt,QSize
 from PySide6.QtGui import QPixmap,QImageReader
 from functools import lru_cache
 from pathlib import Path
-from PySide6.QtWidgets import QFrame,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton
+from PySide6.QtWidgets import QFrame,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,QSizePolicy
 
 
 @lru_cache(maxsize=96)
@@ -45,10 +45,13 @@ def render(page):
     page.history_view_btn.setText(f'历史记录 {passed}');page._sync_qc_view_buttons()
     if not hasattr(page,'_qc_host_cards'):
         page._qc_host_cards={};page._qc_recipient_cards={}
-        page._qc_panel=QFrame(objectName='taskGroup');box=QVBoxLayout(page._qc_panel)
-        page._qc_panel_title=QLabel(objectName='cardTitle');header=QHBoxLayout();header.addWidget(page._qc_panel_title);header.addStretch(1);page._qc_legend=QLabel(objectName='muted');header.addWidget(page._qc_legend);box.addLayout(header)
+        page._qc_panel=QFrame(objectName='taskGroup');page._qc_panel.setSizePolicy(QSizePolicy.Preferred,QSizePolicy.Fixed);box=QVBoxLayout(page._qc_panel);box.setContentsMargins(12,10,12,10);box.setSpacing(8)
+        page._qc_panel_title=QLabel(objectName='cardTitle');page._qc_panel_title.setProperty('qcBottomTitle','true')
+        header=QHBoxLayout();header.addWidget(page._qc_panel_title);header.addStretch(1)
+        page._qc_legend=QLabel(objectName='qcLegendChip')
+        header.addWidget(page._qc_legend);box.addLayout(header)
         page._qc_grid=QGridLayout();page._qc_grid.setAlignment(Qt.AlignLeft|Qt.AlignTop);page._qc_grid.setHorizontalSpacing(6);page._qc_grid.setVerticalSpacing(6);box.addLayout(page._qc_grid)
-        page._qc_empty=QLabel('当前没有可显示的质检视频');page._qc_empty.setAlignment(Qt.AlignCenter)
+        page._qc_empty=QLabel('🎉 当前没有可显示的待质检视频',objectName='qcEmptyLabel');page._qc_empty.setAlignment(Qt.AlignCenter)
     for hid in list(page._qc_host_cards):
         if hid not in hosts:
             frame=page._qc_host_cards.pop(hid)[0];page.task_cards.removeWidget(frame);frame.deleteLater();page._qc_host_count_labels.pop(hid,None)
@@ -59,20 +62,26 @@ def render(page):
     for hid,rows in hosts.items():
         row=rows[0]
         if hid not in page._qc_host_cards:
-            frame=QFrame(objectName='taskRow');layout=QHBoxLayout(frame)
-            thumb=QLabel(objectName='thumb');thumb.setFixedSize(44,44);thumb.mousePressEvent=lambda e,h=hid:page._select_qc_host(h,True);layout.addWidget(thumb)
-            name=QPushButton();name.clicked.connect(lambda _,h=hid:page._select_qc_host(h,True));layout.addWidget(name,1)
-            count=QLabel();layout.addWidget(count);page._qc_host_cards[hid]=(frame,name,count,thumb)
+            frame=QFrame(objectName='taskRow');frame.setMinimumHeight(50);frame.setCursor(Qt.PointingHandCursor);layout=QHBoxLayout(frame);layout.setContentsMargins(8,6,10,6);layout.setSpacing(8)
+            frame.mousePressEvent=lambda e,h=hid:page._select_qc_host(h,True)
+            thumb=QLabel(objectName='thumb');thumb.setFixedSize(38,38);thumb.setAlignment(Qt.AlignCenter);thumb.setCursor(Qt.PointingHandCursor);thumb.mousePressEvent=lambda e,h=hid:page._select_qc_host(h,True);layout.addWidget(thumb)
+            name=QPushButton();name.setCursor(Qt.PointingHandCursor);name.clicked.connect(lambda _,h=hid:page._select_qc_host(h,True));layout.addWidget(name,1)
+            count=QLabel(objectName='qcHostCount');layout.addWidget(count);page._qc_host_cards[hid]=(frame,name,count,thumb)
         frame,name,count,thumb=page._qc_host_cards[hid]
         image=getattr(page,'_qc_host_images',{}).get(hid)
         if image and getattr(thumb,'_revision',None)!=image[0]:thumb.setPixmap(QPixmap.fromImage(image[1]));thumb._revision=image[0]
         elif not image and getattr(thumb,'_revision',None) is not None:thumb.clear();thumb._revision=None
         label=str(row.get('host_name') or '未命名主播')
         if name.text()!=label:name.setText(label)
-        object_name='hostSelectActive' if hid==page._selected_qc_host_id else 'hostSelect'
-        if name.objectName()!=object_name:name.setObjectName(object_name);name.style().unpolish(name);name.style().polish(name)
-        style='QFrame#taskRow{border:2px solid #2F6FED;}' if hid==page._selected_qc_host_id else ''
-        if frame.styleSheet()!=style:frame.setStyleSheet(style)
+        active_host=(hid==page._selected_qc_host_id)
+        object_name='hostSelectActive' if active_host else 'hostSelect'
+        if name.objectName()!=object_name:
+            name.setObjectName(object_name)
+            name.style().unpolish(name);name.style().polish(name)
+        active_prop='true' if active_host else 'false'
+        if frame.property('active')!=active_prop:
+            frame.setProperty('active',active_prop)
+            frame.style().unpolish(frame);frame.style().polish(frame)
         counts=page._qc_host_pass_counts.get(hid,{'passed':0,'total':len(rows)})
         count.setText(f"{counts['passed']}/{counts['total']}");page._qc_host_count_labels[hid]=count;frames.append(frame)
     selected=sorted(hosts.get(page._selected_qc_host_id,[]),key=lambda r:int(r.get('video_seq') or 0))
@@ -105,8 +114,8 @@ def render(page):
     groups=[]
     for rid,hids in recipients.items():
         if rid not in page._qc_recipient_cards:
-            group=QFrame(objectName='taskGroup');box=QVBoxLayout(group);title=QLabel(objectName='cardTitle');box.addWidget(title);body=QVBoxLayout();box.addLayout(body);page._qc_recipient_cards[rid]=(group,title,body)
-        group,title,body=page._qc_recipient_cards[rid];title.setText(str(hosts[hids[0]][0].get('recipient_name') or '未命名接收人'))
+            group=QFrame(objectName='taskGroup');group.setSizePolicy(QSizePolicy.Preferred,QSizePolicy.Fixed);box=QVBoxLayout(group);box.setContentsMargins(10,8,10,10);box.setSpacing(6);title=QLabel(objectName='cardTitle');title.setProperty('qcRecipient','true');box.addWidget(title);body=QVBoxLayout();body.setSpacing(6);box.addLayout(body);page._qc_recipient_cards[rid]=(group,title,body)
+        group,title,body=page._qc_recipient_cards[rid];title.setText('👤 '+str(hosts[hids[0]][0].get('recipient_name') or '未命名接收人'))
         reorder(body,[page._qc_host_cards[hid][0] for hid in hids]);groups.append(group)
     reorder(page.task_cards,groups+[page._qc_panel,page._qc_empty])
     page.summary.setText(f'{len(hosts)} 主播 · {sum(map(len,hosts.values()))} 视频')

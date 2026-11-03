@@ -542,6 +542,29 @@ def active_action_presets(data, library=None, mode='TALKING'):
     return out
 
 
+def catalog_allows_hand_gesture(action_catalog) -> bool:
+    """Return True only if at least one selected action preset explicitly permits hand gestures."""
+    positive_markers = (
+        "手势", "挥手", "摆手", "抬手", "指向", "比划", "展开双手",
+        "gesture", "wave", "point", "raise hand", "arm gesture", "hand movement",
+    )
+    negative_prefixes = ("禁止", "不额外增加", "不做", "避免", "不加", "无手势", "禁止任何")
+    for item in list(action_catalog or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip().lower()
+        prompt = str(item.get("prompt") or "").strip().lower()
+        if any(m in name for m in positive_markers) and not any(neg in name for neg in negative_prefixes):
+            return True
+        if any(m in prompt for m in positive_markers):
+            # Ignore clauses that only mention gesture to forbid it
+            clauses = [c.strip() for c in prompt.replace("。", "；").replace("，", "；").split("；") if c.strip()]
+            for clause in clauses:
+                if any(m in clause for m in positive_markers) and not any(neg in clause for neg in negative_prefixes):
+                    return True
+    return False
+
+
 def active_camera_strategy_prompt(data, library=None, mode='TALKING'):
     """Return the selected strategy's editable internal GPT rule."""
     mode = _mode_name(mode)

@@ -58,8 +58,10 @@ def snapshot(day):
     con=database.connect()
     try:
         con.execute('PRAGMA query_only=ON');dates=work_dates.recipient_dates(con)
-        rows=[dict(r) for r in con.execute('SELECT v.id video_id,v.edit_status,v.edit_output_path,v.upload_status,h.recipient_id,r.name recipient_name FROM videos v JOIN hosts h ON h.id=v.host_id JOIN recipients r ON r.id=h.recipient_id')]
-        for r in rows:r['work_date']=dates[r['recipient_id']]
+        all_rows=[dict(r) for r in con.execute('SELECT v.id video_id,v.status,v.edit_status,v.edit_output_path,v.upload_status,h.recipient_id,r.name recipient_name FROM videos v JOIN hosts h ON h.id=v.host_id JOIN recipients r ON r.id=h.recipient_id')]
+        for r in all_rows:r['work_date']=dates[r['recipient_id']]
+        known={r['video_id'] for r in all_rows}
+        rows=[r for r in all_rows if str(r.get('edit_status') or '')!='已放弃' and str(r.get('status') or '')!='已放弃']
         sources={(r['source_task_id'],str(r['source_row'])):r['video_id'] for r in con.execute('SELECT source_task_id,source_row,video_id FROM source_tasks')}
     finally:con.close()
     # Include source tasks still waiting for materials/promotion, without counting linked videos twice.
@@ -70,7 +72,6 @@ def snapshot(day):
             c.row_factory=sqlite3.Row
             tables={r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if {'tasks','production_links'}<=tables:
-                known={r['video_id'] for r in rows}
                 for task in c.execute('SELECT t.*,p.video_id FROM tasks t LEFT JOIN production_links p ON p.task_id=t.id WHERE t.sheet_row>0'):
                     source=intake._source_task_key(task['spreadsheet_id'],task['gid'],task['content_key'])
                     linked=task['video_id'] or sources.get((source,str(task['sheet_row'])))

@@ -59,8 +59,13 @@ _DEFAULT_PRESET_TEMPLATE = {
 
 # ── 表初始化（由 database.init_db 调用） ────────────────────
 
+_ENSURED_DB_KEYS: set[str] = set()
+
 def ensure_tables(con):
-    """在已有连接上创建 B-roll 相关表（幂等）。"""
+    """在已有连接上创建 B-roll 相关表（幂等，每个数据库路径仅执行一次 DDL）。"""
+    db_key = getattr(con, "_db_key", "")
+    if db_key and db_key in _ENSURED_DB_KEYS:
+        return
     con.executescript("""
         CREATE TABLE IF NOT EXISTS broll_presets (
             id TEXT PRIMARY KEY,
@@ -103,6 +108,8 @@ def ensure_tables(con):
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    if db_key:
+        _ENSURED_DB_KEYS.add(db_key)
 
 
 # ── 制作档位定义 ─────────────────────────────────────────────
@@ -461,3 +468,27 @@ def get_video_plan(video_id: str):
                 "config_snapshot": json.loads(row["config_snapshot"] or "{}")
             }
         return None
+
+
+def get_video_plans_batch(video_ids) -> dict[str, dict | None]:
+    keys = sorted({str(v) for v in (video_ids or ()) if v is not None and str(v) != ""})
+    if not keys:
+        return {}
+    out: dict[str, dict | None] = {k: None for k in keys}
+    placeholders = ",".join("?" for _ in keys)
+    with connect() as con:
+        ensure_tables(con)
+        rows = con.execute(
+            f"SELECT * FROM video_enhancement_plans WHERE video_id IN ({placeholders})",
+            keys,
+        ).fetchall()
+    for r in rows:
+        d = dict(r)
+        k = str(d.get("video_id") or "")
+        out[k] = {
+            "video_plan": json.loads(d.get("video_plan") or "[]"),
+            "image_plan": json.loads(d.get("image_plan") or "[]"),
+            "broll_plan": json.loads(d.get("broll_plan") or "[]"),
+            "config_snapshot": json.loads(d.get("config_snapshot") or "{}"),
+        }
+    return out

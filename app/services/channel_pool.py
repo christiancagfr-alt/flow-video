@@ -1,11 +1,12 @@
 from __future__ import annotations
+from collections import OrderedDict
 from pathlib import Path
-import hashlib, re, time, random, unicodedata
+import hashlib, os, re, time, random, unicodedata
 from app.core import repository as repo
 from app.services import runtime_log
 
 VIDEO_EXTS={'.mp4','.mov','.m4v','.webm'}
-_UNMATCHED_LOGGED=set()
+_UNMATCHED_LOGGED: "OrderedDict[str, None]" = OrderedDict()
 
 
 def safe_name(value,limit=70):
@@ -14,13 +15,26 @@ def safe_name(value,limit=70):
     return text[:limit] or '未命名'
 
 
+DEFAULT_CHANNEL_DOWNLOAD_ROOT = str(Path.home() / 'Downloads' / 'FlowStudio_Channels')
+
+
+def resolve_download_root() -> str:
+    """Follow Settings -> 成品片段根目录 (segment_output_root) first, then fall back cleanly."""
+    for key in ('segment_output_root', 'flow_download_root', 'flow_channel_download_root'):
+        val = repo.get_setting(key, '').strip()
+        if val:
+            return val
+    return DEFAULT_CHANNEL_DOWNLOAD_ROOT
+
+
 def ensure_defaults():
-    # One-time migration: old V0.13.1 default was 4 normal + 1 fast.
-    # V0.13.2 default is 7 normal + 1 fast = 8 channels, all in Browser A.
+    # One-time migration: old V0.13.1 default was 4 normal.
+    # V0.13.2+ default is 7 normal channels in Browser A (no default R1 fast rework channel).
     if repo.get_setting('flow_pool_layout_v0132','')!='1':
         current=repo.channel_pool_normal_count()
         if current <= 4:
             repo.set_setting('flow_pool_normal_count','7')
+        repo.set_setting('flow_pool_fast_enabled','0')
         repo.set_setting('flow_browser_b_enabled', repo.get_setting('flow_browser_b_enabled','0') or '0')
         repo.set_setting('flow_pool_b_normal_count', repo.get_setting('flow_pool_b_normal_count','0') or '0')
         repo.set_setting('flow_pool_b_fast_enabled', repo.get_setting('flow_pool_b_fast_enabled','0') or '0')
@@ -29,13 +43,39 @@ def ensure_defaults():
         repo.set_setting('flow_pool_layout_v0132','1')
         runtime_log.log('channel_pool_migrated_v0132',normal_a=repo.channel_pool_normal_count(),browser_b=False,stagger='10-15')
 
+    if repo.get_setting('flow_pool_no_default_fast_v1','')!='1':
+        try:
+            from app.core.database import connect
+            with connect() as con:
+                fast_rows=con.execute("SELECT channel_key, browser_group, collection_url FROM flow_channel_pool WHERE role='fast'").fetchall()
+                empty_groups=set()
+                configured_groups=set()
+                for fr in fast_rows:
+                    bg=str(fr['browser_group'] or repo.channel_browser_group(fr['channel_key']) or 'A').upper()
+                    if str(fr['collection_url'] or '').strip():
+                        configured_groups.add(bg)
+                    else:
+                        empty_groups.add(bg)
+                con.execute("UPDATE flow_channel_pool SET enabled=0 WHERE role='fast' AND TRIM(COALESCE(collection_url,''))=''")
+            groups=repo.list_browser_groups(True)
+            changed_groups=False
+            for g in groups:
+                if g['id'] not in configured_groups and (g.get('fast_enabled') or int(g.get('fast_count') or 0)>0):
+                    g['fast_enabled']=False
+                    g['fast_count']=0
+                    changed_groups=True
+            if changed_groups:
+                repo.save_browser_groups(groups)
+        except Exception:
+            pass
+        repo.set_setting('flow_pool_no_default_fast_v1','1')
+
     repo.ensure_channel_pool()
-    root=repo.get_setting('flow_channel_download_root','').strip()
-    if not root:
-        root=str(Path.home()/'Downloads'/'FlowStudio_Channels')
+    root=resolve_download_root()
+    if repo.get_setting('flow_channel_download_root','').strip() != root:
         repo.set_setting('flow_channel_download_root',root)
     for ch in repo.list_channel_pool(enabled_only=True):
-        folder=Path(root)/str(ch['download_subdir'] or ch['channel_key'])
+        folder=Path(root).expanduser()/str(ch['download_subdir'] or ch['channel_key'])
         folder.mkdir(parents=True,exist_ok=True)
     return root
 
@@ -187,9 +227,10 @@ def plan(tasks, channels=None, total_channels=None):
     loads={str(c['channel_key']):repo.channel_pool_load(c['channel_key']) for c in channels}
     sort_of={str(c['channel_key']):int(c['sort_order'] or 0) for c in channels}
     out={str(c['channel_key']):[] for c in channels}
+    from app.services import host_priority
     from app.services.local_bridge import get_bridge
     bridge = get_bridge()
-    ordered=sorted(tasks,key=lambda t:(int(t['_host_priority']) if '_host_priority' in t.keys() else 0,int(t['recipient_id']),int(t['host_id']),int(t['video_seq']),int(t['seg_seq'])))
+    ordered=sorted(tasks,key=host_priority.task_sort_key)
 
     # Pre-fetch capabilities
     channel_caps = {}
@@ -212,26 +253,57 @@ def plan(tasks, channels=None, total_channels=None):
             res.append(k)
         return res
 
-    # Group by reference image, keeping the first-appearance order of the priority sort.
-    groups={}; order=[]
+    # Group by (priority_tier, host_priority, reference_image), keeping the first-appearance
+    # order of the priority sort so lower-tier videos (4th+) never jump into Tier 1 waves
+    # even when sharing the same reference image.
+    host_ratios = {int(t['host_id']): repo.get_host_aspect_ratio(int(t['host_id'])) for t in ordered if t.get('host_id')}
+    try:
+        from app.services import task_recovery
+        pref_map = task_recovery.preferred_channels(ordered)
+    except Exception:
+        pref_map = {}
+    groups={}; group_img={}; group_pref={}; order=[]
     for t in ordered:
-        key=_image_key(t) or f"__seg_{t['segment_id']}"
-        if key not in groups:groups[key]=[];order.append(key)
+        t_tier = int(t.get('_priority_tier', 1)) if hasattr(t, 'get') else (int(t['_priority_tier']) if '_priority_tier' in t.keys() else 1)
+        t_prio = int(t.get('_host_priority', 0)) if hasattr(t, 'get') else (int(t['_host_priority']) if '_host_priority' in t.keys() else 0)
+        raw_img = _image_key(t)
+        pref_ch = str(pref_map.get(int(t['segment_id'])) or '').strip()
+        key = (t_tier, t_prio, pref_ch, raw_img or f"__seg_{t['segment_id']}")
+        if key not in groups:
+            groups[key] = []
+            group_img[key] = raw_img
+            group_pref[key] = pref_ch
+            order.append(key)
         groups[key].append(t)
-    siblings=_image_sibling_state([k for k in order if not k.startswith('__seg_')])
+    siblings=_image_sibling_state([img for img in dict.fromkeys(group_img.values()) if img])
+
+    def _task_tier(item):
+        return int(item.get('_priority_tier', 1)) if hasattr(item, 'get') else (int(item['_priority_tier']) if '_priority_tier' in item.keys() else 1)
 
     def assign(key):
-        items=groups[key]; st=siblings.get(key,{'channels':{},'active':0}); n=len(items)
+        items=groups[key]; img_k=group_img[key]; pref_ch=group_pref.get(key,''); st=siblings.get(img_k,{'channels':{},'active':0})
         elig=set(eligible_for(items[0]))
         if not elig:return
-        # 1) channels already holding this image (most recent first), 2) emptiest channels.
+        group_ratio=host_ratios.get(int(items[0].get('host_id') or 0), '9:16')
+        group_tier=_task_tier(items[0])
+        # 1) explicit preferred channel from manual retry (if available), 2) channels already holding this image, 3) emptiest channels.
         aff=[k for k,_ in sorted(st['channels'].items(),key=lambda kv:-kv[1]) if k in elig]
         others=sorted([k for k in elig if k not in aff],key=lambda k:(loads[k],sort_of[k]))
         candidates = aff + others
+        if pref_ch and pref_ch in elig:
+            candidates = [pref_ch] + [k for k in candidates if k != pref_ch]
         if not candidates: return
         remaining=list(items)
         for chosen_k in candidates:
+            if out[chosen_k]:
+                existing_ratio=host_ratios.get(int(out[chosen_k][0].get('host_id') or 0), '9:16')
+                if existing_ratio != group_ratio:
+                    continue
+                if _task_tier(out[chosen_k][0]) != group_tier:
+                    continue
             capacity=max(0,WAVE_CAP-len(out[chosen_k]))
+            if capacity<=0:
+                continue
             take=remaining[:capacity]
             out[chosen_k].extend(take);loads[chosen_k]+=len(take)
             remaining=remaining[capacity:]
@@ -333,6 +405,7 @@ def scan_downloads():
             pass
     add_root(configured_root, True)
     try:
+        add_root(repo.get_setting('segment_output_root',''), True)
         add_root(repo.get_setting('flow_download_root',''), True)
     except Exception:
         pass
@@ -346,8 +419,7 @@ def scan_downloads():
     # globally unique in normal operation even if Chrome saved a file outside CHx.
     dispatches=list(repo.list_dispatches())
     channels=list(repo.list_channel_pool(enabled_only=False))
-    all_channels=list(repo.list_channel_pool(enabled_only=False))
-    channel_map={str(c['channel_key']):c for c in all_channels}
+    channel_map={str(c['channel_key']):c for c in channels}
     # Replaced segments reuse filenames; only command-bearing receipts may bind
     # their new output. A bare filename cannot identify a late old render.
     from app.core.database import connect
@@ -380,29 +452,37 @@ def scan_downloads():
 
     duplicate_re=re.compile(r' \(\d+\)(?=\.[^.]+$)')
     matched=[]; seen_paths=set()
-    def consider(p, channel_hint=''):
+    def consider_entry(entry, channel_hint=''):
+        raw_name = entry.name
+        if raw_name.endswith('.crdownload'):
+            return
+        ext = os.path.splitext(raw_name)[1].lower()
+        if ext not in VIDEO_EXTS:
+            return
+        ps = entry.path
+        if ps in seen_paths:
+            return
         try:
-            if not p.is_file() or p.suffix.lower() not in VIDEO_EXTS or p.name.endswith('.crdownload'):
+            if not entry.is_file():
                 return
-            st=p.stat()
-            if st.st_size<=0:
+            st = entry.stat()
+            if st.st_size <= 0:
                 return
         except OSError:
             return
-        ps=str(p)
-        if ps in seen_paths:
-            return
         seen_paths.add(ps)
-        name=unicodedata.normalize('NFC',p.name)
+        name=unicodedata.normalize('NFC',raw_name)
         canonical=duplicate_re.sub('',name)
         d=(exact_by_channel.get((channel_hint,name)) or exact_by_channel.get((channel_hint,canonical))
            or exact_any.get(name) or exact_any.get(canonical))
         if not d:
             token=f'{channel_hint}|{name}|{st.st_size}'
-            if token not in _UNMATCHED_LOGGED:
-                _UNMATCHED_LOGGED.add(token)
-                if len(_UNMATCHED_LOGGED)>1500:
-                    _UNMATCHED_LOGGED.clear();_UNMATCHED_LOGGED.add(token)
+            if token in _UNMATCHED_LOGGED:
+                _UNMATCHED_LOGGED.move_to_end(token)
+            else:
+                _UNMATCHED_LOGGED[token]=None
+                while len(_UNMATCHED_LOGGED)>3000:
+                    _UNMATCHED_LOGGED.popitem(last=False)
                 runtime_log.log('channel_file_unmatched',level='WARNING',channel=channel_hint,path=ps,filename=name,size=st.st_size)
             return
         # Never re-bind an already detected dispatch to the same path.
@@ -410,32 +490,34 @@ def scan_downloads():
             return
         # ...nor flip an already detected dispatch between duplicate copies of the same filename in
         # different folders (that re-ran acceptance and reloaded the UI on every scan).
-        if str(d['status'] or '')=='detected' and str(d['download_path'] or '') and Path(str(d['download_path'])).is_file():
+        if str(d['status'] or '')=='detected' and str(d['download_path'] or '') and os.path.isfile(str(d['download_path'])):
             return
         ch=channel_map.get(str(d['channel_key']))
         if ch is None:
             return
-        matched.append((d,ch,p))
+        matched.append((d,ch,Path(ps)))
 
     for root,recursive_channels in roots:
-        if not root.exists():
+        root_str = str(root)
+        if not os.path.isdir(root_str):
             continue
         # Direct files catch Chrome's default ~/Downloads destination.
         try:
-            for p in root.iterdir():
-                if p.is_file():
-                    consider(p,'')
+            with os.scandir(root_str) as it:
+                for entry in it:
+                    consider_entry(entry,'')
         except OSError:
             pass
         if recursive_channels:
             # Only the known channel folders are scanned; no expensive deep walk.
             for ch in channels:
-                key=str(ch['channel_key']); folder=root/str(ch['download_subdir'] or key)
-                if not folder.exists():
+                key=str(ch['channel_key']); folder_str=os.path.join(root_str, str(ch['download_subdir'] or key))
+                if not os.path.isdir(folder_str):
                     continue
                 try:
-                    for p in folder.iterdir():
-                        consider(p,key)
+                    with os.scandir(folder_str) as it:
+                        for entry in it:
+                            consider_entry(entry,key)
                 except OSError:
                     pass
     return matched
@@ -518,7 +600,7 @@ def prepare_task_images(tasks, work_date=None):
     return staged
 
 
-_ALIAS_MEMO={}
+_ALIAS_MEMO: "OrderedDict[tuple, str]" = OrderedDict()
 def flow_upload_alias(cache_path):
     """Unique upload filename for Flow.
 
@@ -528,12 +610,14 @@ def flow_upload_alias(cache_path):
     is handed to the plugin is a hard link (or copy) named '<stem>-<content hash>.<ext>' in a derived
     folder. The name changes whenever the picture's bytes change and never repeats for different pictures.
     """
-    import os, shutil
+    import shutil
     from app.services import flow_image_cache as fic
     src=Path(cache_path)
     st=src.stat(); memo_key=(str(src),st.st_size,st.st_mtime_ns)
     hit=_ALIAS_MEMO.get(memo_key)
-    if hit and Path(hit).is_file():return Path(hit)
+    if hit and os.path.isfile(hit):
+        _ALIAS_MEMO.move_to_end(memo_key)
+        return Path(hit)
     h=hashlib.sha256()
     with src.open('rb') as fh:
         for chunk in iter(lambda:fh.read(1024*1024),b''):h.update(chunk)
@@ -548,8 +632,9 @@ def flow_upload_alias(cache_path):
         try:os.link(src,tmp)
         except OSError:shutil.copy2(src,tmp)
         os.replace(tmp,alias)
-    if len(_ALIAS_MEMO)>2000:_ALIAS_MEMO.clear()
     _ALIAS_MEMO[memo_key]=str(alias)
+    while len(_ALIAS_MEMO)>1024:
+        _ALIAS_MEMO.popitem(last=False)
     return alias
 
 

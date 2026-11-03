@@ -3,7 +3,7 @@ const root=path.join(__dirname,'..');
 const content=fs.readFileSync(path.join(root,'content.js'),'utf8');
 const page=fs.readFileSync(path.join(root,'page-engine.js'),'utf8');
 const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
-assert.equal(manifest.version,'0.9.62','extension package version');
+assert.equal(manifest.version,'0.9.69','extension package version');
 assert.ok(page.includes('upload_ready:uploadReady'),'scan_media must expose finished-upload readiness');
 assert.ok(page.includes('uploading:!!flags.loading'),'scan_media must expose uploading state');
 assert.ok(page.includes("item=await waitExistingFlowImageAssetReady(instance,item,20000)"),'FRAME and MATERIAL must wait for a finished Flow asset before selection');
@@ -12,6 +12,8 @@ assert.ok(content.includes('state.stableHits>=2 && !uploadBusy'),'scanner must r
 assert.ok(content.includes('for(let check=1;check<=2;check++)'),'pre-submit gate must perform two live Flow catalog confirmations');
 assert.ok(content.includes('if(isFlowUploading())return {ok:false'),'pre-submit gate must block while Flow is still uploading');
 const preflight=content.indexOf('const uploadPreflight=await confirmAllImagesInFlowBeforeSubmit(job);');
-const claim=content.indexOf("{type:'FS_CLAIM_COMMAND',command_id:cmd}");
+const claim=content.indexOf('const outcome=await runOneTask(job,t,round,index,totalRuns);');
 assert.ok(preflight>=0 && claim>preflight,'image readiness verification must happen before command claim/attempt #1');
 console.log('PASS post-upload image existence/readiness gate before first generation attempt');
+
+assert.ok(content.includes('const allowed=await claimSegment(job.command_id,t.segment_id,false);'),'per-task ownership claim must remain');

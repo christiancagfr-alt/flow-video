@@ -9,7 +9,9 @@ try:
 except psutil.NoSuchProcess:pass
 except psutil.TimeoutExpired:raise SystemExit(1)
 p=Path(args.file)
-with p.open('rb') as f:assert hashlib.file_digest(f,'sha256').hexdigest()==args.sha256
+with p.open('rb') as f:
+    if hashlib.file_digest(f,'sha256').hexdigest()!=args.sha256:
+        raise SystemExit('Installer checksum mismatch; installation cancelled')
 if sys.platform=='win32':
     subprocess.Popen([str(p)],creationflags=subprocess.CREATE_NO_WINDOW)
 elif sys.platform=='darwin':subprocess.Popen(['/usr/bin/open',str(p)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)

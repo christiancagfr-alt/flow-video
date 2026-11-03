@@ -27,8 +27,8 @@ PRICING = {
 }
 
 def save_api_key_to_keychain(api_key: str):
-    from app.services.credential_pool import save
-    save(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, api_key)
+    from app.services.credential_pool import append_keys
+    append_keys(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, api_key)
 
 
 def _api_keys():
@@ -54,9 +54,53 @@ def delete_api_key():
     clear(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
 
 
-def _image_data_url(path: str, task_id=''):
-    from app.services.image_assets import resolve_image_asset
-    return resolve_image_asset(path, task_id).data_url()
+import threading
+
+_SESSION_LOCK = threading.Lock()
+_HTTP_SESSION = None
+
+
+def _get_http_session():
+    global _HTTP_SESSION
+    if _HTTP_SESSION is None:
+        with _SESSION_LOCK:
+            if _HTTP_SESSION is None:
+                import requests
+                from requests.adapters import HTTPAdapter
+                s = requests.Session()
+                adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16, max_retries=0)
+                s.mount("https://", adapter)
+                s.mount("http://", adapter)
+                _HTTP_SESSION = s
+    return _HTTP_SESSION
+
+
+def _post_openai_json(payload: dict, api_key: str, timeout: int) -> dict:
+    body_bytes = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        import requests
+        sess = _get_http_session()
+        resp = sess.post(API_URL, data=body_bytes, headers=headers, timeout=(15, max(30, int(timeout))))
+        if resp.status_code >= 400:
+            raise RuntimeError(f"OpenAI API HTTP {resp.status_code}: {(resp.text or '')[:1600]}")
+        return resp.json()
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        ename = type(exc).__name__.lower()
+        msg = str(exc).lower()
+        if "timeout" in ename or "timed out" in msg or isinstance(exc, (TimeoutError, socket.timeout)):
+            raise RuntimeError(f"OpenAI API 请求超时（等待 {int(timeout)} 秒仍未返回）") from exc
+        raise RuntimeError(f"无法连接 OpenAI API：{exc}") from exc
+
+
+def _image_data_url(path: str, task_id='', detail='low'):
+    from app.services.image_assets import gpt_image_data_url
+    return gpt_image_data_url(path, task_id, detail=detail)
 
 def _extract_output_text(data: dict):
     if data.get("output_text"):
@@ -114,9 +158,9 @@ DIALOGUE_MARKER = "文案： "
 
 SAFE_STATIC_ACTION_ID = "__SAFE_STATIC__"
 SAFE_STATIC_ACTION_PROMPT = (
-    "保持参考图原有身体姿态、手部位置和道具关系；不额外增加手势或大幅肢体动作。"
+    "保持参考图原有身体姿态、手部位置和道具关系。"
     "如果手中正在拿、扶、操作物品，双手/手指/握持关系与物品位置保持连续稳定，只允许眨眼、自然表情、"
-    "轻微头部和上半身呼吸式动作；不得放下、换手、抛接、旋转或重新抓取物品。"
+    "轻微头部和上半身呼吸式状态；不得放下、换手、抛接、旋转或重新抓取物品。"
 )
 
 _MOTION_REASON_CODES = (
@@ -167,7 +211,75 @@ def _unsafe_motion_for_observation(item, observation):
     return False
 
 
-def _motion_safety_rule(observation):
+def _catalog_allows_hand_gesture(catalog) -> bool:
+    try:
+        from app.core import persona
+        return persona.catalog_allows_hand_gesture(catalog)
+    except Exception:
+        return False
+
+
+def _strip_unrequested_hand_gestures(text: str) -> str:
+    """Remove unrequested hand/arm gesture clauses when no gesture preset is selected."""
+    if not text:
+        return text
+    has_marker = text.endswith(DIALOGUE_MARKER)
+    body = text[:-len(DIALOGUE_MARKER)].rstrip("\n ") if has_marker else text
+
+    s = body
+    s = re.sub(r"并以(?:一只手|双手|左手|右手)?(?:作|做)?[^，,；;。]*(?:手势|强调[^，,；;。]*)", "", s)
+    s = re.sub(r"并(?:自然|缓慢|小幅|轻微)?(?:展开双手|抬手[^，,；;。]*|做[^，,；;。]*手势|作[^，,；;。]*手势)", "", s)
+    s = re.sub(r"与胸前手势", "", s)
+    s = re.sub(r"(?:表情|面部)与手势", "面部表情", s)
+    s = re.sub(r"眼神和手势", "眼神", s)
+
+    tokens = re.split(r"([，,；;。])", s)
+    pairs = []
+    for i in range(0, len(tokens), 2):
+        clause = tokens[i]
+        delim = tokens[i + 1] if i + 1 < len(tokens) else ""
+        pairs.append([clause, delim])
+
+    gesture_action_re = re.compile(
+        r"(手势|手掌|抬手|挥手|摆手|比划|摊开|打开掌心|掌心向上|掌心向下|指腹轻点|向观众席展开|"
+        r"(?:左手|右手|双手|一只手)[^，,；;。]*(?:强调|展开|示意|指示|提示|抬起|轻抬|伸出|指向|指引|略指|邀请|提醒|计数|收拢|合十|说明|辅助|动作|开放|离开讲台|离开书页|轻触胸|落回|落下|放回|收回|回到讲台))"
+    )
+    orphan_re = re.compile(
+        r"^(?:再|随后|然后|接着|后)?(?:自然|缓慢|轻微|平稳)?(?:收回|放回|落回|落下|回到讲台|回到原处|放松)[^，,；;。]*$"
+    )
+    keep_static_re = re.compile(
+        r"(握住麦克风|握着麦克风|握麦克风|握麦|持麦克风|持麦|不离开麦克风|不离麦克风|"
+        r"抱持书本|抱住书本|抱书|保持当前|维持当前|保持原有|只延续)"
+    )
+
+    out_pairs = []
+    dropped_prev = False
+    for clause, delim in pairs:
+        c_strip = clause.strip()
+        if not c_strip:
+            continue
+        if gesture_action_re.search(c_strip) or (dropped_prev and orphan_re.match(c_strip)):
+            if keep_static_re.search(c_strip) and not any(w in c_strip for w in (
+                "手势", "强调", "展开", "示意", "指示", "提示", "抬起", "轻抬", "邀请", "伸出", "指向", "计数", "打开掌心"
+            )):
+                out_pairs.append([clause, delim])
+                dropped_prev = False
+                continue
+            if out_pairs and delim in ("；", ";", "。"):
+                if out_pairs[-1][1] in ("，", ","):
+                    out_pairs[-1][1] = delim
+            dropped_prev = True
+            continue
+        out_pairs.append([clause, delim])
+        dropped_prev = False
+
+    cleaned = "".join(c + d for c, d in out_pairs).strip(" ，,；;")
+    if has_marker:
+        return (cleaned + ("\n" if cleaned else "") + DIALOGUE_MARKER)
+    return cleaned
+
+
+def _motion_safety_rule(observation, allow_hand_gesture=True):
     posture = str(observation.get("posture") or "uncertain")
     hand_state = str(observation.get("hand_state") or "uncertain")
     object_interaction = bool(observation.get("object_interaction"))
@@ -181,16 +293,16 @@ def _motion_safety_rule(observation):
         rules.append("保持参考图当前身体姿态，不无故切换为其他姿态")
 
     if hand_state == "both_occupied":
-        rules.append("双手均被占用：两只手、手指、握持点和所持物体保持稳定连续，禁止任何额外说话手势、放下、换手或重新抓取")
+        rules.append("双手均被占用：两只手、手指、握持点和所持物体保持稳定连续，不得放下、换手或重新抓取")
     elif hand_state == "left_occupied":
-        rules.append("左手被占用：左手及其物体保持固定连续，禁止左手说话手势；仅空闲右手可在预设允许时做轻微动作")
+        rules.append("左手被占用：左手及其所持物体保持固定连续，不得放下或换手")
     elif hand_state == "right_occupied":
-        rules.append("右手被占用：右手及其物体保持固定连续，禁止右手说话手势；仅空闲左手可在预设允许时做轻微动作")
+        rules.append("右手被占用：右手及其所持物体保持固定连续，不得放下或换手")
     elif hand_state == "uncertain":
-        rules.append("手部状态无法可靠确认时采用保守动作，禁止新增明显手势或改变手与道具关系")
+        rules.append("手部保持参考图原有位置与状态，不改变手与道具关系")
 
     if object_interaction:
-        rules.append("人物正在与物品交互：只延续参考图已有的合理操作动作，不插入与任务无关的讲话手势")
+        rules.append("人物正在与物品交互：只延续参考图已有的合理操作状态，保持手与物品接触稳定")
     if praying_pose:
         rules.append("保持参考图祷告姿态和手部关系，动作轻微克制")
     return "；".join(rules)
@@ -199,6 +311,7 @@ def _motion_safety_rule(observation):
 def _sanitize_motion_selection(raw, catalog, auto_enabled=True):
     """Validate GPT's one-shot visual selection and produce deterministic preset text."""
     by_id = {str(x["id"]): x for x in catalog}
+    allow_gesture = _catalog_allows_hand_gesture(catalog)
     if not auto_enabled:
         return {
             "enabled": False, "posture": "uncertain", "hand_state": "uncertain",
@@ -265,7 +378,7 @@ def _sanitize_motion_selection(raw, catalog, auto_enabled=True):
         "reason_code": reason_code,
         "confidence": confidence,
         "preset_rule": preset_rule,
-        "safety_rule": _motion_safety_rule(observation),
+        "safety_rule": _motion_safety_rule(observation, allow_hand_gesture=allow_gesture),
     }
 
 def _dynamic_prompt_generation_guard():
@@ -283,6 +396,7 @@ def _dynamic_prompt_generation_guard():
         "若当前片段并未选择走动或移动镜头，则不要强行添加。\n"
         "当请求提供‘动作候选预设’时，必须先基于参考图只做一次动作状态判断，再从候选预设中选择安全且匹配的子集；禁止把全部候选预设同时套用。"
         "人物设置里的禁止项、道具连续性、手部连续性和自定义硬限制必须在动态动作设计中遵守；若人物手里已有物品，保持原手持状态，不得丢失、换手或出现额外手臂。\n"
+        "【输出语言硬约束｜最高优先级】除固定术语（如 hard cut）外，你输出的每条动态提示词正文（“文案： ”之前的所有情绪、表演、动作、镜头、环境、说话状态描述）必须 100% 使用简体中文编写！即使片段 JSON 中的 text 是斯瓦希里语等外文，或人物设置写有“用斯瓦希里语说文案”，也绝对禁止用斯瓦希里语或其他外语编写提示词描述！\n"
         "每条 prompt 必须以完全一致的占位符“文案： ”结束。占位符后不得输出台词、引号、解释或任何其他内容。"
         "片段 JSON 中的 text 仅用于理解语义和选择动作/镜头，绝对不要复制到输出。\n"
         "不要复述参考图连续性、防穿帮、无字幕、现场收音、口型、防失焦等固定规则；Studio 会在本地确定性追加，避免重复 token。"
@@ -416,16 +530,10 @@ def assemble_final_flow_prompt(*, dynamic_prompt: str, dialogue: str, base_templ
     segment = str(segment_rule or "").strip()
     motion = str(motion_rule or "").strip()
     motion_safety = str(motion_safety_rule or "").strip()
-    if template:
-        parts.append("【基础模板固定要求】" + template)
-    if host:
-        compact_host = _compact_host_fixed_rule(host)
-        if compact_host:
-            parts.append("【人物固定硬约束】" + compact_host)
+    # The "【基础模板固定要求】" and "【人物固定硬约束】" lines are intentionally no longer appended to the prompt.
     if motion:
         parts.append("【自动匹配人物动作预设】" + motion)
-    if camera_rule:
-        parts.append("【镜头调度执行要求】" + str(camera_rule).strip())
+    # The long English "【镜头调度执行要求】" camera block is intentionally no longer appended.
     if motion_safety:
         parts.append("【参考图动作安全约束】" + motion_safety)
     if image:
@@ -575,7 +683,7 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
     if v8:
         stable_text = flow_master_v8.developer_instructions()
     else:
-        stable_text = camera_motion.clean(core_prompt.strip()) + "\n\n" + _dynamic_prompt_generation_guard() + "\n" + camera_motion.INSTRUCTIONS
+        stable_text = camera_motion.clean(core_prompt.strip()) + "\n\n" + _dynamic_prompt_generation_guard()
 
     # Only include non-empty shared rules.
     shared_parts = []
@@ -605,13 +713,23 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
             "镜头候选预设 camera_catalog (JSON)：" + json.dumps(camera_catalog, ensure_ascii=False, separators=(",", ":")) +
             "\n你必须根据文案情感和策略，从上述目录中为每个片段挑选最合适的镜头，不可全部使用相同的镜头。只能使用这里提供的预设ID。"
         )
+    allow_hand_gesture = _catalog_allows_hand_gesture(action_catalog)
     if auto_action_match:
+        gesture_clause = (
+            "双手占用或正在操作物品时禁止选择要求自由手势/挥手/指向/大幅手部动作的预设；单手占用时禁止让被占用手参与说话手势；"
+            if allow_hand_gesture else
+            "【GPT输出限制｜仅作用于你生成文本，切勿抄入输出prompt】当前未选择任何手势预设，因此在你生成的每条 prompt 中，不要输出任何关于手势、抬手、挥手、展开双手、指向、手掌或空闲手动作的描述，也不要在 prompt 里写‘不做手势’‘禁止手势’等字眼（直接完全不提手势即可；若手中有麦克风或物品，只简单写保持握持即可）；"
+        )
         shared_parts.append(
             "动作候选预设(JSON)：" + json.dumps(action_catalog, ensure_ascii=False, separators=(",", ":")) +
             "\n自动匹配规则：先对本请求唯一参考图做一次整体判断，识别身体姿态、左右手是否被物品占用、是否双手占用、是否正在操作物品、是否为祷告姿态。"
             "然后只从上述候选预设中选择一个或多个互不冲突、最安全的预设；不得因为文案需要表达而无视参考图的手部/道具状态。"
-            "双手占用或正在操作物品时禁止选择要求自由手势/挥手/指向/大幅手部动作的预设；单手占用时禁止让被占用手参与说话手势；"
+            + gesture_clause +
             "坐姿不得选择走动/起身类预设；无法可靠判断或候选均冲突时选择 __SAFE_STATIC__。"
+        )
+    elif not allow_hand_gesture:
+        shared_parts.append(
+            "【GPT输出限制｜仅作用于你生成文本，切勿抄入输出prompt】当前未选择任何手势预设，因此在你生成的每条 prompt 中，不要输出任何关于手势、抬手、挥手、展开双手、指向、手掌或空闲手动作的描述，也不要在 prompt 里写‘不做手势’‘禁止手势’等字眼（直接完全不提手势即可）。"
         )
 
     # Compact segment structure. No duplicated task_id / verbose field names.
@@ -651,6 +769,7 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
             "若选中走动/跟拍/环绕/推进等运动，必须写成明确强制执行的真实位移：人物注明方向和连续步伐，"
             "摄影机注明起始角度、移动方向、持续位移和空间视差；人物与镜头需要同时运动时必须明确同时持续发生。"
             "【注意】你必须从 camera_catalog 中选择合适的镜头，只在 camera_id 返回其 ID，绝对不要在 prompt 中把镜头预设英文抄写出来。"
+            "每条 prompt 的画面/表演/动作/镜头描述必须全部使用简体中文编写，严禁输出斯瓦希里语或其他外文描述。"
             "不要复述候选预设全文、共享固定规则或文案正文。每条 prompt 必须以“文案： ”结束，且其后不得再有任何内容。"
         )
     elif not v8:
@@ -660,19 +779,17 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
             "情绪/表演、实际动作及细节、实际镜头执行细节、必要环境动态和说话状态。"
             "若选中走动/跟拍/环绕/推进等运动，必须写成明确强制执行的真实位移。"
             "【注意】你必须从 camera_catalog 中选择合适的镜头，只在 camera_id 返回其 ID，绝对不要在 prompt 中把镜头预设英文抄写出来。"
+            "每条 prompt 的画面/表演/动作/镜头描述必须全部使用简体中文编写，严禁输出斯瓦希里语或其他外文描述。"
             "不要复述共享固定规则，不要输出文案正文。每条 prompt 必须以“文案： ”结束，且其后不得再有任何内容。对于不同 performance_mode 的片段，请严格遵守其对应模式的基础模板和设定（例如TALKING遵守睁眼正常交流，PRAYING遵守闭眼祈祷），绝不混淆！"
         )
     if not v8:
-        dynamic_parts.append(camera_motion.INSTRUCTIONS + " Auxiliary images are DISABLED for this group.")
-        if any_praying:
-            dynamic_parts.append(camera_motion.PRAYING_INSTRUCTIONS)
         dynamic_text = "\n\n".join(dynamic_parts)
 
     # Put the stable instruction in a developer message, dynamic task + image in user.
     # The image is sent once for the whole group.
     user_content = [{"type": "input_text", "text": dynamic_text}]
     request_task_ids = ",".join(str(s.get("segment_id","")) for s in segments)
-    image_url = _image_data_url(group.get("image_path") or "", ",".join(str(s.get("segment_id", "")) for s in segments))
+    image_url = _image_data_url(group.get("image_path") or "", request_task_ids, detail=detail)
     if image_url:
         user_content.append({
             "type": "input_image",
@@ -716,9 +833,8 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
                         "id": {"type": "string"},
                         "prompt": {"type": "string"},
                         "camera_id": {"type": "string"},
-                        "camera_motion": camera_motion.SCHEMA,
                     },
-                    "required": ["id", "prompt", "camera_id", "camera_motion"],
+                    "required": ["id", "prompt", "camera_id"],
                     "additionalProperties": False,
                 },
             },
@@ -748,10 +864,7 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
     # Complete per-segment prompts now explicitly restate all execution-critical
     # constraints. Allow enough room so the model never has to compress them away.
     # Billing remains based on actual output tokens.
-    # The configured GPT-5.6 models support very large outputs. Prefer one complete
-    # response for an entire image group instead of forcing tiny request chunks.
-    # This is a budget ceiling only; usage/cost is based on tokens actually returned.
-    max_output = min(30000, max(3000, 850 * len(segments)))
+    max_output = min(30000, max(2048, 500 * len(segments)))
 
     payload = {
         "model": model,
@@ -785,15 +898,6 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
     if not image_count:
         raise ValueError('图片未加入请求，已阻止提交')
     image_log.info('[GPT_IMAGE_REQUEST] task=%s request_contains_image=true image_count=%d encoding=ok', request_task_ids,image_count)
-    req = urllib.request.Request(
-        API_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
 
     if on_request:
         try:
@@ -805,19 +909,7 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
         except Exception:
             pass
 
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenAI API HTTP {exc.code}: {body[:1600]}") from exc
-    except (TimeoutError, socket.timeout) as exc:
-        raise RuntimeError(f"OpenAI API 请求超时（等待 {int(timeout)} 秒仍未返回）") from exc
-    except urllib.error.URLError as exc:
-        reason = getattr(exc, "reason", None)
-        if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
-            raise RuntimeError(f"OpenAI API 请求超时（等待 {int(timeout)} 秒仍未返回）") from exc
-        raise RuntimeError(f"无法连接 OpenAI API：{exc}") from exc
+    data = _post_openai_json(payload, api_key, timeout)
 
     output_text = _extract_output_text(data)
     if not output_text:
@@ -837,6 +929,7 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
         result_map = built["prompts"]
         normalized_dynamic_map = built["ai_prompts"]
         motion_selection = built["motion_selection"]
+        camera_plans = {}
     else:
         motion_selection = _sanitize_motion_selection(
             parsed.get("motion_selection") or {}, action_catalog, auto_enabled=auto_action_match
@@ -850,8 +943,6 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
             sid = str(row.get("id") or "")
             prompt = str(row.get("prompt") or "")
             cam_id = str(row.get("camera_id") or "")
-            cp = camera_motion.normalize(row.get("camera_motion"))
-            camera_plans[sid] = cp
 
             if sid and prompt.strip():
                 dynamic_map[sid] = prompt
@@ -865,6 +956,39 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
         if missing:
             raise RuntimeError("批量结果缺少片段：" + ", ".join(missing[:20]))
 
+        def _is_non_chinese_dynamic(raw_text: str) -> bool:
+            body = str(raw_text or "").split("文案：")[0].split("文案:")[0].strip()
+            cn_chars = len(re.findall(r"[\u4e00-\u9fff]", body))
+            latin_chars = len(re.findall(r"[A-Za-z]", body))
+            return cn_chars < 8 and latin_chars > 20
+
+        if any(_is_non_chinese_dynamic(v) for v in dynamic_map.values()):
+            retry_payload = dict(payload)
+            retry_payload["input"] = [
+                payload["input"][0],
+                {
+                    "role": "user",
+                    "content": user_content + [{
+                        "type": "input_text",
+                        "text": "【严重错误纠正】上一轮返回误用了外语（如斯瓦希里语）编写提示词描述！请立即重新输出：每条 prompt 在“文案： ”之前的所有画面、表情、动作、镜头描述必须 100% 使用简体中文编写，严禁输出外文句子！",
+                    }],
+                },
+            ]
+            data2 = _post_openai_json(retry_payload, next_api_key() or api_key, timeout)
+            out2 = _extract_output_text(data2)
+            if out2:
+                try:
+                    parsed2 = json.loads(out2)
+                    rows2 = parsed2.get("results") or []
+                    map2 = {str(r.get("id") or ""): str(r.get("prompt") or "") for r in rows2 if r.get("id") and str(r.get("prompt") or "").strip()}
+                    if all(str(seg["segment_id"]) in map2 for seg in segments) and not any(_is_non_chinese_dynamic(v) for v in map2.values()):
+                        dynamic_map = map2
+                        data = data2
+                except Exception:
+                    pass
+            if any(_is_non_chinese_dynamic(v) for v in dynamic_map.values()):
+                raise RuntimeError("API 异常返回了外文（非中文）提示词描述，请重试。")
+
         # GPT returns only dynamic decisions.  Studio inserts the exact dialogue and
         # appends all deterministic rules locally, so output tokens are not wasted
         # repeating the same constraints dozens of times.
@@ -876,17 +1000,11 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
             seg = segment_by_id[sid]
             dialogue = str(seg.get("foreign_text") or "").strip()
             normalized_dynamic = _normalize_dynamic_prompt(raw_prompt, dialogue)
+            if not allow_hand_gesture:
+                normalized_dynamic = _strip_unrequested_hand_gestures(normalized_dynamic)
             normalized_dynamic_map[sid] = normalized_dynamic
             seg_praying = _is_praying(seg)
-            if seg_praying:
-                camera_plans[sid], front_reason = camera_motion.enforce_praying(camera_plans[sid])
-                if front_reason:
-                    try:
-                        from app.services.runtime_log import log as _rlog
-                        _rlog("praying_front_camera_corrected", level="WARNING", segment_id=sid, reason=front_reason)
-                    except Exception:
-                        pass
-            result_map[sid] = assemble_final_flow_prompt(
+            assembled = assemble_final_flow_prompt(
                 dynamic_prompt=normalized_dynamic,
                 dialogue=dialogue,
                 base_template=base_template,
@@ -895,15 +1013,10 @@ def generate_prompts_for_image(*, model, core_prompt, group, image_detail="low",
                 segment_rule=str(seg.get("segment_rule") or "").strip(),
                 motion_rule=motion_selection.get("preset_rule", "") if auto_action_match else "",
                 motion_safety_rule=motion_selection.get("safety_rule", "") if auto_action_match else "",
-                camera_rule=camera_motion.block(camera_plans[sid], praying=seg_praying),
+                camera_rule="",
                 praying=seg_praying,
             )
-
-        for sid in result_map:
-            if camera_plans[sid]["enabled"]:
-                result_map[sid] = camera_motion.clean_preserving_dialogue(
-                    result_map[sid], str(segment_by_id[sid].get("foreign_text") or "").strip()
-                )
+            result_map[sid] = camera_motion.clean_preserving_dialogue(assembled, dialogue)
 
     try:
         from app.services.runtime_log import log as runtime_log

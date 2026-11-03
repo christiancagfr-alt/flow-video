@@ -18,10 +18,20 @@ def find_ffmpeg(configured=''):
     result = shutil.which('ffmpeg')
     if result:
         return result
-    from app.services.app_paths import data_dir
-    folder=data_dir()/'packaging/ffmpeg-libs/imageio_ffmpeg/binaries'
-    for candidate in folder.glob('ffmpeg-*'):
-        if candidate.is_file() and candidate.suffix not in ('.txt','.md'):return str(candidate)
+    from app.services.app_paths import APP_ROOT, data_dir
+    import platform
+    mach = platform.machine().lower()
+    arch_tokens = ('aarch64', 'arm64') if mach in ('arm64', 'aarch64') else ('x86_64', 'amd64', 'intel')
+    for folder in (
+        data_dir() / 'packaging/ffmpeg-libs/imageio_ffmpeg/binaries',
+        APP_ROOT / 'bundled-components/packaging/ffmpeg-libs/imageio_ffmpeg/binaries',
+    ):
+        cands = [c for c in sorted(folder.glob('ffmpeg-*')) if c.is_file() and c.suffix not in ('.txt', '.md')]
+        for candidate in cands:
+            if any(tok in candidate.name.lower() for tok in arch_tokens):
+                return str(candidate)
+        if cands and mach in ('arm64', 'aarch64'):
+            return str(cands[0])
     raise ValueError('请在侧边栏“组件管理”中安装或选择 FFmpeg。')
 
 

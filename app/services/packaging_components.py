@@ -1,5 +1,5 @@
 from pathlib import Path
-import shutil,os
+import shutil,os,platform
 from app.services.app_paths import data_dir
 
 def find_node():
@@ -7,6 +7,8 @@ def find_node():
     if found:return found
     folder=data_dir()/'packaging/node'
     candidates=list(folder.glob('**/node.exe'))+list(folder.glob('**/bin/node'))
+    if platform.system()=='Darwin' and platform.machine().lower()=='x86_64':
+        candidates=[c for c in candidates if 'darwin-arm64' not in str(c)]
     if candidates:
         os.environ['PATH']=str(candidates[0].parent)+os.pathsep+os.environ.get('PATH','')
         return str(candidates[0])
