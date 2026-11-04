@@ -5,17 +5,18 @@ ROOT=Path(__file__).resolve().parents[1]
 import sys
 sys.path.insert(0,str(ROOT))
 from app.version import VERSION
-HASHES={'arm64':'11785155d0f70e634178219c20925d8f20be00a3da4684fc4f5019dd15602ef7','x86_64':'bd085c51e960f00ee33b630e2b13ac90fe90cdc3da25a0f0bc0719b1294920bf'}
+HASHES={'arm64':'8392b6ea51d94391befb2c31ebe75463f045d0b69dfcf5e1bb3234e1f5fa3405','x86_64':'7412c19d896c99431b74a18a5643e110449a7f9590fbab179c3e5ab27b9aa9e3'}
 def run(*args,**kw): subprocess.run(list(args),check=True,**kw)
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--arch',choices=HASHES,required=True);args=parser.parse_args()
-    assert platform.system()=='Darwin' and platform.machine()==args.arch
+    if platform.system()!='Darwin' or platform.machine()!=args.arch:
+        raise RuntimeError('Build on the matching native macOS architecture')
     build=ROOT/'build/macos';build.mkdir(parents=True,exist_ok=True)
     app=build/'Flow Studio.app';resources=app/'Contents/Resources';resources.mkdir(parents=True,exist_ok=True)
     native='aarch64' if args.arch=='arm64' else args.arch
-    name=f'cpython-3.13.16+20261009-{native}-apple-darwin-install_only_stripped.tar.gz'
+    name=f'cpython-3.13.18+20261026-{native}-apple-darwin-install_only_stripped.tar.gz'
     archive=build/name
-    urllib.request.urlretrieve('https://github.com/astral-sh/python-build-standalone/releases/download/20261009/'+name,archive)
+    urllib.request.urlretrieve('https://github.com/astral-sh/python-build-standalone/releases/download/20261026/'+name,archive)
     if hashlib.sha256(archive.read_bytes()).hexdigest()!=HASHES[args.arch]:
         raise ValueError('Python checksum mismatch')
     with tarfile.open(archive) as tar: tar.extractall(resources,filter='data')
@@ -37,7 +38,7 @@ def main():
     from bundle_web_plugin import copy_plugin
     copy_plugin(ROOT, resources)
     bundle(resources,python)
-    manifest={'python':'3.13.16','python_build':'20261009','architecture':args.arch,'python_sha256':HASHES[args.arch],
+    manifest={'python':'3.13.18','python_build':'20261026','architecture':args.arch,'python_sha256':HASHES[args.arch],
               'packages':json.loads(subprocess.check_output([str(python),'-m','pip','list','--format=json']))}
     (resources/'RUNTIME_MANIFEST.json').write_text(json.dumps(manifest,indent=2))
     shutil.copy2(ROOT/'assets/flowstudio.icns',resources/'flowstudio.icns')
@@ -56,6 +57,8 @@ def main():
     env['PYTHONPATH']=str(resources)+os.pathsep+str(test_deps)+os.pathsep+str(resources/'bundled-components/packaging/asr-libs')
     run(str(python),'-m','unittest','discover','-s',str(resources/'tests'),cwd=resources,env=env)
     run(str(python),str(resources/'scripts/smoke_desktop.py'),cwd=resources,env=env)
+    run(str(python),str(resources/'scripts/smoke_media.py'),cwd=resources,env=env)
+    shutil.rmtree(resources/'build/media-regression')
     for p in resources.rglob('__pycache__'): shutil.rmtree(p)
     for p in resources.rglob('*'):
         if p.is_file() and p.suffix in ('.db','.sqlite3','.log'): raise RuntimeError('Unexpected user data: '+str(p))
