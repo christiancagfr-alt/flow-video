@@ -18,17 +18,17 @@ subprocess.run([ff,'-y','-v','error','-f','lavfi','-i','color=c=navy:s=320x180:r
 logo=out/'logo.png';Image.new('RGBA',(40,30),(255,0,0,180)).save(logo)
 Image.new('RGB',(40,30),'white').save(out/'test.jpg')
 with Image.open(out/'test.jpg') as im:im.load();assert im.size==(40,30)
-styles=json.loads((root/'app/services/reels/presets.json').read_text())
+styles=json.loads((root/'app/services/reels/presets.json').read_text(encoding='utf-8'))
 results=[]
 for codec,ext in [('h264','mp4'),('prores','mov'),('vp9','webm')]:
  work=out/codec;work.mkdir(exist_ok=True)
  payload={'source':str(video),'ffmpeg':ff,'mainDuration':2,'totalDuration':2,'width':320,'height':180,'fps':25,'codec':codec,'captions':[{'start':0.3,'end':1.5,'text':'Security regression'}],'reelsStyle':styles['Descript 经典黄'],'watermarks':[{'path':str(logo),'enabled':True,'scale':20,'opacity':80,'position':'右上'}]}
  enc,_=encoder_args(ff,codec,False);dest=out/('verified.'+ext);cmd,duration=build_command(payload,dest,work,enc)
- cp=subprocess.run(cmd,capture_output=True,text=True,timeout=120);(work/'ffmpeg.log').write_text(cp.stdout+'\n'+cp.stderr)
+ cp=subprocess.run(cmd,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=120);(work/'ffmpeg.log').write_text(cp.stdout+'\n'+cp.stderr,encoding='utf-8')
  if cp.returncode:raise RuntimeError(cp.stderr[-2000:])
  meta=probe_media(dest,ff);assert meta['width']==320 and meta['height']==180 and abs(meta['duration']-2)<.15
  results.append({'codec':codec,'metadata':meta,'bytes':dest.stat().st_size});print(results[-1],flush=True)
-(out/'results.json').write_text(json.dumps(results,indent=2))
+(out/'results.json').write_text(json.dumps(results,indent=2),encoding='utf-8')
 
 # Pillow major-version regression: RGB JPEG, RGBA PNG and animated watermark.
 for source in (logo,out/'test.jpg'):

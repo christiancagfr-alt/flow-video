@@ -16,6 +16,7 @@ runner.write_text("import sys,unittest\nfrom pathlib import Path\nsys.path.inser
 env=dict(os.environ,QT_QPA_PLATFORM='offscreen',FLOWSTUDIO_DATA_DIR=str(ROOT/'build/test-data'))
 subprocess.run([str(python),str(runner)],check=True,env=env,cwd=output)
 subprocess.run([str(python),str(output/'scripts/smoke_desktop.py')],check=True,env=env,cwd=output)
+subprocess.run([str(python),str(output/'scripts/smoke_media.py')],check=True,env=env,cwd=output)
 for p in output.rglob('__pycache__'):shutil.rmtree(p)
 compiler=shutil.which('ISCC.exe') or 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe'
 subprocess.run([compiler,'/DAppVersion='+VERSION,str(ROOT/'scripts/windows-installer.iss')],check=True)
