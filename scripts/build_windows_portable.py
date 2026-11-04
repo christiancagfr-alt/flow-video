@@ -14,8 +14,7 @@ from bundle_web_plugin import iter_plugin_files
 ROOT=Path(__file__).resolve().parents[1]
 BUILD=ROOT/'build'
 OUT=BUILD/'FlowStudio-Windows'
-PYTHON_VERSION='3.13.16'
-PYTHON_SHA256='97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297'
+from build_cpython_windows import VERSION as PYTHON_VERSION
 
 def download(url):
     for attempt in range(3):
@@ -71,9 +70,8 @@ def extract_checked(archive,dest,wheel=False):
 
 def main():
     BUILD.mkdir(exist_ok=True)
-    archive=BUILD/'downloads'/f'python-{PYTHON_VERSION}-embed-amd64.zip';archive.parent.mkdir(exist_ok=True)
-    if not archive.exists():archive.write_bytes(download(f'https://www.python.org/ftp/python/{PYTHON_VERSION}/{archive.name}'))
-    if hashlib.sha256(archive.read_bytes()).hexdigest()!=PYTHON_SHA256:raise ValueError('Python checksum mismatch')
+    from build_cpython_windows import build as build_cpython
+    archive, python_build = build_cpython()
     lines=[x.strip() for x in (ROOT/'requirements-release.lock').read_text().splitlines() if '==' in x]
     with ThreadPoolExecutor(max_workers=2) as pool:records=list(pool.map(wheel_record,lines))
     (ROOT/'audit').mkdir(exist_ok=True)
@@ -87,7 +85,7 @@ def main():
     (runtime/'python313._pth').write_text('python313.zip\n.\nLib/site-packages\n..\nimport site\n',encoding='utf-8')
     # Embed mode otherwise does not process pywin32.pth on some Python builds.
     (runtime/'sitecustomize.py').write_text("import os,sys\nfrom pathlib import Path\np=Path(__file__).parent/'Lib/site-packages'\nfor name in ('win32','win32/lib','Pythonwin'):sys.path.append(str(p/name))\n_dll=os.add_dll_directory(str(p/'pywin32_system32'))\n",encoding='utf-8')
-    (OUT/'RUNTIME_MANIFEST.json').write_text(json.dumps({'python':PYTHON_VERSION,'python_sha256':PYTHON_SHA256,'wheels':records},indent=2),encoding='utf-8')
+    (OUT/'RUNTIME_MANIFEST.json').write_text(json.dumps({'python':PYTHON_VERSION,'python_sha256':python_build['runtime_sha256'],'python_build':python_build,'wheels':records},indent=2),encoding='utf-8')
     from bundle_packaging_components import bundle
     bundle(OUT,runtime/'python.exe')
     print('Portable tree prepared:',OUT,flush=True)

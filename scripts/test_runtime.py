@@ -16,6 +16,15 @@ class DatabaseTemporaryDirectory(tempfile.TemporaryDirectory):
                         connection._real_close()
                     with database._WAL_LOCK:
                         database._WAL_READY.discard(key)
+        dates = sys.modules.get('app.core.work_dates')
+        if dates is not None:
+            handles = getattr(dates._SCOPED_TLS, 'handles', {})
+            for key in list(handles):
+                if Path(key).resolve().is_relative_to(root):
+                    connection = handles.pop(key)
+                    if connection._in_use:
+                        raise RuntimeError('Test database still has an active scoped reader')
+                    connection.close()
         cache = sys.modules.get('app.services.flow_image_cache')
         if cache is not None:
             with cache._LOCK:

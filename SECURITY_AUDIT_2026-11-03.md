@@ -12,6 +12,7 @@ Python 3.13 / PySide6 / SQLite 桌面、Chrome Manifest V3 JavaScript 扩展、D
 
 | 编号 | 类别 | 严重级别 | 位置 | 状态 |
 |---|---|---|---|---|
+| N10 | 依赖 | High | scripts/build_windows_portable.py:16（CPython 3.13.16） | 已批准源码构建 3.13.18，Windows 验证中 |
 | N01 | 依赖 | Critical | requirements-release.lock:4；macOS/Linux 同名锁 | 已修复 |
 | N02 | 依赖 | High | requirements-release.lock:25 | 已修复（已批准大版本升级） |
 | N03 | 依赖 | High | requirements-release.lock:29 | 已修复 |
@@ -40,11 +41,14 @@ Python 3.13 / PySide6 / SQLite 桌面、Chrome Manifest V3 JavaScript 扩展、D
 
 另修复已有回归揭示的“手动段落类型仍标记 sheet_color”来源字段错误；测试适配本地现有任务分组、发布波次、扩展版本与原生点击逻辑，没有引入远程功能。扩展测试补全素材预扫描、恢复记录、原生点击模拟，保留上传上限、重复提交和点击目标断言。构建白名单加入 npm 锁，并在全新工作区创建 audit 目录。
 
+N10：官方 [Python 3.13.18 安全发布说明](https://www.python.org/downloads/release/python-31318/) 列出证书信任 CVE-2026-115557、Expat CVE-2026-77214/CVE-2026-102633、Windows mimetypes CVE-2024-3220、tarfile CVE-2026-114583 等修复。应用存在 urllib/ssl 默认上下文请求，因此只更新 certifi 不能覆盖所有调用；XML 入口直接可达性待确认，Windows 打包采用 ZIP 而非 tar。这里的 High 是项目综合评估，未为每条 CVE 臆造 CVSS。新版发布须通过源码构建和回归，禁止回退旧运行时。
+
 ## 已决定的取舍
 
 1. R01：任意已安装 Chrome 扩展可经 /heartbeat 领取桥接令牌。恶意扩展因而能调用桥接授权操作。开发者选择保持自动连接并接受此风险；本次不增加配对。后续建议扩展固定身份配对/用户授权，届时需要调整安装体验。
 2. R04：已被恶意脚本控制的 Flow 页面可伪造 MAIN-world 自动化事件。开发者选择保留自动化并接受风险；这种页面不在当前安全边界内。后续重做消息协议和敏感动作授权。
-3. Pillow 与 FFmpeg 大版本升级均已批准。没有待回复的升级问题。
+3. Pillow 与 FFmpeg 大版本升级均已批准。
+4. 新发现 CPython 3.13.16 运行时尚受标准库安全问题影响；3.13.18 已修复但只有源码发行。待开发者选择：从官方源码构建 3.13.18（建议，保留 ABI），迁移官方 Windows 二进制 Python 3.14.10（需重新核对全部 wheel），或明确接受风险保留旧运行时。开发者已于 2026-11-04 批准从官方源码构建 3.13.18；下载固定 SHA-256，采用官方 PCbuild 和 embed 布局，先测试 SSL/XML/tar/临时目录/SQLite 等标准库再打包。
 
 ## 密钥与供应链
 

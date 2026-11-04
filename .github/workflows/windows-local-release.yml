@@ -61,6 +61,9 @@ jobs:
           name: windows-validation
           path: |
             audit/wheel-manifest.json
+            audit/cpython-build.log
+            audit/cpython-tests.log
+            audit/cpython-build-manifest.json
             audit/windows-package-audit.json
             audit/windows-npm-audit.json
             build/FlowStudio-Windows/RUNTIME_MANIFEST.json
@@ -68,7 +71,6 @@ jobs:
             build/FlowStudio-Windows/build/media-regression/*/ffmpeg.log
           if-no-files-found: warn
   publish:
-    if: ${{ false }} # Hold for the CPython security-runtime decision.
     needs: windows
     runs-on: ubuntu-latest
     permissions:
