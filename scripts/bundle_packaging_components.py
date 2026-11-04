@@ -1,6 +1,7 @@
 """Called by native builders using the packaged Python ABI, never copy user data."""
 import json
 import os
+import platform
 import shutil
 import subprocess
 from pathlib import Path
@@ -27,4 +28,4 @@ def bundle(application, python):
     for cache in list(root.rglob('__pycache__')): shutil.rmtree(cache)
     # A failed download must fail the build, never produce a nominal offline installer.
     if not any((root/'models').rglob('model.bin')): raise RuntimeError('Missing base model')
-    (destination/'manifest.json').write_text(json.dumps({'components':names,'model':'base'}), 'utf-8')
+    (destination/'manifest.json').write_text(json.dumps({'components':names,'model':'base','architecture':platform.machine().lower()}), 'utf-8')

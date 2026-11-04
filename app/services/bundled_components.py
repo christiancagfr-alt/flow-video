@@ -15,14 +15,16 @@ def restore(components=None):
     target = data_dir() / 'packaging'
     target.mkdir(parents=True, exist_ok=True)
     is_x86_mac = (sys.platform == 'darwin' and platform.machine().lower() == 'x86_64')
-    for name in json.loads(manifest.read_text('utf-8'))['components']:
+    metadata = json.loads(manifest.read_text('utf-8'))
+    native_x86 = metadata.get('architecture') == 'x86_64'
+    for name in metadata['components']:
         if name not in ('node','remotion','models','asr-libs','ffmpeg-libs'):
             raise ValueError('Invalid bundled component')
         if components is not None and name not in components:continue
         src_dir = source / name
         if is_x86_mac and name == 'asr-libs' and (source / 'asr-libs-x86_64').is_dir():
             src_dir = source / 'asr-libs-x86_64'
-        elif is_x86_mac and name in ('node', 'remotion') and not (source / f'{name}-x86_64').is_dir():
+        elif is_x86_mac and not native_x86 and name in ('node', 'remotion') and not (source / f'{name}-x86_64').is_dir():
             continue
         destination = target / name
         # Preserve independently installed/upgraded components.

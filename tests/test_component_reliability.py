@@ -63,7 +63,7 @@ class ReliabilityTests(unittest.TestCase):
             app=Path(temp)/'app'; data=Path(temp)/'user'
             source=app/'bundled-components/packaging/node';source.mkdir(parents=True)
             (source/'runtime').write_text('bundled')
-            (source.parent.parent/'manifest.json').write_text(json.dumps({'components':['node']}))
+            (source.parent.parent/'manifest.json').write_text(json.dumps({'components':['node'],'architecture':__import__('platform').machine().lower()}))
             with patch.object(bundled,'APP_ROOT',app),patch.object(bundled,'data_dir',return_value=data):
                 bundled.restore(('ffmpeg-libs',))
                 self.assertFalse((data/'packaging/node').exists())
